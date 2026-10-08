@@ -1,0 +1,8 @@
+.build/
+.runtime/
+Models/
+dist/
+TestArtifacts/
+.DS_Store
+*.xcuserstate
+
