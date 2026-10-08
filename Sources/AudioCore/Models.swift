@@ -52,12 +52,14 @@ public struct TranscriptSegment: Codable, Identifiable, Equatable, Sendable {
     public var speaker: Int?
     public var speakerEdited: Bool
     public var needsReview: Bool
+    public var reviewed: Bool?
+    public var pendingReview: Bool { needsReview && reviewed != true }
     public var text: String { edited ?? original }
-    public var manuallyEdited: Bool { edited != nil || speakerEdited }
+    public var manuallyEdited: Bool { edited != nil || speakerEdited || reviewed == true }
     public init(id: String = UUID().uuidString, start: Double, end: Double, original: String,
-                edited: String? = nil, speaker: Int? = nil, speakerEdited: Bool = false, needsReview: Bool = false) {
+                edited: String? = nil, speaker: Int? = nil, speakerEdited: Bool = false, needsReview: Bool = false, reviewed: Bool? = nil) {
         self.id = id; self.start = start; self.end = end; self.original = original
-        self.edited = edited; self.speaker = speaker; self.speakerEdited = speakerEdited; self.needsReview = needsReview
+        self.edited = edited; self.speaker = speaker; self.speakerEdited = speakerEdited; self.needsReview = needsReview; self.reviewed = reviewed
     }
 }
 
@@ -164,7 +166,7 @@ public enum SpeakerMatcher {
         var cursor = 0
         return segments.sorted { $0.start < $1.start }.map { source in
             var segment = source
-            guard !segment.speakerEdited else { return segment }
+            guard !segment.speakerEdited, segment.reviewed != true else { return segment }
             while cursor < ordered.count && ordered[cursor].end <= segment.start { cursor += 1 }
             var weights: [Int: Double] = [:]
             var index = cursor
@@ -188,11 +190,11 @@ public enum SpeakerMatcher {
 
 public enum TranscriptExport {
     public static func render(title: String, segments: [TranscriptSegment], names: [Int: String], srt: Bool,
-                              punctuate: Bool = true, paragraphBreaks: Bool = true) -> String {
+                              punctuate: Bool = true, paragraphBreaks: Bool = true, density: ReadingDensity = .balanced, overrides: [String: String] = [:]) -> String {
         if !srt {
             let paragraphs = UtteranceGrouping.make(segments).map { utterance in
                 let name = utterance.speaker.flatMap { names[$0] } ?? SpeakerMatcher.defaultName(utterance.speaker)
-                let reading = ReadingTranscript(segments: utterance.segments, punctuate: punctuate, paragraphBreaks: paragraphBreaks)
+                let reading = ReadingTranscript(segments: utterance.segments, punctuate: punctuate, paragraphBreaks: paragraphBreaks, density: density, overrides: overrides)
                 return "[\(TimeFormat.clock(utterance.start)) – \(TimeFormat.clock(utterance.end))] \(name)\n\(reading.text)"
             }
             return title + "\n\n" + paragraphs.joined(separator: "\n\n") + "\n"

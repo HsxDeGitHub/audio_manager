@@ -14,7 +14,7 @@ cp "$BIN_DIR/AudioWorker" "$APP_DIR/Contents/MacOS/AudioWorker"
 mkdir -p "$APP_DIR/Contents/Resources/Tools"
 cp .runtime/tools/whisper-cli .runtime/tools/ffmpeg "$APP_DIR/Contents/Resources/Tools/"
 mkdir -p "$APP_DIR/Contents/Resources/Tools/sherpa/bin" "$APP_DIR/Contents/Resources/Tools/sherpa/lib"
-cp .runtime/tools/sherpa/bin/sherpa-onnx-offline-speaker-diarization "$APP_DIR/Contents/Resources/Tools/sherpa/bin/"
+cp .runtime/tools/sherpa/bin/sherpa-onnx-offline-punctuation .runtime/tools/sherpa/bin/sherpa-onnx-offline-speaker-diarization "$APP_DIR/Contents/Resources/Tools/sherpa/bin/"
 cp -L .runtime/tools/sherpa/lib/libonnxruntime.dylib "$APP_DIR/Contents/Resources/Tools/sherpa/lib/"
 cp -R .runtime/tools/Licenses "$APP_DIR/Contents/Resources/"
 cp THIRD_PARTY_NOTICES.md "$APP_DIR/Contents/Resources/"
@@ -28,8 +28,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>听阅</string>
   <key>CFBundleExecutable</key><string>InterviewAudio</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.1.1</string>
-  <key>CFBundleVersion</key><string>3</string>
+  <key>CFBundleShortVersionString</key><string>1.2.0</string>
+  <key>CFBundleVersion</key><string>4</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
@@ -38,7 +38,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 PLIST
 swift Scripts/icon.swift "$APP_DIR/Contents/Resources"
 iconutil -c icns "$APP_DIR/Contents/Resources/AppIcon.iconset" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
-find "$APP_DIR/Contents" -type f \( -name '*.dylib' -o -name 'whisper-cli' -o -name 'ffmpeg' -o -name 'AudioWorker' -o -name 'sherpa-onnx-offline-speaker-diarization' \) -exec codesign --force --sign - {} \;
+find "$APP_DIR/Contents" -type f \( -name '*.dylib' -o -name 'whisper-cli' -o -name 'ffmpeg' -o -name 'AudioWorker' -o -name 'sherpa-onnx-offline-speaker-diarization' -o -name 'sherpa-onnx-offline-punctuation' \) -exec codesign --force --sign - {} \;
 codesign --force --sign - "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
 # Reference the project models without duplicating 3 GB. Settings also support any external model directory.

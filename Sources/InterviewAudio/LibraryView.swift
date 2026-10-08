@@ -11,6 +11,8 @@ struct LibraryView: View {
     @UIState private var renaming: Recording?
     @UIState private var nameDraft = ""
     @FocusState private var searchFocused: Bool
+    @ObservedObject private var installer: ModelInstaller
+    init(model: AppModel) { self.model = model; installer = model.installer }
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -25,6 +27,7 @@ struct LibraryView: View {
         }
         .tint(accent)
         .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(isPresented: $model.showAbout) { AboutView() }
         .sheet(isPresented: $model.showSettings) { ModelSettingsView(model: model, installer: model.installer) }
         .sheet(item: $renaming) { recording in
             VStack(alignment: .leading, spacing: 18) {
@@ -91,9 +94,24 @@ struct LibraryView: View {
                 Text("音频资料库").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
                 Spacer(); Text("\(model.recordings.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }.padding(18)
+            VStack(spacing: 9) {
+                TextField("筛选音频名称", text: $model.libraryTitleFilter).textFieldStyle(.roundedBorder)
+                HStack(spacing: 6) {
+                    Picker("排序", selection: Binding(get: { model.librarySort }, set: { model.setLibrarySort($0) })) {
+                        ForEach(LibrarySort.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }.labelsHidden()
+                    Picker("状态", selection: Binding(get: { model.libraryFilter }, set: { model.setLibraryFilter($0) })) {
+                        ForEach(LibraryFilter.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }.labelsHidden()
+                }.font(.caption)
+            }.padding(.horizontal, 14).padding(.bottom, 12)
             ScrollView {
                 LazyVStack(spacing: 6) {
-                    ForEach(model.recordings) { recording in
+                    if model.visibleRecordings.isEmpty {
+                        Text(model.recordings.isEmpty ? "导入第一份音频" : "没有符合筛选条件的音频").font(.caption).foregroundStyle(.secondary).padding(20)
+                        if !model.recordings.isEmpty { Button("清除筛选") { model.libraryTitleFilter = ""; model.setLibraryFilter(.all) }.font(.caption) }
+                    }
+                    ForEach(model.visibleRecordings) { recording in
                         Button { Task { await model.select(recording.id) } } label: {
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "waveform").font(.system(size: 16)).foregroundStyle(accent).padding(.top, 3)
@@ -125,6 +143,11 @@ struct LibraryView: View {
             Divider()
             VStack(alignment: .leading, spacing: 10) {
                 Button("转写全部待处理录音") { model.enqueuePending() }.disabled(model.recordings.allSatisfy { $0.state != .idle })
+                HStack {
+                    Label(model.ready ? "模型已就绪 · 可离线识别" : "模型准备中 / 尚未就绪", systemImage: model.ready ? "checkmark.shield" : "cpu").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                if model.taskCount > 0 { Text("\(model.taskCount) 项后台任务 · \(model.phaseMessage)").font(.caption).foregroundStyle(.secondary) }
                 Label("音频留在原位置", systemImage: "externaldrive").font(.caption).foregroundStyle(.secondary)
                 if !model.notice.isEmpty { Text(model.notice).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
             }.padding(16)
@@ -133,7 +156,17 @@ struct LibraryView: View {
     }
     private var searchResults: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("\(model.hits.count) 个匹配片段").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).padding(18)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text(model.activeHitIndex.map { "\($0 + 1) / \(model.hits.count) 个结果" } ?? "\(model.hits.count) 个匹配片段")
+                    Spacer()
+                    Button { model.navigateHit(-1) } label: { Image(systemName: "chevron.up") }.help("上一个结果 ⇧⌘G").disabled(model.hits.isEmpty)
+                    Button { model.navigateHit(1) } label: { Image(systemName: "chevron.down") }.help("下一个结果 ⌘G").disabled(model.hits.isEmpty)
+                }
+                if model.hasSearchOrigin {
+                    Button { Task { await model.returnFromSearch() } } label: { Label("返回搜索前的位置", systemImage: "arrow.uturn.backward") }
+                }
+            }.font(.system(size: 12)).foregroundStyle(.secondary).padding(15)
             if model.hits.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "text.magnifyingglass").font(.largeTitle).foregroundStyle(.tertiary)
@@ -141,6 +174,7 @@ struct LibraryView: View {
                     Text("搜索仅覆盖已转写的当前版本").font(.caption).foregroundStyle(.tertiary)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 1) {
                         ForEach(model.hits) { hit in
@@ -150,10 +184,12 @@ struct LibraryView: View {
                                     highlighted(hit.preview, term: model.searchText, matchRange: hit.previewHighlightRange).font(.system(size: 13)).lineLimit(4).multilineTextAlignment(.leading)
                                     Label("\(TimeFormat.clock(hit.segment.start)) · \(hit.speakerName)", systemImage: "play.circle").font(.caption).foregroundStyle(accent)
                                 }.padding(15).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                            }.buttonStyle(.plain)
+                            }.buttonStyle(.plain).background(model.activeHitID == hit.id ? accent.opacity(0.1) : .clear)
+                                .id(hit.id)
                             Divider().padding(.horizontal, 15)
                         }
                     }
+                }.onChange(of: model.activeHitID) { _, id in if let id { proxy.scrollTo(id, anchor: .center) } }
                 }
             }
         }.background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
@@ -209,7 +245,7 @@ struct SpeakerNameField: View {
             TextField("名称", text: $value).textFieldStyle(.roundedBorder)
                 .onSubmit { model.renameSpeaker(speaker, name: value) }
             Button("保存") { model.renameSpeaker(speaker, name: value) }
-        }.onAppear { value = model.speakerName(speaker) }
+        }.onAppear { value = model.speakerName(speaker) }.onChange(of: model.names[speaker]) { _, _ in value = model.speakerName(speaker) }
     }
 }
 
@@ -242,6 +278,9 @@ struct ModelSettingsView: View {
                 Spacer()
                 Button("更换…") { Task { await model.chooseModelsDirectory() } }.disabled(installer.busy || model.activeJobID != nil)
             }
+            if !installer.valid.contains(ModelSpec.punctuation.id), !installer.busy {
+                Button("下载智能标点模型（可选）") { Task { await installer.download(directory: model.modelsDirectory, specs: [ModelSpec.punctuation]); model.refreshPunctuation() } }.disabled(model.activeJobID != nil)
+            }
             if installer.busy {
                 if let progress = installer.progress { ProgressView(value: progress); Text("\(Int(progress * 100))%").font(.caption.monospacedDigit()) }
                 else { ProgressView().controlSize(.small) }
@@ -255,7 +294,7 @@ struct ModelSettingsView: View {
                     Button("下载缺少的模型") { Task { await installer.download(directory: model.modelsDirectory) } }.buttonStyle(.borderedProminent).disabled(model.activeJobID != nil)
                 }
                 Spacer()
-                Button(installer.ready ? "完成" : "稍后设置") { dismiss(); if installer.ready { model.enqueuePending() } }.keyboardShortcut(.defaultAction)
+                Button(installer.ready ? "完成" : "稍后设置") { dismiss(); model.refreshPunctuation(); if installer.ready { model.enqueuePending() } }.keyboardShortcut(.defaultAction)
             }
         }.padding(28).frame(width: 610)
     }

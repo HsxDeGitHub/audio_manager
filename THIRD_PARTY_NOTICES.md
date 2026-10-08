@@ -9,6 +9,7 @@ This application uses separate local executables. It does not send recordings to
 - **ONNX Runtime**, MIT license. Included by the official sherpa-onnx native release. Source: https://github.com/microsoft/onnxruntime.
 - **pyannote segmentation 3.0 ONNX model**, MIT license as distributed with the official sherpa-onnx model archive. Model source: https://huggingface.co/pyannote/segmentation-3.0.
 - **3D-Speaker ERes2Net Chinese speaker embedding**, official sherpa-onnx model distribution. Project: https://github.com/modelscope/3D-Speaker (Apache-2.0).
+- **Optional CT-Transformer zh/en INT8 punctuation weights** (2024-04-12), official sherpa-onnx distribution: https://k2-fsa.github.io/sherpa/onnx/punctuation/pretrained_models.html. Converted from https://modelscope.cn/models/iic/punc_ct-transformer_zh-cn-common-vocab272727-pytorch/summary. The original model card and licensing terms apply. Weights are kept outside the app bundle.
 - **FFmpeg 7.1**, executable from the macOS ARM64 `imageio-ffmpeg` 0.6.0 wheel. FFmpeg version/configuration can be obtained with `ffmpeg -version`; this build enables GPL components. Upstream source: https://ffmpeg.org/download.html, executable build project: https://github.com/imageio/imageio-binaries, wrapper distribution: https://pypi.org/project/imageio-ffmpeg/0.6.0/. The wrapper package license is bundled in Resources/Licenses.
 
 Models remain outside the app bundle. Model downloads are checked against pinned SHA-256 digests before use.

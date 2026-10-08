@@ -13,6 +13,8 @@ struct ParagraphTextView: NSViewRepresentable {
     let followPlayback: Bool
     let playing: Bool
     let punctuate: Bool
+    let overrides: [String: String]
+    let density: ReadingDensity
     let paragraphBreaks: Bool
     var onPlay: (String) -> Void
     var onEdit: (String) -> Void
@@ -34,11 +36,11 @@ struct ParagraphTextView: NSViewRepresentable {
     }
     func updateNSView(_ view: NSTextView, context: Context) {
         let coordinator = context.coordinator
-        let joined = ReadingTranscript(segments: segments, punctuate: punctuate, paragraphBreaks: paragraphBreaks)
+        let joined = ReadingTranscript(segments: segments, punctuate: punctuate, paragraphBreaks: paragraphBreaks, density: density, overrides: overrides)
         let active = activeID.flatMap { joined.ranges[$0] == nil ? nil : $0 }
         let focused = focusedID.flatMap { joined.ranges[$0] == nil ? nil : $0 }
         let key = RenderKey(segments: segments, fontSize: fontSize, active: active, focused: focused, search: searchTerm,
-                            punctuate: punctuate, paragraphBreaks: paragraphBreaks)
+                            punctuate: punctuate, paragraphBreaks: paragraphBreaks, density: density, overrides: overrides)
         let activeChanged = coordinator.renderKey?.active != active
         coordinator.onPlay = onPlay; coordinator.onEdit = onEdit
         coordinator.segments = Dictionary(uniqueKeysWithValues: segments.map { ($0.id, $0) })
@@ -58,6 +60,7 @@ struct ParagraphTextView: NSViewRepresentable {
                     let tail = (joined.text as NSString).rangeOfComposedCharacterSequence(at: NSMaxRange(range) - 1)
                     value.addAttribute(.kern, value: fontSize * 0.22, range: tail)
                 }
+                if segment.pendingReview { value.addAttributes([.underlineStyle: NSUnderlineStyle.patternDot.rawValue | NSUnderlineStyle.single.rawValue, .underlineColor: NSColor.systemOrange], range: range) }
                 if segment.id == active {
                     value.addAttributes([.backgroundColor: ReaderTheme.tint.withAlphaComponent(0.16), .foregroundColor: ReaderTheme.tint], range: range)
                 }
@@ -100,7 +103,7 @@ struct ParagraphTextView: NSViewRepresentable {
     }
     struct RenderKey: Equatable {
         var segments: [TranscriptSegment]; var fontSize: Double; var active: String?; var focused: String?; var search: String
-        var punctuate: Bool; var paragraphBreaks: Bool
+        var punctuate: Bool; var paragraphBreaks: Bool; var density: ReadingDensity; var overrides: [String: String]
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
         weak var view: NSTextView?
@@ -150,7 +153,7 @@ private final class ParagraphNativeTextView: NSTextView {
         clearHover(); hovered = id
         if let id, let range = coordinator?.ranges[id] {
             layoutManager?.addTemporaryAttribute(.backgroundColor, value: ReaderTheme.tint.withAlphaComponent(0.08), forCharacterRange: range)
-            if let sentence = coordinator?.segments[id] { toolTip = "回听 \(TimeFormat.clock(sentence.start)) – \(TimeFormat.clock(sentence.end)) · 右键校对" }
+            if let sentence = coordinator?.segments[id] { toolTip = "回听 \(TimeFormat.clock(sentence.start)) – \(TimeFormat.clock(sentence.end)) · \(sentence.pendingReview ? "待核对" : sentence.manuallyEdited ? "已校对" : "识别原稿") · 右键校对" }
         }
     }
     override func mouseExited(with event: NSEvent) { clearHover() }

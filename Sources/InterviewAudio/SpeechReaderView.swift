@@ -14,10 +14,14 @@ struct TranscriptView: View {
             Divider()
             if !model.segments.isEmpty {
                 readerToolbar
+                if model.selectionMode { BulkReviewBar(model: model) }
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(model.utterances) { utterance in
+                            if model.visibleUtterances.isEmpty {
+                                Text(model.reviewFilter == .pending ? "没有待核对的句子" : "暂无符合条件的发言").foregroundStyle(.secondary).padding(40)
+                            }
+                            ForEach(model.visibleUtterances) { utterance in
                                 SpeechBlock(model: model, player: player, utterance: utterance, followPlayback: followPlayback)
                                     .id(utterance.id)
                             }
@@ -93,26 +97,41 @@ struct TranscriptView: View {
                 HStack(spacing: 10) {
                     if let progress = model.progress { ProgressView(value: progress).frame(width: 120); Text("\(Int(progress * 100))%").monospacedDigit() }
                     else { ProgressView().controlSize(.small) }
-                    Text(recording.state == .diarizing ? "正在整理说话人，文字已可阅读" : "正在本机转写文字").foregroundStyle(.secondary)
+                    Text(model.phaseMessage.isEmpty ? recording.state.title : model.phaseMessage).foregroundStyle(.secondary)
                     Spacer(); Button("取消") { model.cancel(recording.id) }
                 }.font(.caption)
             } else if recording.state == .queued {
-                HStack { Text("已加入处理队列").font(.caption).foregroundStyle(.secondary); Spacer(); Button("取消排队") { model.cancel(recording.id) } }
+                HStack { Text("排队第 \(model.queuePosition(recording.id) ?? 1) 位").font(.caption).foregroundStyle(.secondary); Spacer(); Button("取消排队") { model.cancel(recording.id) } }
             }
         }.padding(.horizontal, 26).padding(.vertical, 20)
     }
     private var readerToolbar: some View {
         HStack(spacing: 14) {
             Button { showSpeakers.toggle() } label: { Label("说话人", systemImage: "person.2") }
-                .popover(isPresented: $showSpeakers) { SpeakerSettingsView(model: model).padding(20).frame(width: 340) }
+                .popover(isPresented: $showSpeakers) { SpeakerSettingsView(model: model).padding(20).frame(width: 470) }
             Menu {
+                Toggle("智能标点（本地）", isOn: Binding(get: { model.smartPunctuation }, set: { model.setSmartPunctuation($0) }))
+                if !model.installer.valid.contains(ModelSpec.punctuation.id) { Button("准备智能标点模型…") { model.showSettings = true } }
                 Toggle("自动补标点", isOn: Binding(get: { model.readingPunctuation }, set: { model.setReadingPunctuation($0) }))
                 Toggle("长发言适当换行", isOn: Binding(get: { model.readingParagraphBreaks }, set: { model.setReadingParagraphBreaks($0) }))
+                Picker("阅读密度", selection: Binding(get: { model.readingDensity }, set: { model.setReadingDensity($0) })) {
+                    ForEach(ReadingDensity.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
                 Divider()
                 ForEach([14.0,16,18,20,22], id: \.self) { size in
                     Button("\(Int(size)) 号" + (model.readerFontSize == size ? " ✓" : "")) { model.setReaderFontSize(size) }
                 }
             } label: { Label("排版", systemImage: "textformat.size") }.menuStyle(.borderlessButton).fixedSize().help("标点、分段与字号")
+            Picker("核对筛选", selection: $model.reviewFilter) {
+                ForEach(ReviewFilter.allCases, id: \.self) { Text($0 == .pending ? "待核对 \(model.pendingReviewCount)" : $0.title).tag($0) }
+            }.labelsHidden().frame(width: 112)
+            Button { model.selectionMode.toggle(); if !model.selectionMode { model.bulkSelection = [] } } label: { Image(systemName: model.selectionMode ? "checkmark.circle.fill" : "checklist") }.help("批量选择发言")
+            Menu {
+                Button(model.undoLabel.map { "撤销：" + $0 } ?? "没有可撤销的修改") { model.undoEdit() }.disabled(model.undoLabel == nil)
+                Button(model.redoLabel.map { "重做：" + $0 } ?? "没有可重做的修改") { model.undoEdit(redo: true) }.disabled(model.redoLabel == nil)
+            } label: { Image(systemName: "arrow.uturn.backward") }.menuStyle(.borderlessButton).fixedSize().help("校对修改历史")
+            if model.punctuationBusy { ProgressView().controlSize(.mini).help("正在本机优化阅读标点") }
+            else if !model.punctuationMessage.isEmpty { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).help(model.punctuationMessage) }
             Spacer()
             Button { model.locateCurrentSentence() } label: { Image(systemName: "scope") }.help("定位当前播放句子 ⇧⌘L").disabled(model.currentSegmentID == nil)
             Toggle("跟随播放", isOn: $followPlayback).toggleStyle(.checkbox)
@@ -134,6 +153,10 @@ struct SpeechBlock: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
+                if model.selectionMode {
+                    Toggle("选择这次发言", isOn: Binding(get: { Set(utterance.segments.map(\.id)).isSubset(of: model.bulkSelection) }, set: { _ in model.toggleSelection(utterance) }))
+                        .labelsHidden().toggleStyle(.checkbox)
+                }
                 Text(avatar).font(.system(size: 11, weight: .semibold)).foregroundStyle(accent)
                     .frame(width: 25, height: 25).background(accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
                 speakerMenu
@@ -145,6 +168,9 @@ struct SpeechBlock: View {
                 if utterance.hasEdits { Text("已校对").font(.system(size: 10)).foregroundStyle(.secondary) }
                 if utterance.reviewCount > 0 { Text("\(utterance.reviewCount) 句待核对").font(.system(size: 10)).foregroundStyle(.orange) }
                 Menu {
+                    Button("标记整段已核对") { model.markReviewed(utterance.segments.map(\.id)) }
+                    Button("重新标为待核对") { model.markReviewed(utterance.segments.map(\.id), reviewed: false) }
+                    Divider()
                     Button("逐句校对这次发言…") { editingUtterance = true }
                     Button("复制这次发言") { model.copyText(model.readingText(utterance)) }
                     Button("从这次发言开始播放") { if let first = utterance.segments.first { model.playSegment(first) } }
@@ -154,7 +180,7 @@ struct SpeechBlock: View {
                               activeID: model.currentSegmentID, focusedID: model.focusSegmentID,
                               focusRequest: model.focusRequestID, searchTerm: model.searchText,
                               followPlayback: followPlayback, playing: player.playing,
-                              punctuate: model.readingPunctuation, paragraphBreaks: model.readingParagraphBreaks,
+                              punctuate: model.readingPunctuation, overrides: model.readingOverrides, density: model.readingDensity, paragraphBreaks: model.readingParagraphBreaks,
                               onPlay: { id in if let sentence = utterance.segments.first(where: { $0.id == id }) { model.playSegment(sentence) } },
                               onEdit: { id in editingSentence = utterance.segments.first(where: { $0.id == id }) })
                 .fixedSize(horizontal: false, vertical: true)
@@ -179,18 +205,62 @@ struct SpeechBlock: View {
 
 struct SentenceEditor: View {
     @ObservedObject var model: AppModel
+    @ObservedObject private var player: PlayerController
     let sentence: TranscriptSegment
+    init(model: AppModel, sentence: TranscriptSegment) { self.model = model; self.sentence = sentence; player = model.player }
     @Environment(\.dismiss) private var dismiss
+    @UIState private var currentID = ""
     @UIState private var draft = ""
     @UIState private var initialDraft = ""
+    @UIState private var looping = false
+    @UIState private var markDone = true
+    private var current: TranscriptSegment { model.segments.first { $0.id == currentID } ?? sentence }
+    private var next: TranscriptSegment? {
+        guard let index = model.segments.firstIndex(where: { $0.id == current.id }), index + 1 < model.segments.count else { return nil }
+        return model.segments[index + 1]
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack { Text("校对这句话").font(.headline); Spacer(); Button("回听") { model.playSegment(sentence) } }
-            Text("\(TimeFormat.clock(sentence.start)) – \(TimeFormat.clock(sentence.end)) · 保存后仍可定位回听").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text("校对这句话").font(.headline); Spacer()
+                Button("回听") { looping = false; model.playSegment(current) }.disabled(!model.player.available)
+                Toggle("循环回听", isOn: $looping).toggleStyle(.checkbox).disabled(!model.player.available)
+            }
+            HStack {
+                Text("\(TimeFormat.clock(current.start)) – \(TimeFormat.clock(current.end)) · \(model.speakerName(current.speaker))")
+                Spacer()
+                Text("回听位置 " + TimeFormat.clock(player.position)).monospacedDigit()
+                Picker("校对倍速", selection: Binding(get: { player.speed }, set: { player.setSpeed($0) })) {
+                    ForEach([Float(0.75),1,1.25,1.5,2], id: \.self) { Text(String(format: "%g×",$0)).tag($0) }
+                }.labelsHidden().frame(width: 70)
+            }.font(.caption).foregroundStyle(.secondary)
             TextEditor(text: $draft).font(.system(size: 16)).frame(height: 170).padding(8).background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-            DisclosureGroup("识别原稿") { Text(sentence.original).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
-            HStack { Button("恢复原稿") { draft = sentence.original }; Spacer(); Button("取消") { dismiss() }.keyboardShortcut(.cancelAction); Button("保存") { if draft != initialDraft { model.editText(sentence.id, text: draft) }; dismiss() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction) }
-        }.padding(24).frame(width: 550).onAppear { initialDraft = model.readingSentence(sentence); draft = initialDraft }
+            HStack {
+                Picker("说话人", selection: Binding(get: { current.speaker ?? -1 }, set: { model.editSpeaker(current.id, speaker: $0 < 0 ? nil : $0) })) {
+                    Text("未识别").tag(-1)
+                    ForEach(Array(Set(model.segments.compactMap(\.speaker))).sorted(), id: \.self) { Text(model.speakerName($0)).tag($0) }
+                }.frame(width: 220)
+                Spacer(); Toggle("保存时标记已核对", isOn: $markDone).toggleStyle(.checkbox)
+            }
+            DisclosureGroup("识别原稿") { Text(current.original).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            HStack {
+                Button("恢复原稿") { draft = current.original }; Spacer()
+                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存并下一句") { save(); if let next { load(next); if looping { startLoop() } } }.disabled(next == nil)
+                Button("保存") { save(); dismiss() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+            }
+        }.padding(24).frame(width: 660)
+            .onAppear { load(sentence) }
+            .onChange(of: looping) { _, enabled in if enabled { startLoop() } else { model.player.stopLoop() } }
+            .onDisappear { if looping { model.player.stopLoop(); model.player.pause() } }
+    }
+    private func load(_ segment: TranscriptSegment) {
+        currentID = segment.id; initialDraft = model.readingSentence(segment); draft = initialDraft
+        model.focusSegmentID = segment.id; model.focusRequestID = UUID()
+    }
+    private func startLoop() { model.player.startLoop(start: max(0,current.start - model.preRoll), end: current.end) }
+    private func save() {
+        model.saveCorrection(current.id, text: draft != initialDraft ? draft : nil, reviewed: markDone)
     }
 }
 
@@ -200,6 +270,7 @@ struct UtteranceEditor: View {
     @Environment(\.dismiss) private var dismiss
     @UIState private var drafts: [String: String] = [:]
     @UIState private var initialDrafts: [String: String] = [:]
+    @UIState private var loopID: String?
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("逐句校对这次发言").font(.headline)
@@ -209,6 +280,7 @@ struct UtteranceEditor: View {
                     ForEach(utterance.segments) { sentence in
                         HStack(alignment: .top, spacing: 12) {
                             Button(TimeFormat.clock(sentence.start)) { model.playSegment(sentence) }.font(.caption.monospacedDigit()).buttonStyle(.plain).foregroundStyle(accent).frame(width: 65)
+                            Button { if loopID == sentence.id { model.player.stopLoop(); model.player.pause(); loopID = nil } else { loopID = sentence.id; model.player.startLoop(start: max(0,sentence.start - model.preRoll), end: sentence.end) } } label: { Image(systemName: loopID == sentence.id ? "stop.circle" : "repeat") }.buttonStyle(.plain).help("循环回听这句").disabled(!model.player.available)
                             TextEditor(text: Binding(get: { drafts[sentence.id] ?? model.readingSentence(sentence) }, set: { drafts[sentence.id] = $0 }))
                                 .font(.system(size: 15)).frame(height: max(54, CGFloat(sentence.text.count / 35 + 1) * 23)).padding(6)
                         }
@@ -225,30 +297,71 @@ struct UtteranceEditor: View {
         }.padding(24).frame(width: 650).onAppear {
             initialDrafts = Dictionary(uniqueKeysWithValues: utterance.segments.map { ($0.id, model.readingSentence($0)) })
             drafts = initialDrafts
-        }
+        }.onDisappear { if loopID != nil { model.player.stopLoop(); model.player.pause() } }
+    }
+}
+
+struct BulkReviewBar: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("已选择 \(model.bulkSelection.count) 句").font(.caption.monospacedDigit())
+            Button("选择当前结果") { model.bulkSelection = Set(model.visibleUtterances.flatMap { $0.segments.map(\.id) }) }
+            Button("清空") { model.bulkSelection = [] }
+            Spacer()
+            Menu("修改说话人") {
+                ForEach(Array(Set(model.segments.compactMap(\.speaker))).sorted(), id: \.self) { speaker in
+                    Button(model.speakerName(speaker)) { model.setBulkSpeaker(speaker) }
+                }
+                Button("未识别") { model.setBulkSpeaker(nil) }
+            }.menuStyle(.borderlessButton).fixedSize().disabled(model.bulkSelection.isEmpty)
+            Button("标记已核对") { model.markReviewed(Array(model.bulkSelection)); model.bulkSelection = [] }.disabled(model.bulkSelection.isEmpty)
+        }.font(.caption).padding(.horizontal, 26).padding(.vertical, 10).background(accent.opacity(0.07))
     }
 }
 
 struct SpeakerSettingsView: View {
     @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @UIState private var sources: Set<Int> = []
+    @UIState private var target = -1
+    private var speakers: [Int] { Array(Set(model.segments.compactMap(\.speaker))).sorted() }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("说话人与名称").font(.headline)
-            Text("名称仅用于当前音频。也可以点发言段落上的名称，纠正整段归属。").font(.caption).foregroundStyle(.secondary)
+            HStack { Text("说话人整理").font(.headline); Spacer(); Button("完成") { dismiss() } }
+            Text("试听会播放最多 8 秒；再次点击切换样本。勾选重复标签后，可合并到同一个人。").font(.caption).foregroundStyle(.secondary)
             ScrollView {
                 VStack(spacing: 12) {
-                    ForEach(Array(Set(model.segments.compactMap(\.speaker))).sorted(), id: \.self) { speaker in SpeakerNameField(model: model, speaker: speaker) }
+                    ForEach(speakers, id: \.self) { speaker in
+                        HStack(spacing: 8) {
+                            Toggle("选择 " + model.speakerName(speaker), isOn: Binding(get: { sources.contains(speaker) }, set: { if $0 { sources.insert(speaker) } else { sources.remove(speaker) } })).labelsHidden().toggleStyle(.checkbox)
+                            SpeakerNameField(model: model, speaker: speaker)
+                            Button { model.previewSpeaker(speaker) } label: { Image(systemName: "play.circle") }.help("试听 " + model.speakerName(speaker)).disabled(!model.player.available)
+                        }
+                    }
                 }.padding(.vertical, 3)
             }.frame(maxHeight: 270)
+            HStack {
+                Picker("合并到", selection: $target) {
+                    Text("选择目标说话人").tag(-1)
+                    ForEach(speakers, id: \.self) { Text(model.speakerName($0)).tag($0) }
+                }
+                Button("合并所选") { model.mergeSpeakers(sources, into: target); sources = [] }
+                    .disabled(target < 0 || sources.subtracting([target]).isEmpty)
+            }
+            Text("合并仅改变归属，文字与时间轴保持原样。可撤销。名称按目标说话人保留。").font(.caption2).foregroundStyle(.secondary)
             Divider()
             if let recording = model.selected {
                 Picker("实际人数", selection: Binding(get: { recording.speakerCount ?? 0 }, set: { model.changeSpeakerCount($0 == 0 ? nil : $0) })) {
                     Text("自动判断").tag(0)
                     ForEach(1...12, id: \.self) { Text("\($0) 人").tag($0) }
                 }.disabled(recording.state.isRunning || recording.state == .queued)
-                Text("已知人数时，指定人数后重新区分通常更稳定。").font(.caption).foregroundStyle(.secondary)
                 Button("重新区分说话人") { model.enqueue(recording.id, speakersOnly: true) }.disabled(recording.state.isRunning || recording.state == .queued)
+                Text("重新区分会保留人工归属与名称，并重新开始修改历史。").font(.caption2).foregroundStyle(.secondary)
             }
+        }.onChange(of: model.selectedID) { _, _ in sources = []; target = -1 }
+        .onChange(of: speakers) { _, ids in
+            sources.formIntersection(Set(ids)); if !ids.contains(target) { target = -1 }
         }
     }
 }
@@ -261,7 +374,13 @@ struct PlayerBar: View {
     var body: some View {
         VStack(spacing: 12) {
             if let error = player.error {
-                HStack { Text(error).font(.caption).foregroundStyle(.orange).lineLimit(2); Spacer(); Button("重新定位文件…") { Task { await model.relocate() } } }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack { Text(error).font(.caption).foregroundStyle(.orange).lineLimit(2); Spacer(); Button("重新定位文件…") { Task { await model.relocate() } } }
+                    if let path = model.selected?.path { Text("原路径：" + path).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled) }
+                }
+            }
+            if let loop = player.loop {
+                HStack { Label("循环回听 \(TimeFormat.clock(loop.start)) – \(TimeFormat.clock(loop.end))", systemImage: "repeat"); Spacer(); Button("结束循环") { player.stopLoop() } }.font(.caption).foregroundStyle(accent)
             }
             HStack(spacing: 14) {
                 Button { player.seek(player.position - 10) } label: { Image(systemName: "gobackward.10").font(.system(size: 19)) }.buttonStyle(.plain).help("后退 10 秒 ⌘←")

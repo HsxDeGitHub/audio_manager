@@ -33,6 +33,34 @@ final class AppModel: ObservableObject {
     @Published var preRoll: Double = 1
     @Published var readingPunctuation = true
     @Published var readingParagraphBreaks = true
+    @Published var smartPunctuation = true
+    @Published var punctuationBusy = false
+    @Published var punctuationMessage = ""
+    @Published var readingOverrides: [String: String] = [:]
+    private var punctuationTask: Task<Void, Never>?
+    private let punctuationProcessor = PunctuationProcessor()
+    @Published var reviewFilter: ReviewFilter = .all
+    @Published var bulkSelection: Set<String> = []
+    @Published var selectionMode = false
+    @Published var undoLabel: String?
+    @Published var redoLabel: String?
+    @Published var readingDensity: ReadingDensity = .balanced
+    @Published var librarySort: LibrarySort = .newest
+    @Published var libraryFilter: LibraryFilter = .all
+    @Published var libraryTitleFilter = ""
+    @Published var activeHitID: String?
+    @Published var hasSearchOrigin = false
+    @Published var showAbout = false
+    private struct SearchOrigin { var recordingID: String?; var position: Double; var focusedID: String?; var playing: Bool }
+    private var searchOrigin: SearchOrigin?
+    private var searchSession = false
+    private var searchQueryKey = ""
+    private var sampleSpeaker: Int?
+    private var sampleIndex = 0
+    var visibleRecordings: [Recording] { LibraryOrdering.apply(recordings, sort: librarySort, filter: libraryFilter, title: libraryTitleFilter) }
+    var visibleUtterances: [SpeechUtterance] { utterances.filter { reviewFilter.includes($0) } }
+    var pendingReviewCount: Int { segments.filter(\.pendingReview).count }
+    var activeHitIndex: Int? { hits.firstIndex { $0.id == activeHitID } }
     let installer = ModelInstaller()
     let player = PlayerController()
     let dataDirectory: URL
@@ -50,6 +78,7 @@ final class AppModel: ObservableObject {
     private var prepared = false
     var selected: Recording? { recordings.first { $0.id == selectedID } }
     var ready: Bool { installer.ready }
+    func queuePosition(_ id: String) -> Int? { queue.firstIndex { $0.recordingID == id }.map { $0 + 1 } }
     var taskCount: Int { queue.count + (worker == nil ? 0 : 1) }
     var currentSegmentID: String? { player.available ? segments.first { $0.start <= player.position && player.position < $0.end }?.id : nil }
     func utteranceID(for segmentID: String?) -> String? { segmentID.flatMap { segmentToUtterance[$0] } }
@@ -75,6 +104,9 @@ final class AppModel: ObservableObject {
         lastRecordingID = preferences?.lastRecordingID
         readingPunctuation = preferences?.readingPunctuation ?? true
         readingParagraphBreaks = preferences?.readingParagraphBreaks ?? true
+        smartPunctuation = preferences?.smartPunctuation ?? true
+        readingDensity = preferences?.readingDensity ?? .balanced
+        librarySort = preferences?.librarySort ?? .newest; libraryFilter = preferences?.libraryFilter ?? .all
         do {
             store = try LibraryStore(url: dataDirectory.appendingPathComponent("library.sqlite"))
             reload()
@@ -91,6 +123,7 @@ final class AppModel: ObservableObject {
         let restored = recordings.first(where: { $0.id == lastRecordingID }) ?? recordings.first
         if let restored { await select(restored.id) }
         await validation
+        loadTranscript()
         if !installer.ready { showSettings = true }
     }
     func reload() {
@@ -107,10 +140,14 @@ final class AppModel: ObservableObject {
                 segments = try store?.segments(runID: run) ?? []
                 names = try store?.speakerNames(runID: run) ?? [:]
             } else { segments = []; names = [:] }
+            undoLabel = try selected?.activeRun.flatMap { try store?.historyLabel(runID: $0) }
+            redoLabel = try selected?.activeRun.flatMap { try store?.historyLabel(runID: $0, redo: true) }
+            bulkSelection.formIntersection(Set(segments.map(\.id)))
             utterances = UtteranceGrouping.make(segments)
             segmentToUtterance = Dictionary(uniqueKeysWithValues: utterances.flatMap { utterance in
                 utterance.segments.map { ($0.id, utterance.id) }
             })
+            preparePunctuation()
         } catch { alert = error.localizedDescription }
     }
     func savePosition(_ value: Double? = nil) {
@@ -135,7 +172,7 @@ final class AppModel: ObservableObject {
     }
     func select(_ id: String?) async {
         // Save the old selection before changing it (selection is kept separately from the List binding).
-        if selectedID != id { savePosition(); selectedID = id }
+        if selectedID != id { savePosition(); selectedID = id; reviewFilter = .all; bulkSelection = []; selectionMode = false; sampleSpeaker = nil }
         lastRecordingID = id; savePreferences()
         focusSegmentID = nil; loadTranscript(); refreshSearch()
         guard let recording = selected else { player.unload(); return }
@@ -284,6 +321,77 @@ final class AppModel: ObservableObject {
     }
     func changeSpeakerCount(_ count: Int?) { guard var r = selected else { return }; r.speakerCount = count; save(r) }
     func switchRun(_ id: String) { guard var r = selected else { return }; r.activeRun = id; save(r) }
+    func setSmartPunctuation(_ value: Bool) { smartPunctuation = value; savePreferences(); preparePunctuation(); refreshSearch() }
+    func refreshPunctuation() { preparePunctuation() }
+    private func preparePunctuation() {
+        punctuationTask?.cancel(); punctuationProcessor.cancel(); punctuationBusy = false; readingOverrides = [:]; punctuationMessage = ""
+        guard smartPunctuation, let run = selected?.activeRun, let store else { return }
+        let cache = (try? store.readingCache(runID: run)) ?? [:]
+        let groups = utterances
+        for group in groups {
+            if let saved = cache[PunctuationProjection.key(group.segments)] { readingOverrides.merge(saved) { _,new in new } }
+        }
+        guard readingPunctuation, installer.valid.contains(ModelSpec.punctuation.id) else { return }
+        let executable = toolsDirectory.appendingPathComponent("sherpa/bin/sherpa-onnx-offline-punctuation")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else { punctuationMessage = "智能标点工具不可用，正在使用规则标点"; return }
+        let missing = groups.filter { PunctuationProjection.eligible($0.segments) && cache[PunctuationProjection.key($0.segments)] == nil }
+        guard !missing.isEmpty else { return }
+        let model = modelsDirectory.appendingPathComponent(ModelSpec.punctuation.id)
+        punctuationBusy = true
+        punctuationTask = Task {
+            defer { if !Task.isCancelled { punctuationBusy = false } }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            for group in missing {
+                guard !Task.isCancelled, selected?.activeRun == run else { return }
+                do {
+                    if let result = try await punctuationProcessor.render(group.segments, executable: executable, model: model) {
+                        guard !Task.isCancelled, selected?.activeRun == run else { return }
+                        try store.saveReadingCache(runID: run, key: PunctuationProjection.key(group.segments), rendered: result)
+                        readingOverrides.merge(result) { _,new in new }
+                    }
+                } catch { punctuationMessage = error.localizedDescription; break }
+            }
+            if !Task.isCancelled { refreshSearch() }
+        }
+    }
+    func setLibrarySort(_ value: LibrarySort) { librarySort = value; savePreferences() }
+    func setLibraryFilter(_ value: LibraryFilter) { libraryFilter = value; savePreferences() }
+    func setReadingDensity(_ value: ReadingDensity) { readingDensity = value; savePreferences(); refreshSearch() }
+    func undoEdit(redo: Bool = false) {
+        guard let run = selected?.activeRun else { return }
+        do { if try store?.restoreEdit(runID: run, redo: redo) == true { loadTranscript(); refreshSearch() } }
+        catch { alert = error.localizedDescription }
+    }
+    func markReviewed(_ ids: [String], reviewed: Bool = true) {
+        do { try store?.markReviewed(segmentIDs: ids, reviewed: reviewed); loadTranscript() } catch { alert = error.localizedDescription }
+    }
+    func mergeSpeakers(_ sources: Set<Int>, into target: Int) {
+        guard let run = selected?.activeRun else { return }
+        do { try store?.mergeSpeakers(runID: run, sources: sources, target: target); loadTranscript(); refreshSearch(); notice = "已合并说话人，可通过撤销恢复。" }
+        catch { alert = error.localizedDescription }
+    }
+    func setBulkSpeaker(_ speaker: Int?) {
+        do { try store?.editSpeakers(segmentIDs: Array(bulkSelection), speaker: speaker); loadTranscript(); refreshSearch(); bulkSelection = [] }
+        catch { alert = error.localizedDescription }
+    }
+    func toggleSelection(_ utterance: SpeechUtterance) {
+        let ids = Set(utterance.segments.map(\.id))
+        if ids.isSubset(of: bulkSelection) { bulkSelection.subtract(ids) } else { bulkSelection.formUnion(ids) }
+    }
+    func previewSpeaker(_ speaker: Int) {
+        reviewFilter = .all
+        let samples = SpeakerSamples.select(segments, speaker: speaker)
+        guard !samples.isEmpty else { return }
+        if sampleSpeaker != speaker { sampleSpeaker = speaker; sampleIndex = 0 }
+        let sentence = samples[sampleIndex % samples.count]; sampleIndex += 1
+        focusSegmentID = sentence.id; focusRequestID = UUID()
+        player.playExcerpt(start: sentence.start, end: min(sentence.end, sentence.start + 8))
+        notice = "试听 \(speakerName(speaker)) · 第 \((sampleIndex - 1) % samples.count + 1) / \(samples.count) 段"
+    }
+    func saveCorrection(_ id: String, text: String?, reviewed: Bool) {
+        do { try store?.saveCorrection(segmentID: id, text: text, markReviewed: reviewed); loadTranscript(); refreshSearch() }
+        catch { alert = error.localizedDescription }
+    }
     func editText(_ id: String, text: String) {
         do { try store?.editText(segmentID: id, text: text); loadTranscript(); refreshSearch() } catch { alert = error.localizedDescription }
     }
@@ -304,25 +412,26 @@ final class AppModel: ObservableObject {
     func copyText(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
     func setReaderFontSize(_ size: Double) { readerFontSize = min(22, max(14, size)); savePreferences() }
     func setPreRoll(_ seconds: Double) { preRoll = min(2, max(0, seconds)); savePreferences() }
-    func setReadingPunctuation(_ value: Bool) { readingPunctuation = value; savePreferences(); refreshSearch() }
+    func setReadingPunctuation(_ value: Bool) { readingPunctuation = value; savePreferences(); preparePunctuation(); refreshSearch() }
     func setReadingParagraphBreaks(_ value: Bool) { readingParagraphBreaks = value; savePreferences(); refreshSearch() }
     func readingText(_ utterance: SpeechUtterance) -> String {
-        ReadingTranscript(segments: utterance.segments, punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks).text
+        ReadingTranscript(segments: utterance.segments, punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks, density: readingDensity, overrides: readingOverrides).text
     }
     func readingSentence(_ sentence: TranscriptSegment) -> String {
         guard let groupID = segmentToUtterance[sentence.id], let group = utterances.first(where: { $0.id == groupID }) else { return sentence.text }
-        return ReadingTranscript(segments: group.segments, punctuate: readingPunctuation, paragraphBreaks: false).sentenceTexts[sentence.id] ?? sentence.text
+        return ReadingTranscript(segments: group.segments, punctuate: readingPunctuation, paragraphBreaks: false, density: readingDensity, overrides: readingOverrides).sentenceTexts[sentence.id] ?? sentence.text
     }
     func exportText(srt: Bool) -> String {
         TranscriptExport.render(title: selected?.title ?? "", segments: segments, names: names, srt: srt,
-                                punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks)
+                                punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks, density: readingDensity, overrides: readingOverrides)
     }
     private func savePreferences() {
         guard store != nil else { return }
         do {
             let preferences = AppPreferences(modelsDirectory: modelsDirectory.path, readerFontSize: readerFontSize,
                                              preRoll: preRoll, lastRecordingID: lastRecordingID,
-                                             readingPunctuation: readingPunctuation, readingParagraphBreaks: readingParagraphBreaks)
+                                             readingPunctuation: readingPunctuation, readingParagraphBreaks: readingParagraphBreaks, readingDensity: readingDensity,
+                                             librarySort: librarySort, libraryFilter: libraryFilter, smartPunctuation: smartPunctuation)
             try JSONEncoder().encode(preferences).write(to: dataDirectory.appendingPathComponent("settings.json"), options: .atomic)
         } catch { alert = error.localizedDescription }
     }
@@ -336,24 +445,44 @@ final class AppModel: ObservableObject {
     func speakerName(_ id: Int?) -> String { id.flatMap { names[$0] } ?? SpeakerMatcher.defaultName(id) }
     func refreshSearch() {
         searchTask?.cancel()
-        guard !searchText.isEmpty else { hits = []; return }
+        let key = searchText + "\u{0}" + (searchAll ? "all" : selectedID ?? "")
+        if searchQueryKey != key { hits = []; activeHitID = nil; searchQueryKey = key }
+        if !searchText.isEmpty && !searchSession {
+            searchOrigin = SearchOrigin(recordingID: selectedID, position: player.position, focusedID: focusSegmentID, playing: player.playing)
+            hasSearchOrigin = searchOrigin?.recordingID != nil; searchSession = true
+        }
+        guard !searchText.isEmpty else { hits = []; activeHitID = nil; searchSession = false; return }
         searchTask = Task {
             try? await Task.sleep(nanoseconds: 180_000_000)
             guard !Task.isCancelled else { return }
             do { hits = try store?.search(searchText, recordingID: searchAll ? nil : selectedID ?? "",
-                                         punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks) ?? [] }
+                                         punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks, density: readingDensity, smartPunctuation: smartPunctuation) ?? [] }
             catch { alert = error.localizedDescription }
         }
     }
     func openHit(_ hit: SearchHit) async {
+        activeHitID = hit.id; reviewFilter = .all
         if selectedID != hit.recordingID { await select(hit.recordingID) }
         guard selectedID == hit.recordingID else { return }
         focusSegmentID = hit.segment.id
         focusRequestID = UUID()
         player.seek(max(0, hit.segment.start - preRoll), play: true)
     }
+    func navigateHit(_ direction: Int) {
+        guard !hits.isEmpty else { return }
+        let index = activeHitIndex.map { ($0 + direction + hits.count) % hits.count } ?? (direction < 0 ? hits.count - 1 : 0)
+        let hit = hits[index]; Task { await openHit(hit) }
+    }
+    func returnFromSearch() async {
+        guard let origin = searchOrigin else { return }
+        searchText = ""; searchTask?.cancel(); hits = []; activeHitID = nil; searchSession = false; searchOrigin = nil; hasSearchOrigin = false
+        if selectedID != origin.recordingID { await select(origin.recordingID) }
+        reviewFilter = .all
+        player.seek(origin.position, play: origin.playing)
+        focusSegmentID = origin.focusedID ?? segments.first(where: { $0.end >= origin.position })?.id; focusRequestID = UUID()
+    }
     func playSegment(_ segment: TranscriptSegment) { focusSegmentID = segment.id; focusRequestID = UUID(); player.seek(max(0, segment.start - preRoll), play: true) }
-    func locateCurrentSentence() { focusSegmentID = currentSegmentID; focusRequestID = UUID() }
+    func locateCurrentSentence() { reviewFilter = .all; focusSegmentID = currentSegmentID; focusRequestID = UUID() }
     func focusText(at position: Double) {
         focusSegmentID = (segments.first(where: { $0.end >= position }) ?? segments.last)?.id
         focusRequestID = UUID()
@@ -401,7 +530,7 @@ final class AppModel: ObservableObject {
         await installer.validate(directory: url)
     }
     func shutdown() {
-        savePosition(); installer.cancel()
+        savePosition(); installer.cancel(); punctuationTask?.cancel(); punctuationProcessor.cancel()
         for job in queue {
             if var r = recordings.first(where: { $0.id == job.recordingID }) { r.state = .interrupted; try? store?.save(r) }
         }

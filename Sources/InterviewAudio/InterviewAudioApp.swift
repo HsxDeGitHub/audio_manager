@@ -34,6 +34,14 @@ struct InterviewAudioApp: App {
         }
         .defaultSize(width: 1360, height: 860)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("关于听阅") { model.showAbout = true }
+            }
+            CommandGroup(after: .undoRedo) {
+                Divider()
+                Button(model.undoLabel.map { "撤销校对：" + $0 } ?? "撤销校对修改") { model.undoEdit() }.disabled(model.undoLabel == nil).keyboardShortcut("z", modifiers: [.command, .option])
+                Button(model.redoLabel.map { "重做校对：" + $0 } ?? "重做校对修改") { model.undoEdit(redo: true) }.disabled(model.redoLabel == nil).keyboardShortcut("z", modifiers: [.command, .option, .shift])
+            }
             CommandGroup(replacing: .newItem) {
                 Button("导入音频…") { model.pickFiles() }.keyboardShortcut("o")
             }
@@ -47,6 +55,10 @@ struct InterviewAudioApp: App {
             }
             CommandMenu("阅读") {
                 Button("搜索音频文字") { model.searchFocusRequestID = UUID() }.keyboardShortcut("f")
+                Button("下一个搜索结果") { model.navigateHit(1) }.keyboardShortcut("g").disabled(model.hits.isEmpty)
+                Button("上一个搜索结果") { model.navigateHit(-1) }.keyboardShortcut("g", modifiers: [.command,.shift]).disabled(model.hits.isEmpty)
+                Button("返回搜索前的位置") { Task { await model.returnFromSearch() } }.disabled(!model.hasSearchOrigin)
+                Divider()
                 Button("定位当前句") { model.locateCurrentSentence() }.keyboardShortcut("l", modifiers: [.command, .shift])
                 Divider()
                 Button("放大文字") { model.setReaderFontSize(model.readerFontSize + 1) }.keyboardShortcut("+", modifiers: [.command])

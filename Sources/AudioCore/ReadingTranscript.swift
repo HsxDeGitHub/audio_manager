@@ -7,47 +7,49 @@ public struct ReadingTranscript: Sendable {
     public let sentenceTexts: [String: String]
     private let canonical: JoinedTranscript
     private let segments: [TranscriptSegment]
+    private let canonicalPositions: [Int: Int]
 
-    public init(segments: [TranscriptSegment], punctuate: Bool = true, paragraphBreaks: Bool = true) {
+    public init(segments: [TranscriptSegment], punctuate: Bool = true, paragraphBreaks: Bool = true, density: ReadingDensity = .balanced, overrides: [String: String] = [:]) {
         self.segments = segments
         canonical = JoinedTranscript(segments: segments)
         var value = "", offsets: [String: NSRange] = [:], contents: [String: String] = [:]
-        var sentenceLength = 0, paragraphLength = 0
+        var sentenceLength = 0, paragraphLength = 0, sourcePositions: [Int: Int] = [:]
         for (index, segment) in segments.enumerated() {
             let next = index + 1 < segments.count ? segments[index + 1] : nil
-            let original = punctuate ? ReadingPunctuation.listContent(segment.text, after: index > 0 ? segments[index - 1].text : nil) : segment.text
+            let smart = punctuate ? overrides[segment.id] : nil
+            let original = smart ?? (punctuate ? ReadingPunctuation.listContent(segment.text, after: index > 0 ? segments[index - 1].text : nil) : segment.text)
             sentenceLength += original.count; paragraphLength += original.count
-            let mark = punctuate ? ReadingPunctuation.ending(for: segment, next: next, sentenceLength: sentenceLength) : ""
+            let mark = punctuate && smart == nil ? ReadingPunctuation.ending(for: segment, next: next, sentenceLength: sentenceLength) : ""
             let decorated = original + mark
             let start = (value as NSString).length
             value += decorated
             offsets[segment.id] = NSRange(location: start, length: (decorated as NSString).length)
             contents[segment.id] = decorated
+            if let rawRange = canonical.ranges[segment.id] {
+                for (index, position) in (smart != nil ? PunctuationProjection.positions(source: segment.text, display: decorated) : Array(0..<rawRange.length)).enumerated() {
+                    sourcePositions[rawRange.location + index] = start + position
+                }
+            }
             let stop = ReadingPunctuation.endsSentence(decorated)
             if stop { sentenceLength = 0 }
             if let next {
                 let newTopic = ReadingPunctuation.startsTopic(next.text)
-                if paragraphBreaks, stop, paragraphLength >= 170 || (newTopic && paragraphLength >= 100) {
+                if paragraphBreaks, stop, paragraphLength >= density.paragraphLimit || (newTopic && paragraphLength >= density.paragraphLimit * 3 / 5) {
                     if !value.hasSuffix("\n") { value += "\n" }
                     paragraphLength = 0
                 } else if let last = value.last, let first = next.text.first,
                           last.isReadingWordCharacter, first.isReadingWordCharacter { value += " " }
             }
         }
-        text = value; ranges = offsets; sentenceTexts = contents
+        text = value; ranges = offsets; sentenceTexts = contents; canonicalPositions = sourcePositions
     }
 
     public func searchRanges(for term: String) -> [NSRange] {
         guard !term.isEmpty else { return [] }
         var result = Self.find(term, in: text)
         for match in Self.find(term, in: canonical.text) {
-            let overlapping = segments.filter { canonical.ranges[$0.id].map { NSIntersectionRange($0, match).length > 0 } ?? false }
-            guard let first = overlapping.first, let last = overlapping.last,
-                  let rawStart = canonical.ranges[first.id], let rawEnd = canonical.ranges[last.id],
-                  let displayStart = ranges[first.id], let displayEnd = ranges[last.id] else { continue }
-            let start = displayStart.location + max(0, match.location - rawStart.location)
-            let end = displayEnd.location + min(rawEnd.length, NSMaxRange(match) - rawEnd.location)
-            let translated = NSRange(location: start, length: max(0, end - start))
+            guard let start = canonicalPositions[match.location], let last = canonicalPositions[NSMaxRange(match) - 1] else { continue }
+            let translated = NSRange(location: start, length: max(0, last + 1 - start))
             if translated.length > 0, !result.contains(translated) { result.append(translated) }
         }
         return result.sorted { $0.location < $1.location }

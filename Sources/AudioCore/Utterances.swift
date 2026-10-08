@@ -7,7 +7,7 @@ public struct SpeechUtterance: Identifiable, Sendable {
     public var speaker: Int? { segments[0].speaker }
     public var start: Double { segments[0].start }
     public var end: Double { segments.map(\.end).max() ?? start }
-    public var reviewCount: Int { segments.filter(\.needsReview).count }
+    public var reviewCount: Int { segments.filter(\.pendingReview).count }
     public var hasEdits: Bool { segments.contains(where: \.manuallyEdited) }
     public var text: String { JoinedTranscript(segments: segments).text }
 }
@@ -50,11 +50,11 @@ private extension Character {
 public enum TranscriptSearch {
     public static func find(_ term: String, utterances: [SpeechUtterance], recordingID: String,
                             recordingTitle: String, names: [Int: String], punctuate: Bool = true,
-                            paragraphBreaks: Bool = true) -> [SearchHit] {
+                            paragraphBreaks: Bool = true, density: ReadingDensity = .balanced, overrides: [String: String] = [:]) -> [SearchHit] {
         guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         var hits: [SearchHit] = []
         for utterance in utterances {
-            let joined = ReadingTranscript(segments: utterance.segments, punctuate: punctuate, paragraphBreaks: paragraphBreaks)
+            let joined = ReadingTranscript(segments: utterance.segments, punctuate: punctuate, paragraphBreaks: paragraphBreaks, density: density, overrides: overrides)
             let text = joined.text as NSString
             var seen: Set<String> = []
             for match in joined.searchRanges(for: term) {
@@ -82,10 +82,16 @@ public struct AppPreferences: Codable, Sendable {
     public var lastRecordingID: String?
     public var readingPunctuation: Bool?
     public var readingParagraphBreaks: Bool?
+    public var readingDensity: ReadingDensity?
+    public var smartPunctuation: Bool?
+    public var librarySort: LibrarySort?
+    public var libraryFilter: LibraryFilter?
     public init(modelsDirectory: String, readerFontSize: Double? = nil, preRoll: Double? = nil, lastRecordingID: String? = nil,
-                readingPunctuation: Bool? = nil, readingParagraphBreaks: Bool? = nil) {
+                readingPunctuation: Bool? = nil, readingParagraphBreaks: Bool? = nil, readingDensity: ReadingDensity? = nil,
+                librarySort: LibrarySort? = nil, libraryFilter: LibraryFilter? = nil, smartPunctuation: Bool? = nil) {
         self.modelsDirectory = modelsDirectory; self.readerFontSize = readerFontSize
         self.preRoll = preRoll; self.lastRecordingID = lastRecordingID
         self.readingPunctuation = readingPunctuation; self.readingParagraphBreaks = readingParagraphBreaks
+        self.smartPunctuation = smartPunctuation; self.readingDensity = readingDensity; self.librarySort = librarySort; self.libraryFilter = libraryFilter
     }
 }

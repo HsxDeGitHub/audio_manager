@@ -9,7 +9,9 @@ struct ModelSpec: Identifiable {
     let sha256: String
     let size: Int64
     let archive: Bool
-    static let all = [
+    static let punctuation = ModelSpec(id: "punctuation.int8.onnx", title: "智能标点 · 可选，约 76 MB", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8.tar.bz2", sha256: "65a3fb9f5ad7bfb96bf69e0dc4481df97f6ee60513c1d94ce981ba6effd524b1", size: 75519198, archive: true)
+    static var all: [ModelSpec] { required + [punctuation] }
+    static let required = [
         ModelSpec(id: "ggml-large-v3.bin", title: "Whisper large-v3 · 中文转写", url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3.bin", sha256: "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2", size: 3095033483, archive: false),
         ModelSpec(id: "ggml-silero-v6.2.0.bin", title: "Silero VAD · 过滤非语音片段", url: "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin", sha256: "2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987", size: 885000, archive: false),
         ModelSpec(id: "segmentation.onnx", title: "语音分段模型 · 说话人区分", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-segmentation-models/sherpa-onnx-pyannote-segmentation-3-0.tar.bz2", sha256: "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079", size: 6958545, archive: true),
@@ -26,7 +28,7 @@ final class ModelInstaller: ObservableObject {
     @Published var error: String?
     private var process: Process?
     private var cancelled = false
-    var ready: Bool { !busy && valid.count == ModelSpec.all.count }
+    var ready: Bool { !busy && ModelSpec.required.allSatisfy { valid.contains($0.id) } }
 
     func validate(directory: URL) async {
         guard !busy else { return }
@@ -59,13 +61,13 @@ final class ModelInstaller: ObservableObject {
         }
     }
 
-    func download(directory: URL) async {
+    func download(directory: URL, specs: [ModelSpec] = ModelSpec.required) async {
         guard !busy else { return }
         busy = true; cancelled = false; error = nil
         defer { busy = false; progress = nil }
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            for spec in ModelSpec.all where !valid.contains(spec.id) {
+            for spec in specs where !valid.contains(spec.id) {
                 if cancelled { throw AudioError.message("模型下载已取消") }
                 message = "下载 \(spec.title)"
                 let partial = directory.appendingPathComponent(spec.id + ".download")
@@ -83,7 +85,9 @@ final class ModelInstaller: ObservableObject {
                     staging = folder; try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                     do { try await run("/usr/bin/tar", ["-xjf", partial.path, "-C", folder.path]) }
                     catch { try? FileManager.default.removeItem(at: folder); throw error }
-                    candidate = folder.appendingPathComponent("sherpa-onnx-pyannote-segmentation-3-0/model.onnx")
+                    candidate = folder.appendingPathComponent(spec.id == ModelSpec.punctuation.id
+                        ? "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8/model.int8.onnx"
+                        : "sherpa-onnx-pyannote-segmentation-3-0/model.onnx")
                 }
                 defer { if let staging { try? FileManager.default.removeItem(at: staging) } }
                 message = "校验 \(spec.title)"
