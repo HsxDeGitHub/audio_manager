@@ -49,16 +49,15 @@ private extension Character {
 
 public enum TranscriptSearch {
     public static func find(_ term: String, utterances: [SpeechUtterance], recordingID: String,
-                            recordingTitle: String, names: [Int: String]) -> [SearchHit] {
+                            recordingTitle: String, names: [Int: String], punctuate: Bool = true,
+                            paragraphBreaks: Bool = true) -> [SearchHit] {
         guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         var hits: [SearchHit] = []
         for utterance in utterances {
-            let joined = JoinedTranscript(segments: utterance.segments)
+            let joined = ReadingTranscript(segments: utterance.segments, punctuate: punctuate, paragraphBreaks: paragraphBreaks)
             let text = joined.text as NSString
-            var remaining = NSRange(location: 0, length: text.length), seen: Set<String> = []
-            while remaining.length > 0 {
-                let match = text.range(of: term, options: [.caseInsensitive], range: remaining)
-                if match.location == NSNotFound { break }
+            var seen: Set<String> = []
+            for match in joined.searchRanges(for: term) {
                 if let segment = utterance.segments.first(where: {
                     joined.ranges[$0.id].map { NSIntersectionRange($0, match).length > 0 } ?? false
                 }), seen.insert(segment.id).inserted {
@@ -68,10 +67,8 @@ public enum TranscriptSearch {
                     let preview = (before > 0 ? "…" : "") + text.substring(with: range) + (after < text.length ? "…" : "")
                     hits.append(SearchHit(recordingID: recordingID, recordingTitle: recordingTitle, segment: segment,
                                           speakerName: segment.speaker.flatMap { names[$0] } ?? SpeakerMatcher.defaultName(segment.speaker),
-                                          preview: preview))
+                                          preview: preview, previewHighlightRange: NSRange(location: match.location - range.location + (before > 0 ? 1 : 0), length: match.length)))
                 }
-                let next = NSMaxRange(match)
-                remaining = NSRange(location: next, length: text.length - next)
             }
         }
         return hits
@@ -83,8 +80,12 @@ public struct AppPreferences: Codable, Sendable {
     public var readerFontSize: Double?
     public var preRoll: Double?
     public var lastRecordingID: String?
-    public init(modelsDirectory: String, readerFontSize: Double? = nil, preRoll: Double? = nil, lastRecordingID: String? = nil) {
+    public var readingPunctuation: Bool?
+    public var readingParagraphBreaks: Bool?
+    public init(modelsDirectory: String, readerFontSize: Double? = nil, preRoll: Double? = nil, lastRecordingID: String? = nil,
+                readingPunctuation: Bool? = nil, readingParagraphBreaks: Bool? = nil) {
         self.modelsDirectory = modelsDirectory; self.readerFontSize = readerFontSize
         self.preRoll = preRoll; self.lastRecordingID = lastRecordingID
+        self.readingPunctuation = readingPunctuation; self.readingParagraphBreaks = readingParagraphBreaks
     }
 }

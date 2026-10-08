@@ -147,7 +147,7 @@ struct LibraryView: View {
                             Button { Task { await model.openHit(hit) } } label: {
                                 VStack(alignment: .leading, spacing: 8) {
                                     Text(hit.recordingTitle).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                    highlighted(hit.preview, term: model.searchText).font(.system(size: 13)).lineLimit(4).multilineTextAlignment(.leading)
+                                    highlighted(hit.preview, term: model.searchText, matchRange: hit.previewHighlightRange).font(.system(size: 13)).lineLimit(4).multilineTextAlignment(.leading)
                                     Label("\(TimeFormat.clock(hit.segment.start)) · \(hit.speakerName)", systemImage: "play.circle").font(.caption).foregroundStyle(accent)
                                 }.padding(15).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                             }.buttonStyle(.plain)
@@ -175,7 +175,10 @@ struct LibraryView: View {
     }
 }
 
-private func highlighted(_ value: String, term: String) -> Text {
+private func highlighted(_ value: String, term: String, matchRange: NSRange? = nil) -> Text {
+    if let matchRange, let range = Range(matchRange, in: value) {
+        return Text(String(value[..<range.lowerBound])) + Text(String(value[range])).foregroundColor(accent).bold() + Text(String(value[range.upperBound...]))
+    }
     var result = AttributedString(value)
     if !term.isEmpty, let range = result.range(of: term, options: [.caseInsensitive]) {
         result[range].foregroundColor = accent

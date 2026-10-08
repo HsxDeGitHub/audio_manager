@@ -176,14 +176,15 @@ public final class LibraryStore {
         guard !safe.isEmpty else { return }
         try write("INSERT INTO speakers VALUES(?,?,?) ON CONFLICT(run_id,speaker) DO UPDATE SET name=excluded.name", [runID,speaker,safe])
     }
-    public func search(_ term: String, recordingID: String? = nil) throws -> [SearchHit] {
+    public func search(_ term: String, recordingID: String? = nil, punctuate: Bool = true,
+                       paragraphBreaks: Bool = true) throws -> [SearchHit] {
         guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
         var result: [SearchHit] = []
         for recording in try recordings() where recordingID == nil || recording.id == recordingID {
             guard let run = recording.activeRun else { continue }
             result += TranscriptSearch.find(term, utterances: UtteranceGrouping.make(try segments(runID: run)),
                                             recordingID: recording.id, recordingTitle: recording.title,
-                                            names: try speakerNames(runID: run))
+                                            names: try speakerNames(runID: run), punctuate: punctuate, paragraphBreaks: paragraphBreaks)
         }
         return result
     }

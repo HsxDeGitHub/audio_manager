@@ -72,7 +72,7 @@ struct TranscriptView: View {
                 Menu {
                     Button("重新转写，保留已有版本") { model.enqueue(recording.id) }.disabled(recording.state.isRunning || recording.state == .queued)
                     Button("重新定位原音频…") { Task { await model.relocate() } }
-                    if !model.segments.isEmpty { Button("复制全部文字") { model.copyText(TranscriptExport.render(title: recording.title, segments: model.segments, names: model.names, srt: false)) } }
+                    if !model.segments.isEmpty { Button("复制全部文字") { model.copyText(model.exportText(srt: false)) } }
                     if model.runs.count > 1 {
                         Divider()
                         Picker("转写版本", selection: Binding(get: { recording.activeRun ?? "" }, set: { model.switchRun($0) })) {
@@ -106,10 +106,13 @@ struct TranscriptView: View {
             Button { showSpeakers.toggle() } label: { Label("说话人", systemImage: "person.2") }
                 .popover(isPresented: $showSpeakers) { SpeakerSettingsView(model: model).padding(20).frame(width: 340) }
             Menu {
+                Toggle("自动补标点", isOn: Binding(get: { model.readingPunctuation }, set: { model.setReadingPunctuation($0) }))
+                Toggle("长发言适当换行", isOn: Binding(get: { model.readingParagraphBreaks }, set: { model.setReadingParagraphBreaks($0) }))
+                Divider()
                 ForEach([14.0,16,18,20,22], id: \.self) { size in
                     Button("\(Int(size)) 号" + (model.readerFontSize == size ? " ✓" : "")) { model.setReaderFontSize(size) }
                 }
-            } label: { Label("字号", systemImage: "textformat.size") }.menuStyle(.borderlessButton).fixedSize()
+            } label: { Label("排版", systemImage: "textformat.size") }.menuStyle(.borderlessButton).fixedSize().help("标点、分段与字号")
             Spacer()
             Button { model.locateCurrentSentence() } label: { Image(systemName: "scope") }.help("定位当前播放句子 ⇧⌘L").disabled(model.currentSegmentID == nil)
             Toggle("跟随播放", isOn: $followPlayback).toggleStyle(.checkbox)
@@ -143,7 +146,7 @@ struct SpeechBlock: View {
                 if utterance.reviewCount > 0 { Text("\(utterance.reviewCount) 句待核对").font(.system(size: 10)).foregroundStyle(.orange) }
                 Menu {
                     Button("逐句校对这次发言…") { editingUtterance = true }
-                    Button("复制这次发言") { model.copyText(utterance.text) }
+                    Button("复制这次发言") { model.copyText(model.readingText(utterance)) }
                     Button("从这次发言开始播放") { if let first = utterance.segments.first { model.playSegment(first) } }
                 } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).fixedSize().help("发言操作")
             }
@@ -151,6 +154,7 @@ struct SpeechBlock: View {
                               activeID: model.currentSegmentID, focusedID: model.focusSegmentID,
                               focusRequest: model.focusRequestID, searchTerm: model.searchText,
                               followPlayback: followPlayback, playing: player.playing,
+                              punctuate: model.readingPunctuation, paragraphBreaks: model.readingParagraphBreaks,
                               onPlay: { id in if let sentence = utterance.segments.first(where: { $0.id == id }) { model.playSegment(sentence) } },
                               onEdit: { id in editingSentence = utterance.segments.first(where: { $0.id == id }) })
                 .fixedSize(horizontal: false, vertical: true)
@@ -178,14 +182,15 @@ struct SentenceEditor: View {
     let sentence: TranscriptSegment
     @Environment(\.dismiss) private var dismiss
     @UIState private var draft = ""
+    @UIState private var initialDraft = ""
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { Text("校对这句话").font(.headline); Spacer(); Button("回听") { model.playSegment(sentence) } }
             Text("\(TimeFormat.clock(sentence.start)) – \(TimeFormat.clock(sentence.end)) · 保存后仍可定位回听").font(.caption).foregroundStyle(.secondary)
             TextEditor(text: $draft).font(.system(size: 16)).frame(height: 170).padding(8).background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
             DisclosureGroup("识别原稿") { Text(sentence.original).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
-            HStack { Button("恢复原稿") { draft = sentence.original }; Spacer(); Button("取消") { dismiss() }.keyboardShortcut(.cancelAction); Button("保存") { if draft != sentence.text { model.editText(sentence.id, text: draft) }; dismiss() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction) }
-        }.padding(24).frame(width: 550).onAppear { draft = sentence.text }
+            HStack { Button("恢复原稿") { draft = sentence.original }; Spacer(); Button("取消") { dismiss() }.keyboardShortcut(.cancelAction); Button("保存") { if draft != initialDraft { model.editText(sentence.id, text: draft) }; dismiss() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction) }
+        }.padding(24).frame(width: 550).onAppear { initialDraft = model.readingSentence(sentence); draft = initialDraft }
     }
 }
 
@@ -194,6 +199,7 @@ struct UtteranceEditor: View {
     let utterance: SpeechUtterance
     @Environment(\.dismiss) private var dismiss
     @UIState private var drafts: [String: String] = [:]
+    @UIState private var initialDrafts: [String: String] = [:]
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("逐句校对这次发言").font(.headline)
@@ -203,7 +209,7 @@ struct UtteranceEditor: View {
                     ForEach(utterance.segments) { sentence in
                         HStack(alignment: .top, spacing: 12) {
                             Button(TimeFormat.clock(sentence.start)) { model.playSegment(sentence) }.font(.caption.monospacedDigit()).buttonStyle(.plain).foregroundStyle(accent).frame(width: 65)
-                            TextEditor(text: Binding(get: { drafts[sentence.id] ?? sentence.text }, set: { drafts[sentence.id] = $0 }))
+                            TextEditor(text: Binding(get: { drafts[sentence.id] ?? model.readingSentence(sentence) }, set: { drafts[sentence.id] = $0 }))
                                 .font(.system(size: 15)).frame(height: max(54, CGFloat(sentence.text.count / 35 + 1) * 23)).padding(6)
                         }
                     }
@@ -212,11 +218,14 @@ struct UtteranceEditor: View {
             HStack {
                 Spacer(); Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("保存全部") {
-                    let changed = drafts.filter { id, text in utterance.segments.first(where: { $0.id == id })?.text != text }
+                    let changed = drafts.filter { id, text in initialDrafts[id] != text }
                     model.editTexts(changed); dismiss()
                 }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
             }
-        }.padding(24).frame(width: 650)
+        }.padding(24).frame(width: 650).onAppear {
+            initialDrafts = Dictionary(uniqueKeysWithValues: utterance.segments.map { ($0.id, model.readingSentence($0)) })
+            drafts = initialDrafts
+        }
     }
 }
 

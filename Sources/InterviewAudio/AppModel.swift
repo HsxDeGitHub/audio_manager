@@ -31,6 +31,8 @@ final class AppModel: ObservableObject {
     @Published var searchFocusRequestID = UUID()
     @Published var readerFontSize: Double = 16
     @Published var preRoll: Double = 1
+    @Published var readingPunctuation = true
+    @Published var readingParagraphBreaks = true
     let installer = ModelInstaller()
     let player = PlayerController()
     let dataDirectory: URL
@@ -71,6 +73,8 @@ final class AppModel: ObservableObject {
         readerFontSize = min(22, max(14, preferences?.readerFontSize ?? 16))
         preRoll = min(2, max(0, preferences?.preRoll ?? 1))
         lastRecordingID = preferences?.lastRecordingID
+        readingPunctuation = preferences?.readingPunctuation ?? true
+        readingParagraphBreaks = preferences?.readingParagraphBreaks ?? true
         do {
             store = try LibraryStore(url: dataDirectory.appendingPathComponent("library.sqlite"))
             reload()
@@ -300,11 +304,25 @@ final class AppModel: ObservableObject {
     func copyText(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
     func setReaderFontSize(_ size: Double) { readerFontSize = min(22, max(14, size)); savePreferences() }
     func setPreRoll(_ seconds: Double) { preRoll = min(2, max(0, seconds)); savePreferences() }
+    func setReadingPunctuation(_ value: Bool) { readingPunctuation = value; savePreferences(); refreshSearch() }
+    func setReadingParagraphBreaks(_ value: Bool) { readingParagraphBreaks = value; savePreferences(); refreshSearch() }
+    func readingText(_ utterance: SpeechUtterance) -> String {
+        ReadingTranscript(segments: utterance.segments, punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks).text
+    }
+    func readingSentence(_ sentence: TranscriptSegment) -> String {
+        guard let groupID = segmentToUtterance[sentence.id], let group = utterances.first(where: { $0.id == groupID }) else { return sentence.text }
+        return ReadingTranscript(segments: group.segments, punctuate: readingPunctuation, paragraphBreaks: false).sentenceTexts[sentence.id] ?? sentence.text
+    }
+    func exportText(srt: Bool) -> String {
+        TranscriptExport.render(title: selected?.title ?? "", segments: segments, names: names, srt: srt,
+                                punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks)
+    }
     private func savePreferences() {
         guard store != nil else { return }
         do {
             let preferences = AppPreferences(modelsDirectory: modelsDirectory.path, readerFontSize: readerFontSize,
-                                             preRoll: preRoll, lastRecordingID: lastRecordingID)
+                                             preRoll: preRoll, lastRecordingID: lastRecordingID,
+                                             readingPunctuation: readingPunctuation, readingParagraphBreaks: readingParagraphBreaks)
             try JSONEncoder().encode(preferences).write(to: dataDirectory.appendingPathComponent("settings.json"), options: .atomic)
         } catch { alert = error.localizedDescription }
     }
@@ -322,7 +340,8 @@ final class AppModel: ObservableObject {
         searchTask = Task {
             try? await Task.sleep(nanoseconds: 180_000_000)
             guard !Task.isCancelled else { return }
-            do { hits = try store?.search(searchText, recordingID: searchAll ? nil : selectedID ?? "") ?? [] }
+            do { hits = try store?.search(searchText, recordingID: searchAll ? nil : selectedID ?? "",
+                                         punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks) ?? [] }
             catch { alert = error.localizedDescription }
         }
     }
@@ -368,7 +387,7 @@ final class AppModel: ObservableObject {
         panel.isExtensionHidden = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try TranscriptExport.render(title: recording.title, segments: segments, names: names, srt: srt).write(to: url, atomically: true, encoding: .utf8)
+            try exportText(srt: srt).write(to: url, atomically: true, encoding: .utf8)
             notice = "已导出 \(url.lastPathComponent)"
         } catch { alert = error.localizedDescription }
     }
