@@ -7,7 +7,7 @@ if [[ ! -x .runtime/tools/whisper-cli || ! -x .runtime/tools/ffmpeg ]]; then
 fi
 swift build -c release --disable-sandbox --cache-path .build/cache
 BIN_DIR="$(swift build -c release --disable-sandbox --cache-path .build/cache --show-bin-path)"
-APP_DIR="$PROJECT_DIR/dist/面试音频.app"
+APP_DIR="$PROJECT_DIR/dist/听阅.app"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$BIN_DIR/InterviewAudio" "$APP_DIR/Contents/MacOS/InterviewAudio"
 cp "$BIN_DIR/AudioWorker" "$APP_DIR/Contents/MacOS/AudioWorker"
@@ -24,12 +24,12 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleIdentifier</key><string>local.interview.audio</string>
-  <key>CFBundleName</key><string>面试音频</string>
-  <key>CFBundleDisplayName</key><string>面试音频</string>
+  <key>CFBundleName</key><string>听阅</string>
+  <key>CFBundleDisplayName</key><string>听阅</string>
   <key>CFBundleExecutable</key><string>InterviewAudio</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0.0</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.1.0</string>
+  <key>CFBundleVersion</key><string>2</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>

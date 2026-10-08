@@ -139,6 +139,20 @@ public final class LibraryStore {
     public func editSpeaker(segmentID: String, speaker: Int?) throws {
         try write("UPDATE segments SET speaker=?,speaker_edited=1,needs_review=0 WHERE id=?", [speaker,segmentID])
     }
+    public func editTexts(_ edits: [String: String]) throws {
+        try execute("BEGIN IMMEDIATE")
+        do {
+            for (id, text) in edits { try editText(segmentID: id, text: text) }
+            try execute("COMMIT")
+        } catch { try? execute("ROLLBACK"); throw error }
+    }
+    public func editSpeakers(segmentIDs: [String], speaker: Int?) throws {
+        try execute("BEGIN IMMEDIATE")
+        do {
+            for id in segmentIDs { try editSpeaker(segmentID: id, speaker: speaker) }
+            try execute("COMMIT")
+        } catch { try? execute("ROLLBACK"); throw error }
+    }
     public func applySpeakers(runID: String, turns: [SpeakerTurn]) throws {
         let matched = SpeakerMatcher.assign(try segments(runID: runID), turns: turns)
         try execute("BEGIN IMMEDIATE")
@@ -164,20 +178,12 @@ public final class LibraryStore {
     }
     public func search(_ term: String, recordingID: String? = nil) throws -> [SearchHit] {
         guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
-        // instr treats %, _, and backslashes literally, and works for one-character Chinese queries.
-        let q = try statement("""
-        SELECT s.id,s.start,s.end,s.original,s.edited,s.speaker,s.speaker_edited,s.needs_review,r.id,r.title,p.name
-        FROM recordings r JOIN segments s ON s.run_id=r.active_run
-        LEFT JOIN speakers p ON p.run_id=s.run_id AND p.speaker=s.speaker
-        WHERE instr(lower(COALESCE(s.edited,s.original)),lower(?)) > 0
-        \(recordingID == nil ? "" : "AND r.id=?") ORDER BY r.created_at DESC,s.start
-        """, recordingID.map { [term,$0] } ?? [term])
-        defer { sqlite3_finalize(q) }
         var result: [SearchHit] = []
-        while sqlite3_step(q) == SQLITE_ROW {
-            let s = segment(q)
-            result.append(SearchHit(recordingID: text(q,8)!, recordingTitle: text(q,9)!, segment: s,
-                                    speakerName: text(q,10) ?? SpeakerMatcher.defaultName(s.speaker)))
+        for recording in try recordings() where recordingID == nil || recording.id == recordingID {
+            guard let run = recording.activeRun else { continue }
+            result += TranscriptSearch.find(term, utterances: UtteranceGrouping.make(try segments(runID: run)),
+                                            recordingID: recording.id, recordingTitle: recording.title,
+                                            names: try speakerNames(runID: run))
         }
         return result
     }

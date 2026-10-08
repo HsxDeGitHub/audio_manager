@@ -78,6 +78,7 @@ public struct SearchHit: Identifiable, Sendable {
     public var recordingTitle: String
     public var segment: TranscriptSegment
     public var speakerName: String
+    public var preview: String
 }
 
 public struct WorkerRequest: Codable, Sendable {
@@ -186,6 +187,13 @@ public enum SpeakerMatcher {
 
 public enum TranscriptExport {
     public static func render(title: String, segments: [TranscriptSegment], names: [Int: String], srt: Bool) -> String {
+        if !srt {
+            let paragraphs = UtteranceGrouping.make(segments).map { utterance in
+                let name = utterance.speaker.flatMap { names[$0] } ?? SpeakerMatcher.defaultName(utterance.speaker)
+                return "[\(TimeFormat.clock(utterance.start)) – \(TimeFormat.clock(utterance.end))] \(name)\n\(utterance.text)"
+            }
+            return title + "\n\n" + paragraphs.joined(separator: "\n\n") + "\n"
+        }
         let ordered = segments.sorted { $0.start < $1.start }
         let lines = ordered.enumerated().map { index, segment -> String in
             let name = segment.speaker.flatMap { names[$0] } ?? SpeakerMatcher.defaultName(segment.speaker)

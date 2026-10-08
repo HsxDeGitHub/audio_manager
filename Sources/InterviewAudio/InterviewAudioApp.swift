@@ -26,13 +26,13 @@ struct InterviewAudioApp: App {
     @StateObject private var model = AppModel()
     @Environment(\.openWindow) private var openWindow
     var body: some Scene {
-        WindowGroup("面试音频", id: "library") {
+        WindowGroup("听阅", id: "library") {
             LibraryView(model: model)
-                .frame(minWidth: 1050, minHeight: 650)
+                .frame(minWidth: 1100, minHeight: 680)
                 .onAppear { delegate.model = model; delegate.reopenWindow = { openWindow(id: "library") } }
                 .task { await model.prepare() }
         }
-        .defaultSize(width: 1280, height: 820)
+        .defaultSize(width: 1360, height: 860)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("导入音频…") { model.pickFiles() }.keyboardShortcut("o")
@@ -44,6 +44,13 @@ struct InterviewAudioApp: App {
                 Button("播放 / 暂停") { model.player.toggle() }.keyboardShortcut(.space, modifiers: [.command])
                 Button("后退 10 秒") { model.player.seek(model.player.position - 10) }.keyboardShortcut(.leftArrow, modifiers: [.command])
                 Button("前进 10 秒") { model.player.seek(model.player.position + 10) }.keyboardShortcut(.rightArrow, modifiers: [.command])
+            }
+            CommandMenu("阅读") {
+                Button("搜索音频文字") { model.searchFocusRequestID = UUID() }.keyboardShortcut("f")
+                Button("定位当前句") { model.locateCurrentSentence() }.keyboardShortcut("l", modifiers: [.command, .shift])
+                Divider()
+                Button("放大文字") { model.setReaderFontSize(model.readerFontSize + 1) }.keyboardShortcut("+", modifiers: [.command])
+                Button("缩小文字") { model.setReaderFontSize(model.readerFontSize - 1) }.keyboardShortcut("-", modifiers: [.command])
             }
         }
     }

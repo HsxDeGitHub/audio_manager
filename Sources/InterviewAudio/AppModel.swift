@@ -4,7 +4,6 @@ import AVFoundation
 import UniformTypeIdentifiers
 import AudioCore
 
-private struct Preferences: Codable { var modelsDirectory: String }
 private struct QueuedJob { var recordingID: String; var speakersOnly: Bool }
 
 @MainActor
@@ -12,6 +11,7 @@ final class AppModel: ObservableObject {
     @Published var recordings: [Recording] = []
     @Published var selectedID: String?
     @Published var segments: [TranscriptSegment] = []
+    @Published var utterances: [SpeechUtterance] = []
     @Published var names: [Int: String] = [:]
     @Published var runs: [TranscriptRun] = []
     @Published var searchText = ""
@@ -28,6 +28,9 @@ final class AppModel: ObservableObject {
     @Published var modelsDirectory: URL
     @Published var focusSegmentID: String?
     @Published var focusRequestID = UUID()
+    @Published var searchFocusRequestID = UUID()
+    @Published var readerFontSize: Double = 16
+    @Published var preRoll: Double = 1
     let installer = ModelInstaller()
     let player = PlayerController()
     let dataDirectory: URL
@@ -40,10 +43,14 @@ final class AppModel: ObservableObject {
     private var cancelledJob = false
     private var lastSavedPosition = Date.distantPast
     private var searchTask: Task<Void, Never>?
+    private var segmentToUtterance: [String: String] = [:]
+    private var lastRecordingID: String?
+    private var prepared = false
     var selected: Recording? { recordings.first { $0.id == selectedID } }
     var ready: Bool { installer.ready }
     var taskCount: Int { queue.count + (worker == nil ? 0 : 1) }
-    var currentSegmentID: String? { segments.first { $0.start <= player.position && player.position < $0.end }?.id }
+    var currentSegmentID: String? { player.available ? segments.first { $0.start <= player.position && player.position < $0.end }?.id : nil }
+    func utteranceID(for segmentID: String?) -> String? { segmentID.flatMap { segmentToUtterance[$0] } }
 
     init() {
         let override = ProcessInfo.processInfo.environment["INTERVIEW_AUDIO_DATA_DIR"]
@@ -59,8 +66,11 @@ final class AppModel: ObservableObject {
         let defaultModels = FileManager.default.fileExists(atPath: adjacent.appendingPathComponent("ggml-large-v3.bin").path) ? adjacent
             : FileManager.default.fileExists(atPath: developmentModels.appendingPathComponent("ggml-large-v3.bin").path) ? developmentModels
             : dataDirectory.appendingPathComponent("Models", isDirectory: true)
-        let preferences = try? JSONDecoder().decode(Preferences.self, from: Data(contentsOf: dataDirectory.appendingPathComponent("settings.json")))
+        let preferences = try? JSONDecoder().decode(AppPreferences.self, from: Data(contentsOf: dataDirectory.appendingPathComponent("settings.json")))
         modelsDirectory = preferences.map { URL(fileURLWithPath: $0.modelsDirectory, isDirectory: true) } ?? defaultModels
+        readerFontSize = min(22, max(14, preferences?.readerFontSize ?? 16))
+        preRoll = min(2, max(0, preferences?.preRoll ?? 1))
+        lastRecordingID = preferences?.lastRecordingID
         do {
             store = try LibraryStore(url: dataDirectory.appendingPathComponent("library.sqlite"))
             reload()
@@ -72,9 +82,12 @@ final class AppModel: ObservableObject {
     }
 
     func prepare() async {
-        await installer.validate(directory: modelsDirectory)
+        guard !prepared else { return }; prepared = true
+        async let validation: Void = installer.validate(directory: modelsDirectory)
+        let restored = recordings.first(where: { $0.id == lastRecordingID }) ?? recordings.first
+        if let restored { await select(restored.id) }
+        await validation
         if !installer.ready { showSettings = true }
-        if let first = recordings.first { selectedID = first.id; await select(first.id) }
     }
     func reload() {
         do {
@@ -90,6 +103,10 @@ final class AppModel: ObservableObject {
                 segments = try store?.segments(runID: run) ?? []
                 names = try store?.speakerNames(runID: run) ?? [:]
             } else { segments = []; names = [:] }
+            utterances = UtteranceGrouping.make(segments)
+            segmentToUtterance = Dictionary(uniqueKeysWithValues: utterances.flatMap { utterance in
+                utterance.segments.map { ($0.id, utterance.id) }
+            })
         } catch { alert = error.localizedDescription }
     }
     func savePosition(_ value: Double? = nil) {
@@ -115,6 +132,7 @@ final class AppModel: ObservableObject {
     func select(_ id: String?) async {
         // Save the old selection before changing it (selection is kept separately from the List binding).
         if selectedID != id { savePosition(); selectedID = id }
+        lastRecordingID = id; savePreferences()
         focusSegmentID = nil; loadTranscript(); refreshSearch()
         guard let recording = selected else { player.unload(); return }
         await player.load(url: resolve(recording), fingerprint: recording.fingerprint, position: recording.playPosition)
@@ -131,7 +149,8 @@ final class AppModel: ObservableObject {
         Task { await importFiles(panel.urls) }
     }
     func importFiles(_ urls: [URL]) async {
-        guard !importing, store != nil else { return }
+        guard store != nil else { return }
+        guard !importing else { alert = "正在导入上一批音频，请稍后再拖入。"; return }
         importing = true; defer { importing = false }
         var imported = 0, duplicates = 0
         var failures: [String] = []
@@ -264,6 +283,31 @@ final class AppModel: ObservableObject {
     func editText(_ id: String, text: String) {
         do { try store?.editText(segmentID: id, text: text); loadTranscript(); refreshSearch() } catch { alert = error.localizedDescription }
     }
+    func editTexts(_ edits: [String: String]) {
+        do { try store?.editTexts(edits); loadTranscript(); refreshSearch() } catch { alert = error.localizedDescription }
+    }
+    func editUtteranceSpeaker(_ utterance: SpeechUtterance, speaker: Int?) {
+        do {
+            try store?.editSpeakers(segmentIDs: utterance.segments.map(\.id), speaker: speaker)
+            loadTranscript(); refreshSearch()
+        } catch { alert = error.localizedDescription }
+    }
+    func renameRecording(_ id: String, name: String) {
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, var recording = recordings.first(where: { $0.id == id }) else { return }
+        recording.title = title; save(recording)
+    }
+    func copyText(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
+    func setReaderFontSize(_ size: Double) { readerFontSize = min(22, max(14, size)); savePreferences() }
+    func setPreRoll(_ seconds: Double) { preRoll = min(2, max(0, seconds)); savePreferences() }
+    private func savePreferences() {
+        guard store != nil else { return }
+        do {
+            let preferences = AppPreferences(modelsDirectory: modelsDirectory.path, readerFontSize: readerFontSize,
+                                             preRoll: preRoll, lastRecordingID: lastRecordingID)
+            try JSONEncoder().encode(preferences).write(to: dataDirectory.appendingPathComponent("settings.json"), options: .atomic)
+        } catch { alert = error.localizedDescription }
+    }
     func editSpeaker(_ id: String, speaker: Int?) {
         do { try store?.editSpeaker(segmentID: id, speaker: speaker); loadTranscript(); refreshSearch() } catch { alert = error.localizedDescription }
     }
@@ -287,9 +331,14 @@ final class AppModel: ObservableObject {
         guard selectedID == hit.recordingID else { return }
         focusSegmentID = hit.segment.id
         focusRequestID = UUID()
-        player.seek(TimeFormat.seekStart(hit.segment.start), play: true)
+        player.seek(max(0, hit.segment.start - preRoll), play: true)
     }
-    func playSegment(_ segment: TranscriptSegment) { focusSegmentID = segment.id; focusRequestID = UUID(); player.seek(TimeFormat.seekStart(segment.start), play: true) }
+    func playSegment(_ segment: TranscriptSegment) { focusSegmentID = segment.id; focusRequestID = UUID(); player.seek(max(0, segment.start - preRoll), play: true) }
+    func locateCurrentSentence() { focusSegmentID = currentSegmentID; focusRequestID = UUID() }
+    func focusText(at position: Double) {
+        focusSegmentID = (segments.first(where: { $0.end >= position }) ?? segments.last)?.id
+        focusRequestID = UUID()
+    }
     func relocate() async {
         guard let recording = selected else { return }
         let panel = NSOpenPanel(); panel.message = "选择原录音。程序会校验内容，已有文字和纠错不会丢失。"
@@ -329,8 +378,7 @@ final class AppModel: ObservableObject {
         panel.message = "选择包含 Whisper、Silero VAD、语音分段和中文声纹模型的文件夹。"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         modelsDirectory = url
-        do { try JSONEncoder().encode(Preferences(modelsDirectory: url.path)).write(to: dataDirectory.appendingPathComponent("settings.json"), options: .atomic) }
-        catch { alert = error.localizedDescription }
+        savePreferences()
         await installer.validate(directory: url)
     }
     func shutdown() {
