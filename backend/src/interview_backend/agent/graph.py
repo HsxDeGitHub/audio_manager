@@ -108,7 +108,10 @@ class AgentEngine:
         all_questions = bool(re.search(r'全部.*问题|所有.*问题|问题.*汇总|列出.*问题|哪些问题', instruction))
         for i, chunk in enumerate(chunks):
             if emit: await emit('coverage', {'chunk': i + 1, 'chunks': len(chunks), 'covered': len(covered), 'total': len(sources)})
-            memory = self.memory_service.active(('global', 'session:'+context.get('session_id',''))) if hasattr(self,'memory_service') else []
+            scopes = ['global', 'session:' + context.get('session_id', '')]
+            scopes += ['recording:' + identifier for identifier in context.get('recording_ids', [])]
+            scopes += ['document:' + r['resource_id'] for r in context.get('write_resources', context.get('resources', [])) if r['resource_type'] == 'document']
+            memory = self.memory_service.active(scopes) if hasattr(self,'memory_service') else []
             if memory:
                 known = {(r['resource_type'], r['resource_id'], r['revision']) for r in context['resources']}
                 for item in memory:

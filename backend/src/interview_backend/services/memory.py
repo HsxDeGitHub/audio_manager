@@ -1,4 +1,5 @@
 import json
+import hashlib
 import uuid
 from pydantic import BaseModel, ConfigDict, Field
 from typing import Literal
@@ -22,6 +23,28 @@ def canonical(source):
 
 class MemoryService:
     def __init__(self, database, evidence): self.database, self.evidence = database, evidence
+
+    def remember_analysis(self, context, result):
+        """只从已校验的本次分析结论保存；类别和适用范围不交给模型选择。"""
+        if not context.get('message_id'): return []
+        recordings = context.get('recording_ids', [])
+        documents = [r['resource_id'] for r in context.get('write_resources', context.get('resources', [])) if r['resource_type'] == 'document']
+        scope = ('recording:' + recordings[0] if len(recordings) == 1 and not documents else
+                 'document:' + documents[0] if len(documents) == 1 and not recordings else
+                 'session:' + context['session_id'] if context.get('session_id') else None)
+        if scope is None: return []
+        allowed = {(r['resource_type'], r['resource_id'], r['revision']) for r in context.get('resources', [])}
+        saved = []
+        for i, claim in enumerate(result.get('claims') or []):
+            if claim.get('kind') != 'analysis' or not isinstance(claim.get('text'), str) or not claim['text'].strip(): continue
+            try: sources = [canonical(s) for s in claim.get('sources', [])]
+            except (KeyError, TypeError): continue
+            if not sources or any((s['resource_type'], s['resource_id'], s['revision']) not in allowed or not self.evidence.valid(s) for s in sources): continue
+            text = claim['text'].strip()
+            topic = '分析:' + hashlib.sha256(text.encode()).hexdigest()[:24]
+            saved.append(self.add({'category': 'analysis', 'content': text, 'topic': topic,
+                                   'scope': scope, 'sources': sources}, f"{context['message_id']}:analysis:{i}"))
+        return saved
 
     def add(self, candidate, operation_id):
         item = MemoryCandidate.model_validate(candidate)

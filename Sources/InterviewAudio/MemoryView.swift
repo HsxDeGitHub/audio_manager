@@ -82,7 +82,7 @@ struct MemoryView: View {
             Divider()
             if model.loading && model.items.isEmpty { ProgressView().controlSize(.small) }
             if model.items.isEmpty && !model.loading {
-                Text("还没有长期记忆。助手只会从明确的用户消息提取，不会把资料正文当成个人事实。")
+                Text("还没有长期记忆。个人陈述来自用户消息，分析记忆来自有来源的分析结论。")
                     .font(.callout).foregroundStyle(.secondary).padding(.vertical, 30)
             } else {
                 ScrollView {
@@ -129,6 +129,8 @@ struct MemoryView: View {
                 Text("\(item.sources.count) 个来源 · v\(item.revision)").font(.caption2).foregroundStyle(.tertiary)
             }
             Text(item.content).textSelection(.enabled)
+            if item.category == "analysis" { Text("分析判断 · 不代表本人确认或亲历").font(.caption).foregroundStyle(.orange) }
+            Text("适用范围：\(scopeTitle(item.scope))").font(.caption2).foregroundStyle(.secondary)
             HStack(spacing: 10) {
                 Button("编辑") { editing = item }
                 if item.state == "active" { Button("停用") { Task { await model.update(item, fields: ["state": "disabled"]) } } }
@@ -148,6 +150,14 @@ struct MemoryView: View {
         .padding(12).frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
         .opacity(item.state == "deleted" ? 0.55 : 1)
+    }
+
+    private func scopeTitle(_ scope: String) -> String {
+        if scope == "global" { return "全部会话" }
+        if scope.hasPrefix("recording:") { return "指定录音资料" }
+        if scope.hasPrefix("document:") { return "指定个人材料" }
+        if scope.hasPrefix("session:") { return "当前会话" }
+        return scope
     }
 }
 

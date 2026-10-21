@@ -63,3 +63,71 @@ def test_memory_api_supports_disable_and_delete_without_rebuild(client):
     stale = client.patch('/api/v1/memories/' + item['id'], json={
         'operation_id': 'api-stale', 'expected_revision': 2, 'fields': {'state': 'active'}})
     assert stale.status_code == 409
+
+
+def test_analysis_formed_from_scoped_cited_result_and_never_becomes_personal_fact(client, config):
+    import asyncio
+    from interview_backend.agent.memory import AutomaticMemory
+    service = seed(client)
+    context = client.app.state.evidence.freeze({'recording_id': 'r1'}, '分析面试表现')
+    context.update(message_id='m1', session_id='memory-session')
+    source = {'resource_type': 'segment', 'resource_id': 's1', 'revision': 1}
+    result = {'claims': [
+        {'text': '问题回答可能缺少验证步骤，这是分析判断。', 'kind': 'analysis', 'sources': [source]},
+        {'text': '无来源推测', 'kind': 'analysis', 'sources': []},
+        {'text': '其他场次的分析', 'kind': 'analysis', 'sources': [{'resource_type': 'segment', 'resource_id': 's3', 'revision': 1}]},
+        {'text': '建议练习', 'kind': 'suggestion', 'sources': [source]}]}
+    items = asyncio.run(AutomaticMemory(config, service).extract(context, result=result))
+    assert len(items) == 1 and items[0]['category'] == 'analysis' and items[0]['scope'] == 'recording:r1'
+    assert service.active() == []
+    assert service.active(('recording:r1',))[0]['sources'] == [source]
+    # 重启创建新服务，分析记忆仍可用，但不能作为用户事实引用。
+    reopened = MemoryService(client.app.state.database, client.app.state.evidence)
+    item = reopened.active(('recording:r1',))[0]
+    claim = {'kind': 'user_statement', 'text': '我确认这项分析是我的事实', 'sources': [{'resource_type': 'memory', 'resource_id': item['id'], 'revision': 1}]}
+    context['resources'].append(claim['sources'][0])
+    with pytest.raises(DomainError) as error:
+        client.app.state.evidence.validate_result({'claims': [claim]}, context)
+    assert error.value.code == 'analysis_not_user_fact'
+    reopened.update(item['id'], {'state': 'deleted'}, 1, 'delete-analysis')
+    again = asyncio.run(AutomaticMemory(config, service).extract({**context, 'message_id': 'm2'}, result=result))
+    assert again[0]['suppressed']
+
+
+def test_analysis_memory_is_invalidated_when_its_evidence_changes(client, config):
+    service = seed(client)
+    context = client.app.state.evidence.freeze({'recording_id': 'r1'}, '分析表现')
+    context.update(message_id='m1', session_id='memory-session')
+    items = service.remember_analysis(context, {'claims': [{'kind': 'analysis', 'text': '需复核的分析',
+                              'sources': [{'resource_type': 'segment', 'resource_id': 's1', 'revision': 1}]}]})
+    client.app.state.changesets.submit({'operation_id': 'change-analysis-source', 'targets': [
+        {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '已修正原文'}}]})
+    assert not service.active(('recording:r1',))
+    assert next(item for item in service.list()['items'] if item['id'] == items[0]['id'])['state'] == 'needs_review'
+
+
+def test_analysis_is_reused_only_for_the_recording_scope(client, config):
+    import asyncio
+    import json
+    from langchain_core.messages import AIMessage
+    from interview_backend.agent.graph import AgentEngine
+    from interview_backend.agent.tools import EvidenceService
+    service = seed(client)
+    evidence = client.app.state.evidence
+    context = evidence.freeze({'recording_id': 'r1'}, '分析表现')
+    context.update(message_id='m1', session_id='memory-session')
+    service.remember_analysis(context, {'claims': [{'kind': 'analysis', 'text': '需补充验证依据',
+        'sources': [{'resource_type': 'segment', 'resource_id': 's1', 'revision': 1}]}]})
+    class InspectModel:
+        def __init__(self, expected): self.expected = expected
+        def bind_tools(self, tools): return self
+        async def ainvoke(self, messages):
+            memories = json.loads(messages[-1].content)['current_valid_memories']
+            assert len(memories) == self.expected
+            assert all(item['category'] == 'analysis' for item in memories)
+            return AIMessage(content=json.dumps({'answer': '按当前证据分析', 'claims': []}))
+    engine = AgentEngine(config, client.app.state.tools, evidence)
+    engine.memory_service = service
+    asyncio.run(engine.execute('analysis-same-recording', '分析表现', context, model=InspectModel(1)))
+    other = evidence.freeze({'recording_id': 'r2'}, '分析表现')
+    asyncio.run(engine.execute('analysis-other-recording', '分析表现', other, model=InspectModel(0)))

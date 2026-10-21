@@ -88,7 +88,7 @@ class AgentAPI:
             await self.emit(identifier, 'started', {'state': 'running'})
             result = await self.engine.execute(identifier, context['instruction'], context, emit=lambda k,p: self.emit(identifier,k,p))
             if hasattr(self.engine, 'automatic_memory') and not result.get('clarification'):
-                try: result['memories'] = await self.engine.automatic_memory.extract(context)
+                try: result['memories'] = await self.engine.automatic_memory.extract(context, result=result)
                 except Exception: await self.emit(identifier, 'memory_pending', {'message':'自动记忆尚未完成，当前回答已保留。'})
             state = 'awaiting_input' if result.get('clarification') else 'completed'
             with self.database.transaction(True) as c:

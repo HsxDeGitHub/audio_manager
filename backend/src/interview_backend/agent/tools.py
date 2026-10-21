@@ -122,6 +122,11 @@ class EvidenceService:
             if claim['kind'] in {'original_statement', 'user_statement'} and not claim.get('sources'):
                 raise DomainError('missing_source', '模型事实缺少来源，不能作为结果。', 409)
             for ref in claim.get('sources', []):
+                if ref['resource_type'] == 'memory' and claim['kind'] in {'user_statement', 'original_statement'}:
+                    with self.database.transaction() as c:
+                        memory = require(c, 'memories', ref['resource_id'])
+                    if memory['category'] == 'analysis':
+                        raise DomainError('analysis_not_user_fact', '分析记忆必须标为分析，不能作为用户陈述或原话。', 409)
                 if claim['kind'] == 'user_statement' and any(s['resource_type'] == ref['resource_type'] and s['resource_id'] == ref['resource_id'] and s.get('kind') == 'original_statement' and not s.get('speaker_confirmed') for s in context.get('sources', [])):
                     raise DomainError('identity_unconfirmed', '未确认的说话人不能作为用户经历来源。', 409)
                 if (ref['resource_type'], ref['resource_id'], ref['revision']) not in allowed or not self.valid_after_changes(ref, changes):
