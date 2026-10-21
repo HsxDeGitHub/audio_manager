@@ -19,17 +19,30 @@ class MessageContext(BaseModel):
     document_ids: list[str] = Field(default_factory=list)
 
 
+def write_permissions(instruction):
+    # 引文与代码是用户提供的材料，不能因其包含执行动词而开放写工具。
+    command = re.sub(r'```[\s\S]*?```|“[^”]*”|「[^」]*」|『[^』]*』|"[^"]*"|`[^`]*`', '', instruction)
+    verbs = r'修改|修正|替换|改成|改为|删除|忘记|停用|重命名|撤销|合并|设置|更正|导入|添加材料|记住|更改|改动|编辑|写入'
+    negative = re.search(r'(?:不要|勿|禁止|不准|不许|不允许|不能|不可|不必|无需|不需要|暂不|先不|别).{0,20}(?:' + verbs + '|执行|操作)', command)
+    readonly = re.search(r'只读|(?:只|仅)(?:需要|需|要)?(?:分析|阅读|解释|总结|评估|检查|讨论|查看|告诉|提供建议)', command)
+    discussion = re.search(r'(?:怎么|如何|怎样|能否|是否|可否|能不能|可不可以).{0,12}(?:' + verbs + ')', command)
+    if negative or readonly or discussion: return False, False
+    importing = bool(re.search(r'(?:帮我|请|把|将|直接).{0,40}(?:导入|添加材料)|^(?:导入|添加材料)', command))
+    mutation = importing or bool(re.search(r'(?:帮我|请|把|将|直接).{0,40}(?:' + verbs + ')|^(?:' + verbs + ')', command))
+    return mutation, importing
+
+
 class EvidenceService:
     def __init__(self, database): self.database = database
 
     def freeze(self, context, instruction):
         context = MessageContext.model_validate(context)
+        mutation, importing = write_permissions(instruction)
         if context.scope not in {'current', 'all'}:
             raise DomainError('invalid_scope', '资料范围不正确。', 422)
         with self.database.transaction() as c:
             recordings = [dict(r) for r in c.execute('SELECT * FROM recordings ORDER BY created_at,id')] if context.scope == 'all' else [require(c, 'recordings', context.recording_id)] if context.recording_id else []
             resources = []; excluded = []; sources = []
-            importing = bool(re.search(r'导入|添加材料', instruction))
             if context.scope == 'current' and not recordings and not context.document_ids and not importing:
                 return {**context.model_dump(), 'resources': [], 'sources': [], 'excluded': [], 'allow_write': False, 'clarification': '请指定当前资料，或切换为全部资料。'}
             for recording in recordings:
@@ -72,7 +85,6 @@ class EvidenceService:
             if re.search(r'这段|这一段|这句话', instruction) and not context.segment_ids and not context.draft_id and len(sources) > 1:
                 return {**context.model_dump(), 'resources': resources, 'sources': sources, 'excluded': excluded, 'allow_write': False, 'clarification': '请引用要处理的段落，避免误改其他内容。'}
             # 只有用户消息中的执行动词可允许写工具，资料正文永远不参与权限判断。
-            mutation = importing or bool(re.search(r'(帮我|请|把|将|直接).{0,40}(修改|修正|替换|改成|改为|删除|忘记|停用|重命名|撤销|合并|设置|更正)|^(修改|修正|删除|撤销|忘记|停用|设置|记住)', instruction))
             device = bool(re.search(r'定位|回听|播放|导出|保存为|复制|剪贴板|选择文件|打开文件|转写|重新识别|取消任务|整理|周报分析', instruction))
             external = bool(re.search(r'外部工具|MCP', instruction, re.IGNORECASE))
             return {**context.model_dump(), 'resources': resources, 'write_resources': list(resources), 'sources': sources, 'excluded': excluded, 'allow_write': mutation,

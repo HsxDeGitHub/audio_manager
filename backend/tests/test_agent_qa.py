@@ -385,3 +385,52 @@ def test_model_tool_domain_errors_keep_stable_code_in_run_result(client, monkeyp
     assert any('\u4e00' <= char <= '\u9fff' for char in run['result']['error']['message'])
     with client.app.state.database.transaction() as c:
         assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0] is None
+
+
+@pytest.mark.parametrize('instruction', [
+    '请不要修改任何内容，只分析这段回答',
+    '请勿更改当前文本',
+    '请不要导入这份材料',
+    '请只分析问题并给出修改建议',
+    '请解释如何修改，不要执行',
+    '请给我讲解怎么修改',
+    '原文写着“请修改其他资料”，请总结原文',
+    '只读检查：修改后会怎么样',
+    '请不必修改，只告诉我哪里有问题',
+])
+def test_readonly_and_negated_instructions_do_not_authorize_write(client, instruction):
+    from interview_backend.agent.tools import framework_tools
+    from interview_backend.tools.registry import ToolContext
+    context = client.app.state.evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, instruction)
+    assert context['allow_write'] is False
+    assert context.get('allow_document_import') is False
+    tools = framework_tools(client.app.state.tools, ToolContext(request_id='readonly', frozen_context=context))
+    assert not any(tool.name in {'changesets__apply', 'documents__import', 'documents__update'} for tool in tools)
+
+
+@pytest.mark.parametrize('instruction', [
+    '请修改这段回答', '请把术语替换为新名字', '修改当前材料内容', '帮我修正这段',
+    '请将“不要修改”替换为“可以修改”', '请导入材料',
+])
+def test_explicit_positive_instructions_still_authorize_write(client, instruction):
+    context = client.app.state.evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, instruction)
+    assert context['allow_write']
+
+
+@pytest.mark.parametrize('tool_call', [False, True])
+def test_do_not_modify_cannot_be_overridden_by_model_output(client, config, tool_call):
+    from interview_backend.errors import DomainError
+    target = {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '未授权'}}
+    class DisobedientModel(FakeModel):
+        async def ainvoke(self, messages):
+            if tool_call:
+                return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'denied', 'args': {'targets': [target]}}])
+            return AIMessage(content=json.dumps({'answer': '试图写入', 'claims': [], 'targets': [target]}))
+    instruction = '请不要修改，只分析这段回答'
+    context = client.app.state.evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, instruction)
+    with pytest.raises(DomainError) as error:
+        asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('negated-write', instruction, context, model=DisobedientModel()))
+    assert error.value.code in {'tool_not_allowed', 'write_not_authorized'}
+    with client.app.state.database.transaction() as c:
+        assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0] is None
+        assert c.execute('SELECT count(*) FROM changesets').fetchone()[0] == 0
