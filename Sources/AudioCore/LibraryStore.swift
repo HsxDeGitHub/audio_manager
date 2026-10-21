@@ -42,8 +42,9 @@ public final class LibraryStore {
         while sqlite3_step(columns) == SQLITE_ROW { if text(columns, 1) == "reviewed" { hasReviewed = true } }
         sqlite3_finalize(columns)
         if !hasReviewed { try execute("ALTER TABLE segments ADD COLUMN reviewed INTEGER NOT NULL DEFAULT 0") }
-        try execute("PRAGMA user_version=2")
+        try execute("PRAGMA user_version=3")
         try execute("CREATE TABLE IF NOT EXISTS reading_cache (run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, cache_key TEXT NOT NULL, rendered TEXT NOT NULL, PRIMARY KEY(run_id,cache_key))")
+        try execute("CREATE TABLE IF NOT EXISTS ai_drafts (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE, created_at REAL NOT NULL, payload TEXT NOT NULL)")
         // Processing cannot continue after an app exit. Keep queued work visible, but never auto-start it.
         try execute("UPDATE recordings SET state='interrupted', error='应用退出前任务未完成，请点击重试。' WHERE state IN ('queued','preprocessing','transcribing','diarizing')")
     }
@@ -274,6 +275,18 @@ public final class LibraryStore {
             if let key = text(q,0), let json = text(q,1), let result = try? JSONDecoder().decode([String: String].self, from: Data(json.utf8)) { values[key] = result }
         }
         return values
+    }
+    public func saveAIDraft(_ draft: AIDraft) throws {
+        let payload = String(decoding: try JSONEncoder().encode(draft), as: UTF8.self)
+        try write("INSERT INTO ai_drafts VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload", [draft.id,draft.runID,draft.createdAt,payload])
+    }
+    public func aiDrafts(runID: String) throws -> [AIDraft] {
+        let q = try statement("SELECT payload FROM ai_drafts WHERE run_id=? ORDER BY created_at DESC", [runID]); defer { sqlite3_finalize(q) }
+        var drafts: [AIDraft] = []
+        while sqlite3_step(q) == SQLITE_ROW {
+            if let json = text(q,0) { drafts.append(try JSONDecoder().decode(AIDraft.self, from: Data(json.utf8))) }
+        }
+        return drafts
     }
     public func search(_ term: String, recordingID: String? = nil, punctuate: Bool = true,
                        paragraphBreaks: Bool = true, density: ReadingDensity = .balanced, smartPunctuation: Bool = false) throws -> [SearchHit] {

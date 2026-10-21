@@ -13,6 +13,13 @@ struct TranscriptView: View {
             titleBar
             Divider()
             if !model.segments.isEmpty {
+                Picker("阅读内容", selection: $model.readerShowsAI) {
+                    Text("转写原文").tag(false)
+                    Text("AI 整理稿").tag(true)
+                }.pickerStyle(.segmented).frame(width: 260).padding(.vertical, 10)
+                if model.readerShowsAI {
+                    AIDraftReaderView(model: model)
+                } else {
                 readerToolbar
                 if model.selectionMode { BulkReviewBar(model: model) }
                 ScrollViewReader { proxy in
@@ -30,8 +37,9 @@ struct TranscriptView: View {
                     .task(id: recording.id) {
                         // Let native paragraph heights settle before restoring a position in a lazy stack.
                         try? await Task.sleep(nanoseconds: 150_000_000)
-                        guard !Task.isCancelled, model.selectedID == recording.id, model.focusSegmentID == nil else { return }
-                        model.focusText(at: model.selected?.playPosition ?? 0)
+                        guard !Task.isCancelled, model.selectedID == recording.id else { return }
+                        if let id = model.utteranceID(for: model.focusSegmentID) { proxy.scrollTo(id, anchor: .top) }
+                        else { model.focusText(at: model.selected?.playPosition ?? 0) }
                     }
                     .onChange(of: model.currentSegmentID) { previous, current in
                         let before = model.utteranceID(for: previous), after = model.utteranceID(for: current)
@@ -42,6 +50,7 @@ struct TranscriptView: View {
                     .onChange(of: model.focusRequestID) { _, _ in
                         if let id = model.utteranceID(for: model.focusSegmentID) { proxy.scrollTo(id, anchor: .top) }
                     }
+                }
                 }
             } else {
                 VStack(spacing: 14) {
@@ -69,6 +78,8 @@ struct TranscriptView: View {
                     }.font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 10)
+                Button { model.showAICompose = true } label: { Label("AI 整理", systemImage: "sparkles") }
+                    .disabled(model.segments.isEmpty || model.aiActiveDraftID != nil)
                 Menu {
                     Button("导出纯对话 TXT（无时间范围）…") { model.export(srt: false, plainDialogue: true) }
                     Button("导出发言文字 TXT（带时间范围）…") { model.export(srt: false) }

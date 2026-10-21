@@ -16,6 +16,21 @@ struct LibraryView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if model.aiActiveDraftID != nil {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text(model.aiProgressMessage.isEmpty ? "正在准备 AI 整理…" : model.aiProgressMessage).lineLimit(1)
+                    Spacer()
+                    Button("查看整理稿") {
+                        Task {
+                            if let id = model.aiActiveRecordingID { await model.select(id) }
+                            if let run = model.aiWorkingDraft?.runID, model.selected?.activeRun != run { model.switchRun(run) }
+                            model.selectedAIDraftID = model.aiActiveDraftID; model.readerShowsAI = true
+                        }
+                    }
+                    Button("取消") { model.cancelAI() }
+                }.font(.caption).padding(.horizontal, 24).padding(.vertical, 8)
+            }
             Divider()
             HSplitView {
                 sidebar.frame(minWidth: 220, idealWidth: 248, maxWidth: 280)
@@ -29,6 +44,8 @@ struct LibraryView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $model.showAbout) { AboutView() }
         .sheet(isPresented: $model.showSettings) { ModelSettingsView(model: model, installer: model.installer) }
+        .sheet(isPresented: $model.showAISettings) { AISettingsView(model: model) }
+        .sheet(isPresented: $model.showAICompose) { AIComposeView(model: model) }
         .sheet(item: $renaming) { recording in
             VStack(alignment: .leading, spacing: 18) {
                 Text("重命名音频").font(.headline)
@@ -84,8 +101,11 @@ struct LibraryView: View {
             .frame(width: 380)
             Button { model.pickFiles() } label: { Label(model.importing ? "正在导入" : "导入音频", systemImage: "plus") }
                 .buttonStyle(.borderedProminent).disabled(model.importing)
-            Button { model.showSettings = true } label: { Image(systemName: "gearshape") }
-                .buttonStyle(.borderless).help("模型设置").accessibilityLabel("模型设置")
+            Menu {
+                Button("本地识别模型…") { model.showSettings = true }
+                Button("大模型配置…") { model.showAISettings = true }
+            } label: { Image(systemName: "gearshape") }
+                .menuStyle(.borderlessButton).fixedSize().help("模型设置").accessibilityLabel("模型设置")
         }.padding(.horizontal, 24).padding(.vertical, 15)
     }
     private var sidebar: some View {
@@ -287,7 +307,7 @@ struct ModelSettingsView: View {
             }
             Text(installer.message).font(.caption).foregroundStyle(.secondary)
             if let error = installer.error { Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
-            Label("录音和文字保存在本机。仅下载模型时连接网络。", systemImage: "lock.shield").font(.caption).foregroundStyle(.secondary)
+            Label("本地识别不发送录音或文字；AI 整理使用单独配置的接口。", systemImage: "lock.shield").font(.caption).foregroundStyle(.secondary)
             HStack {
                 if installer.busy { Button("取消下载") { installer.cancel() } }
                 else if !installer.ready {

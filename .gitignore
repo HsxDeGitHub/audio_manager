@@ -5,4 +5,5 @@ dist/
 TestArtifacts/
 .DS_Store
 *.xcuserstate
+llm-settings.json
 

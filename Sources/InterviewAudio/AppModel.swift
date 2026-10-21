@@ -51,6 +51,18 @@ final class AppModel: ObservableObject {
     @Published var activeHitID: String?
     @Published var hasSearchOrigin = false
     @Published var showAbout = false
+    @Published var showAISettings = false
+    @Published var showAICompose = false
+    @Published var aiSettings = AISettings()
+    @Published var aiDrafts: [AIDraft] = []
+    @Published var selectedAIDraftID: String?
+    @Published var readerShowsAI = false
+    @Published var aiActiveDraftID: String?
+    @Published var aiActiveRecordingID: String?
+    @Published var aiProgressMessage = ""
+    var aiTask: Task<Void, Never>?
+    var aiWorkingDraft: AIDraft?
+    let aiClient = AIClient()
     private struct SearchOrigin { var recordingID: String?; var position: Double; var focusedID: String?; var playing: Bool }
     private var searchOrigin: SearchOrigin?
     private var searchSession = false
@@ -65,7 +77,7 @@ final class AppModel: ObservableObject {
     let player = PlayerController()
     let dataDirectory: URL
     let toolsDirectory: URL
-    private var store: LibraryStore?
+    private(set) var store: LibraryStore?
     private var queue: [QueuedJob] = []
     private var worker: Process?
     private var request: WorkerRequest?
@@ -107,6 +119,8 @@ final class AppModel: ObservableObject {
         smartPunctuation = preferences?.smartPunctuation ?? true
         readingDensity = preferences?.readingDensity ?? .balanced
         librarySort = preferences?.librarySort ?? .newest; libraryFilter = preferences?.libraryFilter ?? .all
+        do { aiSettings = try AISettings.load(from: dataDirectory.appendingPathComponent("llm-settings.json")) }
+        catch { alert = "大模型配置文件无法读取，请在大模型设置中检查。" }
         do {
             store = try LibraryStore(url: dataDirectory.appendingPathComponent("library.sqlite"))
             reload()
@@ -148,6 +162,7 @@ final class AppModel: ObservableObject {
                 utterance.segments.map { ($0.id, utterance.id) }
             })
             preparePunctuation()
+            loadAIDrafts()
         } catch { alert = error.localizedDescription }
     }
     func savePosition(_ value: Double? = nil) {
@@ -172,7 +187,7 @@ final class AppModel: ObservableObject {
     }
     func select(_ id: String?) async {
         // Save the old selection before changing it (selection is kept separately from the List binding).
-        if selectedID != id { savePosition(); selectedID = id; reviewFilter = .all; bulkSelection = []; selectionMode = false; sampleSpeaker = nil }
+        if selectedID != id { savePosition(); selectedID = id; reviewFilter = .all; bulkSelection = []; selectionMode = false; sampleSpeaker = nil; readerShowsAI = false; selectedAIDraftID = nil }
         lastRecordingID = id; savePreferences()
         focusSegmentID = nil; loadTranscript(); refreshSearch()
         guard let recording = selected else { player.unload(); return }
@@ -461,6 +476,7 @@ final class AppModel: ObservableObject {
         }
     }
     func openHit(_ hit: SearchHit) async {
+        readerShowsAI = false
         activeHitID = hit.id; reviewFilter = .all
         if selectedID != hit.recordingID { await select(hit.recordingID) }
         guard selectedID == hit.recordingID else { return }
@@ -482,7 +498,7 @@ final class AppModel: ObservableObject {
         focusSegmentID = origin.focusedID ?? segments.first(where: { $0.end >= origin.position })?.id; focusRequestID = UUID()
     }
     func playSegment(_ segment: TranscriptSegment) { focusSegmentID = segment.id; focusRequestID = UUID(); player.seek(max(0, segment.start - preRoll), play: true) }
-    func locateCurrentSentence() { reviewFilter = .all; focusSegmentID = currentSegmentID; focusRequestID = UUID() }
+    func locateCurrentSentence() { readerShowsAI = false; reviewFilter = .all; focusSegmentID = currentSegmentID; focusRequestID = UUID() }
     func focusText(at position: Double) {
         focusSegmentID = (segments.first(where: { $0.end >= position }) ?? segments.last)?.id
         focusRequestID = UUID()
@@ -501,6 +517,7 @@ final class AppModel: ObservableObject {
     }
     func remove(_ id: String) {
         guard activeRecordingID != id else { alert = "请先取消当前任务，等待清理完成后再移除。"; return }
+        guard aiActiveRecordingID != id else { alert = "请先取消该录音的 AI 整理，再移除。"; return }
         queue.removeAll { $0.recordingID == id }
         do {
             try store?.remove(id)
@@ -530,6 +547,7 @@ final class AppModel: ObservableObject {
         await installer.validate(directory: url)
     }
     func shutdown() {
+        stopAIForShutdown()
         savePosition(); installer.cancel(); punctuationTask?.cancel(); punctuationProcessor.cancel()
         for job in queue {
             if var r = recordings.first(where: { $0.id == job.recordingID }) { r.state = .interrupted; try? store?.save(r) }
