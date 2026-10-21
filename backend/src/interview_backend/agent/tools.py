@@ -128,6 +128,11 @@ class EvidenceService:
 
     def validate_result(self, result, context, changes=()):
         allowed = {(r['resource_type'], r['resource_id'], r['revision']) for r in context['resources']}
+        frozen_keys = {(kind, identifier) for kind, identifier, _ in allowed}
+        # 工具可能返回本次提交后的来源版本；只扩充引用版本，不扩大写入对象范围。
+        allowed.update((item['resource_type'], item['resource_id'], item['after_revision'])
+                       for change in changes if change['state'] == 'committed' for item in change['items']
+                       if (item['resource_type'], item['resource_id']) in frozen_keys)
         for claim in result.get('claims', []):
             if claim.get('kind') not in {'original_statement', 'user_statement', 'analysis', 'suggestion', 'insufficient_evidence'}:
                 raise DomainError('invalid_claim', '模型未区分原话、判断和建议。', 409)

@@ -104,12 +104,12 @@ final class AssistantModel: ObservableObject {
     }
     func resume(_ id: String, model: AppModel) async {
         guard let client else { return }
-        do { let _: AssistantAcknowledgment = try await client.send("/api/v1/agent/runs/\(id)/resume", method: "POST"); follow(id, model: model) }
+        do { error = nil; let _: AssistantAcknowledgment = try await client.send("/api/v1/agent/runs/\(id)/resume", method: "POST"); follow(id, model: model) }
         catch { self.error = error.localizedDescription }
     }
     func revert(_ id: String, model: AppModel) async {
         guard let client else { return }
-        do { let _: AssistantChange = try await client.send("/api/v1/changesets/\(id)/revert", method: "POST", body: JSONSerialization.data(withJSONObject: ["operation_id": UUID().uuidString])); model.reload(); try await loadHistory() }
+        do { error = nil; let _: AssistantChange = try await client.send("/api/v1/changesets/\(id)/revert", method: "POST", body: JSONSerialization.data(withJSONObject: ["operation_id": UUID().uuidString])); model.reload(); try await loadHistory() }
         catch { self.error = error.localizedDescription }
     }
     func stop() { listener?.cancel() }

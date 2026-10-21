@@ -434,3 +434,32 @@ def test_do_not_modify_cannot_be_overridden_by_model_output(client, config, tool
     with client.app.state.database.transaction() as c:
         assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0] is None
         assert c.execute('SELECT count(*) FROM changesets').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('external_edit', [False, True])
+def test_model_can_cite_its_committed_new_revision_but_not_concurrent_edits(client, config, external_edit):
+    from interview_backend.errors import DomainError
+    class NewRevisionModel(FakeModel):
+        step = 0
+        async def ainvoke(self, messages):
+            self.step += 1
+            if self.step == 1:
+                return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'own-write', 'args': {'targets': [
+                    {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '本次提交的新正文'}}]}}])
+            if external_edit:
+                client.app.state.changesets.submit({'operation_id': 'concurrent-other-run', 'targets': [
+                    {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 2, 'fields': {'text': '并发新正文'}}]})
+            return AIMessage(content=json.dumps({'answer': '已提交修正。', 'claims': [
+                {'text': '本次提交的新正文', 'kind': 'original_statement', 'sources': [
+                    {'resource_type': 'segment', 'resource_id': 's1', 'revision': 3 if external_edit else 2}]}]}))
+    evidence = client.app.state.evidence
+    context = evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, '请修正这段正文')
+    engine = AgentEngine(config, client.app.state.tools, evidence)
+    if external_edit:
+        with pytest.raises(DomainError) as failure:
+            asyncio.run(engine.execute('own-new-revision', context['instruction'], context, model=NewRevisionModel()))
+        assert failure.value.code == 'stale_source'
+    else:
+        result = asyncio.run(engine.execute('own-new-revision', context['instruction'], context, model=NewRevisionModel()))
+        assert result['claims'][0]['sources'][0]['revision'] == 2
+        assert result['changeset']['count'] == 1
