@@ -5,6 +5,9 @@ cd "$PROJECT_DIR"
 if [[ ! -x .runtime/tools/whisper-cli || ! -x .runtime/tools/ffmpeg ]]; then
   python3 Scripts/bootstrap.py
 fi
+# 构建缓存放在项目内，避免受限环境无法写入用户级 Swift/Clang 缓存。
+export CLANG_MODULE_CACHE_PATH="$PROJECT_DIR/.build/clang-module-cache"
+export SWIFT_MODULECACHE_PATH="$PROJECT_DIR/.build/swift-module-cache"
 swift build -c release --disable-sandbox --cache-path .build/cache
 BIN_DIR="$(swift build -c release --disable-sandbox --cache-path .build/cache --show-bin-path)"
 APP_DIR="$PROJECT_DIR/dist/听阅.app"

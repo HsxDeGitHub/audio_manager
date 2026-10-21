@@ -118,3 +118,10 @@
 - 本阶段验证结果：后端 93 项测试通过（含真实本机服务生命周期、MCP 内存协议适配和设备命令）；Swift 76 项、7 套件通过，2 项真实后端联调按开关跳过；`Scripts/check_backend_smoke.py` 的真实启动、认证、工具调用、进程结束和端口释放通过；功能文档 36 条需求/成功标准全部关联有效任务。
 - 独立运行时打包：`Scripts/package_backend.py` 从 `backend/uv.lock` 导出锁定依赖，下载 Python 3.12 到应用资源目录，安装后端 wheel 与 agent/local-embeddings 原生扩展，签名 124 个运行时二进制。基础+Agent 与完整（含语义依赖）两种运行时分别在临时 `.app` 中构建，完整运行时 327 MB；移动到另一路径后仍可启动服务，健康与能力状态返回正常，`codesign --verify --strict` 对解释器、扩展和测试 `.app` 通过。
 - 未执行项：没有调用真实模型接口或发送真实资料；没有迁移个人正式资料库；没有实际录音、完整界面点击、真实外部 MCP 子进程或“无开发环境电脑”上的完整 `.app` 验收。设备桥接的界面效果和文件取消由代码与契约测试覆盖，仍需人工验收。因此 T055 保持未勾选，不能把本阶段描述为整体交付完成。
+
+### 完整 `.app` 打包与强制退出回收
+
+- 修正打包脚本的 Swift/Clang 缓存位置后，`PACKAGE_EMBEDDINGS=0 zsh Scripts/package.sh` 完成发布构建，生成 239 MB 的 `dist/听阅.app`，`codesign --verify --deep --strict` 通过；应用内包含独立 Python 3.12、Agent/MCP 依赖与已签名原生扩展。
+- 使用 `INTERVIEW_AUDIO_DATA_DIR=/tmp/t55-data` 启动打包应用：应用自动启动 `Contents/Resources/Backend/python/bin/python3`，在随机回环端口监听，创建 `Backend/library.sqlite`、日志和 `.service.lock`；设备桥接按 0.6 秒轮询设备命令。
+- 对应用主进程执行 `SIGKILL` 模拟父进程强制结束：后端在 10 秒内退出，监听端口释放，未发现残留的 `interview_backend` 进程。该结果验证进程生命线和端口回收路径，不等同于完整界面的正常退出验收。
+- 仍未执行：真实模型接口、实际录音转写、完整界面逐项点击、真实外部 MCP 子进程、无 Python/uv/网络的目标电脑验收。T055 保持未勾选。
