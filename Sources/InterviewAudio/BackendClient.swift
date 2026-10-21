@@ -130,7 +130,7 @@ indirect enum BackendJSONValue: Decodable, Equatable, Sendable {
     }
 }
 
-private final class BackendSessionDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+final class BackendSessionDelegate: NSObject, URLSessionTaskDelegate, Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         // 会话令牌和资料只能发送到启动时确定的本机服务，不跟随任何重定向。

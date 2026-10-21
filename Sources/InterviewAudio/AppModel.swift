@@ -77,7 +77,10 @@ final class AppModel: ObservableObject {
     let player = PlayerController()
     let dataDirectory: URL
     let toolsDirectory: URL
-    private(set) var store: LibraryStore?
+    private(set) var store: BackendLibraryStore?
+    let backendProcess = BackendProcess()
+    @Published var backendState = "正在连接本地服务…"
+    @Published var backendUnavailable = false
     private var queue: [QueuedJob] = []
     private var worker: Process?
     private var request: WorkerRequest?
@@ -121,10 +124,6 @@ final class AppModel: ObservableObject {
         librarySort = preferences?.librarySort ?? .newest; libraryFilter = preferences?.libraryFilter ?? .all
         do { aiSettings = try AISettings.load(from: dataDirectory.appendingPathComponent("llm-settings.json")) }
         catch { alert = "大模型配置文件无法读取，请在大模型设置中检查。" }
-        do {
-            store = try LibraryStore(url: dataDirectory.appendingPathComponent("library.sqlite"))
-            reload()
-        } catch { alert = "资料库初始化失败：\(error.localizedDescription)" }
         player.onPosition = { [weak self] position in
             guard let self, Date().timeIntervalSince(self.lastSavedPosition) > 3 else { return }
             self.savePosition(position)
@@ -133,12 +132,23 @@ final class AppModel: ObservableObject {
 
     func prepare() async {
         guard !prepared else { return }; prepared = true
+        await connectBackend()
         async let validation: Void = installer.validate(directory: modelsDirectory)
         let restored = recordings.first(where: { $0.id == lastRecordingID }) ?? recordings.first
         if let restored { await select(restored.id) }
         await validation
         loadTranscript()
         if !installer.ready { showSettings = true }
+    }
+    func connectBackend() async {
+        do {
+            let connection = try await backendProcess.start(dataDirectory: dataDirectory)
+            store = BackendLibraryStore(connection: connection)
+            backendUnavailable = false; backendState = "本地服务已连接"; reload()
+        } catch {
+            store = nil; backendUnavailable = true
+            backendState = backendProcess.diagnostic ?? "服务不可用，请重试。"
+        }
     }
     func reload() {
         do {
@@ -269,6 +279,7 @@ final class AppModel: ObservableObject {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
             let handle = try FileHandle(forWritingTo: logURL); logHandle = handle
             child.standardError = handle; child.standardInput = FileHandle.nullDevice
+            try store?.startWorker(request)
             worker = child; try child.run()
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 var buffer = Data()
@@ -293,25 +304,13 @@ final class AppModel: ObservableObject {
         }
     }
     private func handle(_ event: WorkerEvent, request: WorkerRequest) {
-        guard event.jobID == activeJobID, var recording = recordings.first(where: { $0.id == request.recordingID }) else { return }
+        guard event.jobID == activeJobID, let recording = recordings.first(where: { $0.id == request.recordingID }) else { return }
         do {
-            switch event.kind {
-            case "stage":
-                if !cancelledJob, let state = event.state { recording.state = state; try store?.save(recording) }
+            let activated = try store?.ingestWorker(event, request: request)
+            if activated == false { notice = "新转写已存为历史版本，当前人工纠错版本保持不变。" }
+            if event.kind == "stage" {
                 if let message = event.message { phaseMessage = message; progress = nil }
                 if let value = event.progress { progress = value }
-            case "transcript":
-                if let segments = event.segments {
-                    let activated = try store?.addTranscript(recordingID: recording.id, runID: request.runID, segments: segments, duration: event.duration) ?? false
-                    if !activated { notice = "新转写已存为历史版本，当前人工纠错版本保持不变。" }
-                }
-            case "diarization":
-                if let turns = event.turns { try store?.applySpeakers(runID: request.runID, turns: turns) }
-            case "done":
-                if !cancelledJob { recording.state = .completed; recording.error = nil; try store?.save(recording) }
-            case "error":
-                if !cancelledJob { recording.state = .failed; recording.error = event.message; try store?.save(recording) }
-            default: break
             }
             reload()
         } catch {
@@ -331,7 +330,7 @@ final class AppModel: ObservableObject {
     }
     func cancel(_ id: String) {
         queue.removeAll { $0.recordingID == id }
-        if activeRecordingID == id { cancelledJob = true; worker?.terminate(); phaseMessage = "正在取消并清理临时文件…" }
+        if activeRecordingID == id { if let job = activeJobID { try? store?.stopWorker(job, state: "cancelled") }; cancelledJob = true; worker?.terminate(); phaseMessage = "正在取消并清理临时文件…" }
         if var recording = recordings.first(where: { $0.id == id }) { recording.state = .cancelled; recording.error = nil; save(recording) }
     }
     func changeSpeakerCount(_ count: Int?) { guard var r = selected else { return }; r.speakerCount = count; save(r) }
@@ -548,6 +547,7 @@ final class AppModel: ObservableObject {
     }
     func shutdown() {
         stopAIForShutdown()
+        if let job = activeJobID { try? store?.stopWorker(job, state: "interrupted") }
         savePosition(); installer.cancel(); punctuationTask?.cancel(); punctuationProcessor.cancel()
         for job in queue {
             if var r = recordings.first(where: { $0.id == job.recordingID }) { r.state = .interrupted; try? store?.save(r) }
@@ -555,5 +555,6 @@ final class AppModel: ObservableObject {
         queue = []
         if let id = activeRecordingID, var r = recordings.first(where: { $0.id == id }) { r.state = .interrupted; try? store?.save(r) }
         cancelledJob = true; worker?.terminate(); player.pause()
+        store = nil; backendProcess.stop()
     }
 }

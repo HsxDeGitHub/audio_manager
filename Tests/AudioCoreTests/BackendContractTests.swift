@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import Testing
+import AudioCore
 @testable import InterviewAudio
 
 private final class BackendStubProtocol: URLProtocol, @unchecked Sendable {
@@ -239,7 +240,7 @@ private final class BackendStubProtocol: URLProtocol, @unchecked Sendable {
         #expect(try await c.health().status == "ok")
         let status = try await c.status()
         #expect(status.legacyImported && status.counts["recordings"] == 2)
-        #expect(status.supports("library_read") && !status.supports("business_write"))
+        #expect(status.supports("library_read") && status.supports("business_write"))
         let first = try await c.recordings(limit: 1), second = try await c.recordings(offset: 1, limit: 1)
         #expect(first.total == 2 && first.items.first?.id == "r2" && second.items.first?.id == "r1")
         let r = try await c.recording(id: "r1")
@@ -268,6 +269,39 @@ private final class BackendStubProtocol: URLProtocol, @unchecked Sendable {
         await #expect(throws: CancellationError.self) { try await task.value }
         server.stop()
         await #expect(throws: BackendClientError.unavailable) { try await c.status() }
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["INTERVIEW_BACKEND_CONTRACT_INTEGRATION"] == "1"))
+    @MainActor func managedProcessAndLibraryProxyPreserveEditsTimelineAndExports() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("backend-parity-\(UUID().uuidString)")
+        let manager = BackendProcess()
+        defer { manager.stop(); try? FileManager.default.removeItem(at: folder) }
+        let segments = [TranscriptSegment(id: "parity-s", start: 61.25, end: 65, original: "原稿", edited: "人工校对", speaker: 0)]
+        let r = Recording(id: "parity-r", title: "合成兼容资料", path: "/synthetic.wav", fingerprint: "synthetic", duration: 100)
+        let expected = TranscriptExport.render(title: r.title, segments: segments, names: [0: "面试官"], srt: true)
+        do {
+            let legacy = try LibraryStore(url: folder.appendingPathComponent("library.sqlite"))
+            try legacy.save(r)
+            try legacy.addTranscript(recordingID: r.id, runID: "parity-run", segments: segments, duration: nil)
+            try legacy.renameSpeaker(runID: "parity-run", speaker: 0, name: "面试官")
+        }
+        let connection = try await manager.start(dataDirectory: folder)
+        let proxy = BackendLibraryStore(connection: connection)
+        #expect(try proxy.recordings().first?.activeRun == "parity-run")
+        let actual = try proxy.segments(runID: "parity-run"), names = try proxy.speakerNames(runID: "parity-run")
+        #expect(TranscriptExport.render(title: r.title, segments: actual, names: names, srt: true) == expected)
+        #expect(TranscriptExport.render(title: r.title, segments: actual, names: names, srt: false, plainDialogue: true).contains("人工校对"))
+        #expect(try proxy.restoreEdit(runID: "parity-run"))
+        #expect(try proxy.speakerNames(runID: "parity-run").isEmpty)
+        #expect(try proxy.restoreEdit(runID: "parity-run", redo: true))
+        try proxy.editText(segmentID: "parity-s", text: "后端修正")
+        #expect(try proxy.restoreEdit(runID: "parity-run"))
+        #expect(try proxy.segments(runID: "parity-run").first?.text == "人工校对")
+        manager.stop()
+        let restarted = BackendLibraryStore(connection: try await manager.start(dataDirectory: folder))
+        #expect(try restarted.historyLabel(runID: "parity-run", redo: true) == "修改文字")
+        #expect(try restarted.restoreEdit(runID: "parity-run", redo: true))
+        #expect(try restarted.segments(runID: "parity-run").first?.text == "后端修正")
     }
 }
 

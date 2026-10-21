@@ -6,4 +6,10 @@ TestArtifacts/
 .DS_Store
 *.xcuserstate
 llm-settings.json
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+backend/.coverage
 

@@ -1,0 +1,31 @@
+[project]
+name = "interview-audio-backend"
+version = "0.1.0"
+description = "听阅的本地业务后端"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "pydantic>=2.7,<3",
+  "sqlalchemy>=2.0,<3",
+  "alembic>=1.13,<2",
+  "uvicorn>=0.30,<1",
+]
+
+[project.optional-dependencies]
+agent = ["langchain>=1,<2", "langgraph>=1,<2", "langgraph-checkpoint-sqlite>=3,<4", "langchain-openai>=1,<2"]
+local-embeddings = ["fastembed>=0.7,<1", "numpy>=2,<3", "jieba>=0.42,<1"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "httpx>=0.27,<1"]
+
+[build-system]
+requires = ["hatchling>=1.26,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/interview_backend"]
+artifacts = ["src/interview_backend/migrations/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

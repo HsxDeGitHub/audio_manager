@@ -16,6 +16,10 @@ struct LibraryView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if model.backendUnavailable {
+                HStack { Text(model.backendState); Spacer(); Button("重试本地服务") { Task { await model.connectBackend() } } }
+                    .font(.caption).padding(12).background(Color.orange.opacity(0.12))
+            }
             if model.aiActiveDraftID != nil {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small)

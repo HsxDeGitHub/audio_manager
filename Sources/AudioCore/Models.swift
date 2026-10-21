@@ -70,6 +70,7 @@ public struct SpeakerTurn: Codable, Equatable, Sendable {
     public init(start: Double, end: Double, speaker: Int) { self.start = start; self.end = end; self.speaker = speaker }
 }
 public struct TranscriptRun: Identifiable, Sendable {
+    public init(id: String, createdAt: Double, hasEdits: Bool) { self.id = id; self.createdAt = createdAt; self.hasEdits = hasEdits }
     public var id: String
     public var createdAt: Double
     public var hasEdits: Bool
