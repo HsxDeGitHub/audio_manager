@@ -13,3 +13,15 @@ __pycache__/
 *.egg-info/
 backend/.coverage
 
+# 个人规划及 Agent 约定仅保存在本机，不进入提交或 GitHub。
+/specs/
+/.specify/
+/AGENTS.md
+DerivedData/
+*.swiftpm/
+Packages/
+*.log
+.env*
+*.tmp
+*.swp
+

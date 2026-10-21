@@ -150,16 +150,9 @@ INTERVIEW_ACTUAL_TEST_DIR="$PWD/TestArtifacts" INTERVIEW_PUNCTUATION_MODEL_DIR="
 
 ## 助手与本地后端开发（进行中）
 
-本项目已接入 Spec Kit 1.2.2 的项目模板、脚本和工作流。项目原则位于
-[.specify/memory/constitution.md](.specify/memory/constitution.md)，当前功能通过
-`.specify/feature.json` 定位。面向审阅的文档使用中文：
-
-- [功能规格](specs/001-app-agent/spec.md)
-- [技术方案](specs/001-app-agent/plan.md)
-- [RAG 与组件生命周期](specs/001-app-agent/contracts/rag-lifecycle.md)
-- [统一工具与 MCP](specs/001-app-agent/contracts/tools-mcp.md)
-- [任务进度](specs/001-app-agent/tasks.md)
-- [开发与验收指南](specs/001-app-agent/quickstart.md)
+个人规格、方案、任务和 Agent 开发约定位于本机的 `specs/`、`.specify/` 与 `AGENTS.md`，
+这些文件仅保留本地并由 Git 忽略；仓库克隆不包含它们，也不把规划文件提交至 GitHub。
+本机具备这些文件时，可另行运行 `python3 Scripts/check_feature_docs.py` 校验规划与任务追踪。
 
 目前完成 T001—T054 与 T056：基础服务与迁移、现有业务接管、右侧助手问答、修改集、资料日期与周报、
 长期记忆、TXT/Markdown 材料与混合检索、对话式应用操作、外部 MCP、应用生命周期、本地可观测性与交付文档。
@@ -172,7 +165,6 @@ T055 已用真实录音与真实 `deepseek-flash` 完成转写、问答、全部
 ```sh
 uv sync --project backend --group dev
 uv run --project backend --frozen --group dev pytest backend/tests -q
-python3 Scripts/check_feature_docs.py
 python3 Scripts/check_backend_smoke.py
 CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-module-cache" SWIFT_MODULECACHE_PATH="$PWD/.build/swift-module-cache" swift test --disable-sandbox --cache-path .build/cache
 ```
