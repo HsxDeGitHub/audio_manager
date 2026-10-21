@@ -190,13 +190,15 @@ public enum SpeakerMatcher {
 
 public enum TranscriptExport {
     public static func render(title: String, segments: [TranscriptSegment], names: [Int: String], srt: Bool,
-                              punctuate: Bool = true, paragraphBreaks: Bool = true, density: ReadingDensity = .balanced, overrides: [String: String] = [:]) -> String {
+                              punctuate: Bool = true, paragraphBreaks: Bool = true, density: ReadingDensity = .balanced, overrides: [String: String] = [:], plainDialogue: Bool = false) -> String {
         if !srt {
             let paragraphs = UtteranceGrouping.make(segments).map { utterance in
                 let name = utterance.speaker.flatMap { names[$0] } ?? SpeakerMatcher.defaultName(utterance.speaker)
                 let reading = ReadingTranscript(segments: utterance.segments, punctuate: punctuate, paragraphBreaks: paragraphBreaks, density: density, overrides: overrides)
+                if plainDialogue { return "\(name)：\n\(reading.text)" }
                 return "[\(TimeFormat.clock(utterance.start)) – \(TimeFormat.clock(utterance.end))] \(name)\n\(reading.text)"
             }
+            if plainDialogue { return paragraphs.isEmpty ? "" : paragraphs.joined(separator: "\n\n") + "\n" }
             return title + "\n\n" + paragraphs.joined(separator: "\n\n") + "\n"
         }
         let ordered = segments.sorted { $0.start < $1.start }

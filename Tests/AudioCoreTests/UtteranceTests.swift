@@ -63,6 +63,23 @@ struct UtteranceTests {
         #expect(srt.contains("00:00:02,000 --> 00:00:04,000"))
         #expect(srt.contains("3\n00:00:04,000 --> 00:00:06,000"))
     }
+    @Test func plainDialogueExportKeepsOrderedSpeakersAndCorrectionsWithoutMetadata() {
+        var corrected = sentence("原始识别",2,4); corrected.edited = "事务。"
+        let segments = [sentence("明白。",4,6,1),corrected,sentence("数据库",0,2)]
+        let text = TranscriptExport.render(title: "课程标题", segments: segments, names: [0:"讲者",1:"听众"], srt: false, plainDialogue: true)
+        #expect(text == "讲者：\n数据库事务。\n\n听众：\n明白。\n")
+        #expect(corrected.original == "原始识别" && corrected.start == 2 && corrected.end == 4)
+    }
+    @Test func plainDialogueExportRespectsReadingOptionsAndSpeakerFallbacks() {
+        let segments = [sentence("你好",0,1,nil),sentence("欢迎交流",1,3,nil),sentence("REST",3,4,2),sentence("API",4,5,2)]
+        let plain = TranscriptExport.render(title: "访谈", segments: segments, names: [:], srt: false, punctuate: false, paragraphBreaks: false, plainDialogue: true)
+        #expect(plain == "未识别：\n你好欢迎交流\n\n说话人 C：\nREST API\n")
+        let decorated = TranscriptExport.render(title: "访谈", segments: segments, names: [:], srt: false, overrides: [segments[0].id:"你好！"], plainDialogue: true)
+        #expect(decorated == "未识别：\n你好！欢迎交流。\n\n说话人 C：\nREST API\n")
+        #expect(TranscriptExport.render(title: "访谈", segments: [], names: [:], srt: false, plainDialogue: true).isEmpty)
+        #expect(TranscriptExport.render(title: "访谈", segments: segments, names: [:], srt: true, plainDialogue: true)
+                == TranscriptExport.render(title: "访谈", segments: segments, names: [:], srt: true))
+    }
     @Test func wholeSpeechCorrectionPreservesOriginalTextAndTimestamps() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: dir) }

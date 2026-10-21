@@ -70,7 +70,8 @@ struct TranscriptView: View {
                 }
                 Spacer(minLength: 10)
                 Menu {
-                    Button("导出发言文字 TXT…") { model.export(srt: false) }
+                    Button("导出纯对话 TXT（无时间范围）…") { model.export(srt: false, plainDialogue: true) }
+                    Button("导出发言文字 TXT（带时间范围）…") { model.export(srt: false) }
                     Button("导出带时间轴的字幕 SRT…") { model.export(srt: true) }
                 } label: { Label("导出", systemImage: "square.and.arrow.up") }.menuStyle(.borderlessButton).fixedSize().disabled(model.segments.isEmpty)
                 Menu {

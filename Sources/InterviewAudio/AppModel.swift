@@ -421,9 +421,9 @@ final class AppModel: ObservableObject {
         guard let groupID = segmentToUtterance[sentence.id], let group = utterances.first(where: { $0.id == groupID }) else { return sentence.text }
         return ReadingTranscript(segments: group.segments, punctuate: readingPunctuation, paragraphBreaks: false, density: readingDensity, overrides: readingOverrides).sentenceTexts[sentence.id] ?? sentence.text
     }
-    func exportText(srt: Bool) -> String {
+    func exportText(srt: Bool, plainDialogue: Bool = false) -> String {
         TranscriptExport.render(title: selected?.title ?? "", segments: segments, names: names, srt: srt,
-                                punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks, density: readingDensity, overrides: readingOverrides)
+                                punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks, density: readingDensity, overrides: readingOverrides, plainDialogue: plainDialogue)
     }
     private func savePreferences() {
         guard store != nil else { return }
@@ -508,7 +508,7 @@ final class AppModel: ObservableObject {
             reload(); if selectedID == nil, let first = recordings.first { Task { await select(first.id) } }
         } catch { alert = error.localizedDescription }
     }
-    func export(srt: Bool) {
+    func export(srt: Bool, plainDialogue: Bool = false) {
         guard let recording = selected, !segments.isEmpty else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: srt ? "srt" : "txt", conformingTo: .plainText) ?? .plainText]
@@ -516,7 +516,7 @@ final class AppModel: ObservableObject {
         panel.isExtensionHidden = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try exportText(srt: srt).write(to: url, atomically: true, encoding: .utf8)
+            try exportText(srt: srt, plainDialogue: plainDialogue).write(to: url, atomically: true, encoding: .utf8)
             notice = "已导出 \(url.lastPathComponent)"
         } catch { alert = error.localizedDescription }
     }
