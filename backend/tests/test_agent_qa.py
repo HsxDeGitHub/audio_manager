@@ -351,3 +351,13 @@ def test_stale_draft_is_reported_and_never_sent_to_model(client, config):
     result = asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('stale-draft', context['instruction'], context, model=InspectModel()))
     assert '整理稿来源已变化' in result['answer']
     assert result['coverage']['excluded'][0]['code'] == 'stale_draft'
+
+
+def test_answer_reports_semantic_not_ready_without_download(client, config):
+    engine = AgentEngine(config, client.app.state.tools, client.app.state.evidence)
+    engine.retrieval = client.app.state.retrieval
+    context = client.app.state.evidence.freeze({'recording_id': 'r1'}, '总结全部问题')
+    result = asyncio.run(engine.execute('fallback-status', context['instruction'], context, model=FakeModel()))
+    assert result['retrieval']['keyword_fallback'] and result['retrieval']['state'] == 'unprepared'
+    assert '语义索引未就绪' in result['answer'] and '全量任务仍按范围完整读取' in result['answer']
+    assert not (config.backend_dir / 'Models').exists()

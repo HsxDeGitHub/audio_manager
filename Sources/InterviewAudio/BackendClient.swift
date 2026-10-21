@@ -108,6 +108,13 @@ struct BackendDocument: Decodable, Identifiable, Sendable {
     let duplicate: Bool?
 }
 
+struct BackendRetrievalStatus: Decodable, Sendable {
+    struct Failure: Decodable, Sendable { let code: String; let message: String }
+    let ready: Bool; let state: String; let model: String; let dimension: Int
+    let keywordFallback: Bool; let message: String; let error: Failure?
+    private enum CodingKeys: String, CodingKey { case ready, state, model, dimension, message, error, keywordFallback = "keyword_fallback" }
+}
+
 struct BackendSource: Decodable, Sendable {
     let text: String
     let recordingID: String?; let runID: String?; let segmentID: String?; let start: Double?
@@ -239,6 +246,14 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
         struct Page: Decodable { let items: [BackendDocument] }
         let page: Page = try await get(["api", "v1", "documents"])
         return page.items
+    }
+    func retrievalStatus() async throws -> BackendRetrievalStatus {
+        try await get(["api", "v1", "retrieval", "status"])
+    }
+    func prepareRetrieval() async throws -> BackendRetrievalStatus {
+        // 下载与校验使用独立长请求；普通业务请求保持原超时，并可继续轮询状态。
+        let preparation = try BackendClient(baseURL: baseURL, token: token, timeout: 600, configuration: session.configuration)
+        return try await preparation.get(["api", "v1", "retrieval", "prepare"], method: "POST")
     }
     func document(id: String) async throws -> BackendDocument {
         try validateID(id)

@@ -12,18 +12,28 @@ class SemanticIndex:
     def __init__(self, cache_dir):
         self.cache_dir = Path(cache_dir); self.model = None; self.tokenizer = None
         self.lock = threading.RLock()
+        self.state = 'unprepared'; self.error = None
     def status(self):
+        value = {'ready': False, 'model': MODEL, 'dimension': 512}
         try:
             manifest = json.loads((self.cache_dir / 'ready.json').read_text())
             ready = manifest['model'] == MODEL and manifest['dimension'] == 512 and Path(manifest['model_dir']).is_dir()
-            return {**manifest,'ready':ready}
-        except (OSError,KeyError,ValueError): return {'ready':False,'model':MODEL,'dimension':512}
+            value = {**manifest, 'ready': ready}
+        except (OSError,KeyError,ValueError): pass
+        if self.state in {'preparing', 'failed'}: value['ready'] = False
+        state = self.state if self.state in {'preparing', 'failed'} else 'ready' if value['ready'] else 'unprepared'
+        message = {'unprepared': '语义索引未就绪，当前可使用关键词检索。',
+                   'preparing': '语义模型准备中，当前使用关键词检索。',
+                   'failed': '语义模型准备失败，关键词检索仍可使用，请重试准备。',
+                   'ready': '本地语义检索已就绪。'}[state]
+        return {**value, 'state': state, 'keyword_fallback': not value['ready'], 'message': message, 'error': self.error}
     def prepare(self, download=False):
         with self.lock:
             if self.model is not None: return self.status()
             prior = self.status()
             if not download and not prior['ready']:
                 raise DomainError('semantic_not_ready','本地语义模型未准备，当前可使用关键词检索。',409)
+            self.state = 'preparing'; self.error = None
             try:
                 from fastembed import TextEmbedding
                 from tokenizers import Tokenizer
@@ -39,9 +49,12 @@ class SemanticIndex:
                 manifest = {'model':MODEL,'dimension':512,'model_dir':str(model_dir),'tokenizer_sha256':fingerprint,'fastembed_version':importlib.metadata.version('fastembed')}
                 manifest['version'] = hashlib.sha256(json.dumps(manifest,sort_keys=True).encode()).hexdigest()
                 temporary = self.cache_dir/'ready.tmp'; temporary.write_text(json.dumps(manifest)); temporary.replace(self.cache_dir/'ready.json')
-                return {**manifest,'ready':True}
+                self.state = 'ready'
+                return self.status()
             except Exception:
                 self.model = self.tokenizer = None
+                self.state = 'failed'
+                self.error = {'code': 'semantic_prepare_failed', 'message': '语义模型准备或校验失败，关键词检索仍可使用。'}
                 raise DomainError('semantic_prepare_failed','语义模型准备或校验失败，关键词检索仍可使用。',503) from None
     def split(self, text, limit=384, overlap=64):
         self.prepare(False)

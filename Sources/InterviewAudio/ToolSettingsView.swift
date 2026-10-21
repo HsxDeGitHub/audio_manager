@@ -40,6 +40,8 @@ final class ToolSettingsModel: ObservableObject {
     @Published var loading = false
     @Published var busy = false
     @Published var error: String?
+    @Published var retrieval: BackendRetrievalStatus?
+    @Published var preparingRetrieval = false
     private let client: BackendClient
 
     init(client: BackendClient) { self.client = client }
@@ -47,12 +49,30 @@ final class ToolSettingsModel: ObservableObject {
     func load() async {
         loading = true; defer { loading = false }
         do {
+            retrieval = try await client.retrievalStatus()
             let page: ToolPage = try await client.send("/api/v1/tools?include_disabled=true")
             tools = page.items
             let mcp: MCPPage = try await client.send("/api/v1/mcp/connections")
             connections = mcp.items
             error = nil
         } catch { self.error = error.localizedDescription }
+    }
+
+    func prepareRetrieval() async {
+        guard !preparingRetrieval else { return }
+        preparingRetrieval = true; error = nil
+        let monitor = Task {
+            while !Task.isCancelled {
+                if let status = try? await client.retrievalStatus() { retrieval = status }
+                do { try await Task.sleep(nanoseconds: 500_000_000) } catch { break }
+            }
+        }
+        defer { monitor.cancel(); preparingRetrieval = false }
+        do { retrieval = try await client.prepareRetrieval() }
+        catch {
+            self.error = error.localizedDescription
+            if let status = try? await client.retrievalStatus() { retrieval = status }
+        }
     }
 
     func toggle(_ tool: ToolEntry) async {
@@ -136,6 +156,8 @@ struct ToolSettingsView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    retrievalSection
+                    Divider()
                     toolSection(model)
                     Divider()
                     connectionSection(model)
@@ -156,6 +178,26 @@ struct ToolSettingsView: View {
             Button("删除连接", role: .destructive) {
                 if let item = deleting { Task { await model.remove(item.id) } }
                 deleting = nil
+            }
+        }
+    }
+
+    private var retrievalSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("本地检索").font(.headline)
+            if let status = model.retrieval {
+                Text(status.message).font(.callout).foregroundStyle(status.ready ? Color.secondary : Color.orange)
+                Text("\(status.model) · \(status.dimension) 维").font(.caption).foregroundStyle(.secondary)
+                if status.keywordFallback { Text("语义能力未就绪时使用当前正文的关键词检索，旧版本不会作为当前证据。").font(.caption).foregroundStyle(.secondary) }
+                if let failure = status.error { Text(failure.message).font(.caption).foregroundStyle(.orange) }
+            } else { Text("检索状态尚未读取，请刷新。").font(.caption).foregroundStyle(.secondary) }
+            HStack {
+                if model.preparingRetrieval || model.retrieval?.state == "preparing" {
+                    ProgressView().controlSize(.small); Text("正在准备本地语义模型…").font(.caption)
+                }
+                Button(model.retrieval?.state == "failed" ? "重试准备" : "准备语义检索") { Task { await model.prepareRetrieval() } }
+                    .disabled(model.preparingRetrieval || model.retrieval?.state == "preparing" || model.retrieval?.ready == true)
+                Text("首次准备需要下载模型资源。").font(.caption2).foregroundStyle(.secondary)
             }
         }
     }

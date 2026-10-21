@@ -111,3 +111,32 @@ def test_draft_hash_matches_swift_unicode_slash_decimal_snapshot(client):
         c.execute('INSERT INTO segments(id,run_id,start,end,original,speaker) VALUES(?,?,?,?,?,?)',
                   ('a/中', 'run1', 0.01, 100.125, '路径/a\n🙂', 0))
         assert source_fingerprint(c, 'run1') == 'cb13329a87c1fc00aacf3dd56bbb3f0ecd4618f45d02983116b4f41039249d25'
+
+
+def test_explicit_preparation_reports_progress_failure_and_keyword_fallback(client, monkeypatch):
+    import sys
+    import threading
+    from types import SimpleNamespace
+    from concurrent.futures import ThreadPoolExecutor
+    started, release = threading.Event(), threading.Event()
+    def failing_model(**kwargs):
+        started.set()
+        assert release.wait(5)
+        raise ValueError('synthetic preparation failure')
+    monkeypatch.setitem(sys.modules, 'fastembed', SimpleNamespace(TextEmbedding=failing_model))
+    monkeypatch.setitem(sys.modules, 'tokenizers', SimpleNamespace(Tokenizer=object))
+    initial = client.get('/api/v1/retrieval/status').json()
+    assert initial['state'] == 'unprepared' and initial['keyword_fallback']
+    with ThreadPoolExecutor(1) as pool:
+        pending = pool.submit(client.post, '/api/v1/retrieval/prepare')
+        try:
+            assert started.wait(3)
+            progress = client.get('/api/v1/retrieval/status').json()
+            assert progress['state'] == 'preparing' and not progress['ready']
+        finally: release.set()
+        assert pending.result().status_code == 503
+    failed = client.get('/api/v1/retrieval/status').json()
+    assert failed['state'] == 'failed' and failed['error']['code'] == 'semantic_prepare_failed'
+    client.app.state.documents.import_text('回退材料', 'txt', '关键词回退仍能查找 Redis', 'fallback')
+    response = client.get('/api/v1/retrieval/search?q=Redis').json()
+    assert response['items'] and response['semantic']['keyword_fallback']

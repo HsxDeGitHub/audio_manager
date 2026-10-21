@@ -52,7 +52,13 @@ class AgentEngine:
             await saver.setup()
             compiled = graph.compile(checkpointer=saver)
             result = await compiled.ainvoke({'instruction': instruction, 'context': context, 'result': {}}, {'configurable': {'thread_id': run_id}})
-            return result['result']
+            value = result['result']
+            if hasattr(self, 'retrieval'):
+                status = self.retrieval.semantic.status()
+                value['retrieval'] = status
+                if not status['ready']:
+                    value['answer'] += '\n\n检索状态：' + status['message'] + ' 全量任务仍按范围完整读取。'
+            return value
 
     async def _answer(self, run_id, instruction, context, model, emit):
         from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage

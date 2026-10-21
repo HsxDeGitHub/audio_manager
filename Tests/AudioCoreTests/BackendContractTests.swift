@@ -107,6 +107,27 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(try JSONDecoder().decode(AssistantResult.self, from: Data(#"{"answer":"旧结果"}"#.utf8)).questions == nil)
     }
 
+    @Test func retrievalStatusAndExplicitPreparationExposeFallbackStates() async throws {
+        let c = try client()
+        var preparing = false
+        BackendStubProtocol.respond = { request in
+            if request.httpMethod == "POST" {
+                #expect(request.url!.path == "/api/v1/retrieval/prepare")
+                preparing = true
+                return (200, Data(#"{"ready":true,"state":"ready","model":"synthetic","dimension":512,"keyword_fallback":false,"message":"语义检索已就绪"}"#.utf8))
+            }
+            #expect(request.url!.path == "/api/v1/retrieval/status")
+            return (200, Data(#"{"ready":false,"state":"failed","model":"synthetic","dimension":512,"keyword_fallback":true,"message":"准备失败，使用关键词检索","error":{"code":"semantic_prepare_failed","message":"准备失败"}}"#.utf8))
+        }
+        let failed = try await c.retrievalStatus()
+        #expect(failed.keywordFallback && failed.state == "failed")
+        #expect(failed.error?.code == "semantic_prepare_failed")
+        let ready = try await c.prepareRetrieval()
+        #expect(preparing && ready.ready && !ready.keywordFallback)
+        let progress = try JSONDecoder().decode(BackendRetrievalStatus.self, from: Data(#"{"ready":false,"state":"preparing","model":"synthetic","dimension":512,"keyword_fallback":true,"message":"准备中"}"#.utf8))
+        #expect(progress.state == "preparing" && !progress.ready)
+    }
+
     @Test func configurationRejectsNonLocalAddressesAndUnsafeTokens() throws {
         for url in ["https://example.test", "http://localhost:8765", "http://127.0.0.1.evil.test:8765",
                     "http://127.0.0.2:8765", "https://127.0.0.1:8765", "http://127.0.0.1",
