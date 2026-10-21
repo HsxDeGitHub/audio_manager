@@ -362,6 +362,45 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(item.categoryTitle == "偏好" && item.stateTitle == "生效" && item.revision == 2)
         #expect(item.sources.first?.resourceType == "message" && item.sources.first?.resourceID == "msg1")
     }
+
+    @Test func deviceCommandsCarryActualResultsAndCancellation() async throws {
+        let expectedToken = token
+        BackendStubProtocol.respond = { request in
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer " + expectedToken)
+            let path = try #require(request.url?.path)
+            if path == "/api/v1/device/commands" {
+                #expect(request.httpMethod == "GET")
+                return (200, Data(#"{"items":[{"id":"command-1","run_id":"run-1","kind":"locate","target":"r1","arguments":{"recording_id":"r1","segment_id":"s1","start":1.5,"play":true},"state":"pending","result":null,"owner":null,"updated_at":1}]}"#.utf8))
+            }
+            let body = try #require(bodyData(request))
+            let value = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(value["owner"] as? String == "synthetic-device")
+            if path.hasSuffix("/claim") {
+                #expect(request.httpMethod == "POST")
+                return (200, Data(#"{"id":"command-1","state":"running"}"#.utf8))
+            }
+            #expect(path.hasSuffix("/result"))
+            #expect(value["state"] as? String == "cancelled")
+            let result = try #require(value["result"] as? [String: Any])
+            #expect(result["message"] as? String == "用户取消")
+            return (200, Data(#"{"id":"command-1","state":"cancelled"}"#.utf8))
+        }
+        struct Receipt: Decodable { let id: String; let state: String? }
+        let commandJSON = Data(#"{"id":"command-1","run_id":"run-1","kind":"locate","target":"r1","arguments":{"recording_id":"r1","segment_id":"s1","start":1.5,"play":true},"state":"pending","result":null,"owner":null,"updated_at":1}"#.utf8)
+        let command = try JSONDecoder().decode(DeviceCommand.self, from: commandJSON)
+        #expect(command.arguments["recording_id"]?.stringValue == "r1")
+        #expect(command.arguments["start"]?.doubleValue == 1.5)
+        #expect(command.arguments["play"]?.boolValue == true)
+        #expect(command.state == "pending" && command.runID == "run-1")
+        let c = try client()
+        let claim: Receipt = try await c.send("/api/v1/device/commands/command-1/claim", method: "POST",
+                                               body: JSONSerialization.data(withJSONObject: ["owner": "synthetic-device"]))
+        #expect(claim.state == "running")
+        let cancelled: Receipt = try await c.send("/api/v1/device/commands/command-1/result", method: "POST",
+            body: JSONSerialization.data(withJSONObject: ["owner": "synthetic-device", "state": "cancelled",
+                                                          "result": ["message": "用户取消"]]))
+        #expect(cancelled.state == "cancelled")
+    }
 }
 
 private final class BackendFixtureServer {

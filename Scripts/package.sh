@@ -18,6 +18,10 @@ cp .runtime/tools/sherpa/bin/sherpa-onnx-offline-punctuation .runtime/tools/sher
 cp -L .runtime/tools/sherpa/lib/libonnxruntime.dylib "$APP_DIR/Contents/Resources/Tools/sherpa/lib/"
 cp -R .runtime/tools/Licenses "$APP_DIR/Contents/Resources/"
 cp THIRD_PARTY_NOTICES.md "$APP_DIR/Contents/Resources/"
+# 独立 Python 运行时：锁定依赖、下载解释器、安装后端 wheel，并签名原生扩展。
+EMBEDDING_FLAG=""
+if [[ "${PACKAGE_EMBEDDINGS:-1}" == "0" ]]; then EMBEDDING_FLAG="--without-embeddings"; fi
+python3 Scripts/package_backend.py "$APP_DIR" ${EMBEDDING_FLAG:+"$EMBEDDING_FLAG"}
 # This release binary already uses @executable_path/../lib. Keep that layout in the app.
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

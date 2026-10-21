@@ -127,3 +127,42 @@ def test_tool_self_test_sends_only_synthetic_message(monkeypatch):
             return AIMessage(content='',tool_calls=[{'name':'verify_connection','args':{'value':'ok'},'id':'self-test'}])
     monkeypatch.setattr(ModelSettings,'client',lambda self:Provider())
     assert asyncio.run(tool_call_self_test(ModelSettings(baseURL='http://127.0.0.1:1/v1',model='test')))['tool_calling']
+
+
+def test_app_operation_tools_expose_real_status_and_scope_without_keys(client, config, monkeypatch):
+    import asyncio, json
+    from interview_backend.agent.models import ModelSettings
+    from interview_backend.tools.registry import ToolContext
+    config.data_dir.mkdir(parents=True, exist_ok=True)
+    (config.data_dir / 'llm-settings.json').write_text(json.dumps({'baseURL':'http://127.0.0.1:12345/v1','apiKey':'private-key-should-not-leak','model':'synthetic-model'}))
+    ids = {item['id'] for item in client.get('/api/v1/tools?include_disabled=true').json()['items']}
+    assert {'library.update_metadata','speakers.rename','models.status','system.status',
+            'device.locate','device.copy','device.choose_file','device.export',
+            'jobs.transcribe','jobs.cancel','organize.start'} <= ids
+    status = asyncio.run(client.app.state.tools.execute('models.status', {}, ToolContext(request_id='status')))
+    assert status['data']['result']['configured'] is True
+    assert 'private-key-should-not-leak' not in json.dumps(status, ensure_ascii=False)
+    async def immediate(identifier, timeout=10):
+        return client.app.state.device.get(identifier)
+    monkeypatch.setattr(client.app.state.device, 'wait', immediate)
+    context = ToolContext(request_id='device', allowed_effects=frozenset({'device'}),
+                          frozen_context={'recording_ids': ['r1'], 'resources': [{'resource_type':'recording','resource_id':'r1'}]})
+    from interview_backend.errors import DomainError
+    missing = asyncio.run(client.app.state.tools.execute('device.copy', {'text': '合成文字'}, context))
+    assert missing['data']['result']['state'] == 'pending'
+    with pytest.raises(DomainError) as error:
+        asyncio.run(client.app.state.tools.execute('device.locate', {'recording_id': 'r2'}, context))
+    assert error.value.code == 'scope_denied'
+    context_write = ToolContext(request_id='write', operation_id='write-1', allowed_effects=frozenset({'write'}),
+                                resource_scope=frozenset({('recording', 'r1')}))
+    changed = asyncio.run(client.app.state.tools.execute('library.update_metadata',
+        {'recording_id': 'r1', 'expected_revision': 1, 'fields': {'kind': 'interview', 'interview_date': '2026-10-19'}}, context_write))
+    assert changed['data']['result']['count'] == 1
+    assert client.get('/api/v1/recordings/r1').json()['headline' if False else 'kind'] == 'interview'
+
+
+def test_device_instruction_is_required_before_device_tools_are_offered(client):
+    evidence = client.app.state.evidence
+    assert evidence.freeze({'recording_id': 'r1'}, '总结这场面试')['allow_device'] is False
+    assert evidence.freeze({'recording_id': 'r1'}, '定位到当前段落并回听')['allow_device'] is True
+    assert evidence.freeze({'recording_id': 'r1'}, '说明这段')['allow_write'] is False

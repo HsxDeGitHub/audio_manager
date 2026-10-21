@@ -10,6 +10,7 @@ struct AssistantView: View {
                 Text("听阅助手").font(.headline)
                 Spacer()
                 Button("记忆") { model.showMemories = true }
+                Button("工具") { model.showToolSettings = true }
                 Button("新对话") { Task { await assistant.createSession() } }
             }
             Picker("会话", selection: Binding(get: { assistant.selectedSession ?? "" }, set: { id in Task { await assistant.select(id) } })) {

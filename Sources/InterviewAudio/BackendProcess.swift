@@ -67,9 +67,14 @@ final class BackendProcess: ObservableObject {
         connection = nil
         try? lifeline?.fileHandleForWriting.close(); lifeline = nil
         if let process = child, process.isRunning {
-            process.terminate()
-            let deadline = Date().addingTimeInterval(3)
-            while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+            // 先让生命线 EOF 触发服务自身收尾；只有超时才升级为信号。
+            let graceful = Date().addingTimeInterval(2)
+            while process.isRunning && Date() < graceful { Thread.sleep(forTimeInterval: 0.02) }
+            if process.isRunning {
+                process.terminate()
+                let deadline = Date().addingTimeInterval(4)
+                while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+            }
             if process.isRunning { kill(-process.processIdentifier, SIGKILL); kill(process.processIdentifier, SIGKILL) }
             process.waitUntilExit()
         }

@@ -81,6 +81,7 @@ final class AppModel: ObservableObject {
     let toolsDirectory: URL
     private(set) var store: BackendLibraryStore?
     private(set) var backendClient: BackendClient?
+    private var deviceBridge: DeviceBridge?
     let backendProcess = BackendProcess()
     let assistant = AssistantModel()
     @Published var backendState = "正在连接本地服务…"
@@ -150,9 +151,15 @@ final class AppModel: ObservableObject {
             store = BackendLibraryStore(connection: connection)
             backendClient = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 30)
             await assistant.attach(connection)
+            deviceBridge?.stop()
+            deviceBridge = nil
+            if let backendClient {
+                let bridge = DeviceBridge(app: self, client: backendClient)
+                bridge.start(); deviceBridge = bridge
+            }
             backendUnavailable = false; backendState = "本地服务已连接"; reload()
         } catch {
-            store = nil; backendClient = nil; backendUnavailable = true
+            store = nil; backendClient = nil; deviceBridge?.stop(); deviceBridge = nil; backendUnavailable = true
             backendState = backendProcess.diagnostic ?? "服务不可用，请重试。"
         }
     }
@@ -589,6 +596,6 @@ final class AppModel: ObservableObject {
         queue = []
         if let id = activeRecordingID, var r = recordings.first(where: { $0.id == id }) { r.state = .interrupted; try? store?.save(r) }
         cancelledJob = true; worker?.terminate(); player.pause()
-        assistant.stop(); store = nil; backendProcess.stop()
+        assistant.stop(); deviceBridge?.stop(); deviceBridge = nil; store = nil; backendProcess.stop()
     }
 }

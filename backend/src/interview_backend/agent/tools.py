@@ -1,5 +1,7 @@
+import hashlib
 import json
 import re
+from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from interview_backend.errors import DomainError
 from interview_backend.services.common import require, version, encode
@@ -65,7 +67,10 @@ class EvidenceService:
                 return {**context.model_dump(), 'resources': resources, 'sources': sources, 'excluded': excluded, 'allow_write': False, 'clarification': '请引用要处理的段落，避免误改其他内容。'}
             # 只有用户消息中的执行动词可允许写工具，资料正文永远不参与权限判断。
             mutation = bool(re.search(r'(帮我|请|把|将|直接).{0,40}(修改|修正|替换|改成|改为|删除|忘记|停用|重命名|撤销|合并|设置|更正)|^(修改|修正|删除|撤销|忘记|停用|设置|记住)', instruction))
+            device = bool(re.search(r'定位|回听|播放|导出|保存为|复制|剪贴板|选择文件|打开文件|转写|重新识别|取消任务|整理|周报分析', instruction))
+            external = bool(re.search(r'外部工具|MCP', instruction, re.IGNORECASE))
             return {**context.model_dump(), 'resources': resources, 'sources': sources, 'excluded': excluded, 'allow_write': mutation,
+                    'allow_device': device, 'allow_external': external,
                     'instruction': instruction, 'recording_ids': [r['id'] for r in recordings]}
 
     @staticmethod
@@ -102,7 +107,8 @@ def framework_tools(registry, context):
     for metadata in registry.list():
         spec = registry._tools[metadata['id']]
         if spec.effect not in context.allowed_effects: continue
-        if context.frozen_context is not None and spec.tool_id != 'evidence.read': continue
+        # 冻结范围时只允许固定证据读取；写和设工具由执行器再次校验范围。
+        if context.frozen_context is not None and spec.effect == 'read' and spec.tool_id not in {'evidence.read', 'models.status', 'system.status'}: continue
         async def execute(_tool_id=spec.tool_id, **arguments):
             result = await registry.execute(_tool_id, arguments, context)
             return result['data']
@@ -133,3 +139,171 @@ def install_agent_tools(registry, changesets):
         return {'result': {'sources': context.frozen_context['sources'], 'excluded': context.frozen_context.get('excluded', [])}}
     registry.register(ToolSpec(tool_id='evidence.read', version='1.0', title='读取固定范围证据',
         description='读取当前消息固定范围内的完整证据、版本和无法纳入项。', input_model=EmptyArguments, output_model=ResultEnvelope, handler=read))
+
+
+class MetadataFields(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    kind: Literal['unknown', 'interview', 'other'] | None = None
+    interview_date: str | None = None
+    company: str | None = None
+    role: str | None = None
+
+
+class MetadataArguments(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    recording_id: str = Field(min_length=1)
+    expected_revision: int = Field(ge=1)
+    fields: MetadataFields
+
+
+class SpeakerRenameArguments(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    run_id: str = Field(min_length=1)
+    speaker: int = Field(ge=0)
+    name: str = Field(min_length=1, max_length=200)
+    expected_revision: int = Field(ge=1)
+
+
+class DeviceLocateArguments(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    recording_id: str = Field(min_length=1)
+    run_id: str | None = None
+    segment_id: str | None = None
+    start: float | None = Field(default=None, ge=0)
+    play: bool = True
+
+
+class DeviceClipboardArguments(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    text: str = Field(min_length=1, max_length=100000)
+
+
+class DeviceExportArguments(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    recording_id: str | None = None
+    run_id: str | None = None
+    draft_id: str | None = None
+    format: Literal['txt', 'srt', 'md'] = 'txt'
+    suggested_name: str | None = Field(default=None, max_length=200)
+
+
+class DeviceChooseFileArguments(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    purpose: str = Field(default='选择文件', max_length=200)
+    extensions: list[str] = Field(default_factory=list, max_length=10)
+
+
+class RecordingActionArguments(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    recording_id: str = Field(min_length=1)
+
+
+class OrganizeArguments(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    recording_id: str = Field(min_length=1)
+    mode: Literal['dialogue', 'topics', 'summary'] = 'dialogue'
+    instructions: str = Field(default='', max_length=2000)
+
+
+class DeviceResult(BaseModel):
+    command_id: str
+    state: str
+    result: dict | None = None
+    message: str
+
+
+def install_app_tools(registry, changesets, device, settings, repository, retrieval):
+    from interview_backend.agent.models import ModelSettings
+
+    def scope(context, recording_id):
+        if context.frozen_context is None:
+            return
+        allowed = set(context.frozen_context.get('recording_ids') or [])
+        if recording_id not in allowed:
+            raise DomainError('scope_denied', '操作目标超出当前用户消息确定的资料范围。', 403)
+
+    def update_metadata(args, context):
+        scope(context, args.recording_id)
+        fields = args.fields.model_dump(exclude_unset=True)
+        if not fields:
+            raise DomainError('invalid_fields', '没有需要修改的资料信息。', 422)
+        return {'result': changesets.submit({'operation_id': context.operation_id, 'targets': [
+            {'resource_type': 'recording', 'resource_id': args.recording_id,
+             'expected_revision': args.expected_revision, 'fields': fields}]}, context.resource_scope)}
+
+    def rename_speaker(args, context):
+        if context.frozen_context is not None:
+            allowed = {(r['resource_type'], r['resource_id']) for r in context.frozen_context.get('resources', [])}
+            if ('speaker', f'{args.run_id}:{args.speaker}') not in allowed:
+                raise DomainError('scope_denied', '说话人不在当前资料范围。', 403)
+        return {'result': changesets.submit({'operation_id': context.operation_id, 'targets': [
+            {'resource_type': 'speaker', 'resource_id': f'{args.run_id}:{args.speaker}',
+             'expected_revision': args.expected_revision, 'fields': {'name': args.name}}]}, context.resource_scope)}
+
+    async def run_device(kind, target, arguments, context):
+        digest = hashlib.sha256(encode({'kind': kind, 'target': target, 'arguments': arguments}).encode()).hexdigest()[:16]
+        command_id = f'{context.request_id}:{kind}:{digest}'
+        command = device.enqueue(kind, target, arguments, run_id=context.request_id, command_id=command_id)
+        value = await device.wait(command['id'], timeout=10)
+        state = value['state']
+        message = {
+            'completed': '应用已回报实际执行结果。',
+            'cancelled': '用户取消了该操作，没有继续执行。',
+            'failed': '应用回报操作失败。',
+            'unknown': '操作结果未知，不能视为成功；请核对应用中的实际状态。',
+            'running': '应用已领取命令但尚未回报，不能视为完成。',
+            'pending': '命令已登记，应用尚未领取；不能视为完成。',
+        }.get(state, '设备命令状态未知。')
+        return {'result': {'command_id': command['id'], 'state': state,
+                           'result': value['result'], 'message': message}}
+
+    def models_status(args, context):
+        status = {'configured': False, 'semantic': retrieval.semantic.status()}
+        try:
+            model = ModelSettings.load(settings.data_dir)
+            status.update({'configured': True, 'model': model.model, 'base_url': model.base_url})
+        except DomainError:
+            pass
+        return {'result': status}
+
+    def system_status(args, context):
+        return {'result': repository.status()}
+
+    registry.register(ToolSpec(tool_id='library.update_metadata', version='1.0', title='修改资料信息',
+        description='修改资料类型、实际面试日期、公司或岗位，校验预期版本并记录可撤销修改。',
+        input_model=MetadataArguments, output_model=ResultEnvelope, effect='write', handler=update_metadata))
+    registry.register(ToolSpec(tool_id='speakers.rename', version='1.0', title='重命名说话人',
+        description='为指定说话人设置业务名称；自动聚类编号不代表已确认身份。',
+        input_model=SpeakerRenameArguments, output_model=ResultEnvelope, effect='write', handler=rename_speaker))
+    registry.register(ToolSpec(tool_id='models.status', version='1.0', title='读取模型与索引状态',
+        description='报告用户配置的模型是否可用及语义索引状态，不返回密钥或私人正文。',
+        input_model=EmptyArguments, output_model=ResultEnvelope, handler=models_status))
+    registry.register(ToolSpec(tool_id='system.status', version='1.0', title='读取应用能力状态',
+        description='读取真实能力开关和数量，不把未实现能力报告为可用。',
+        input_model=EmptyArguments, output_model=ResultEnvelope, handler=system_status))
+
+    def device_tool(tool_id, title, description, input_model, kind, argument_builder, target_builder=None, timeout=20):
+        async def handler(args, context):
+            arguments = argument_builder(args)
+            target = target_builder(args) if target_builder else ''
+            if target:
+                scope(context, target)
+            return await run_device(kind, target, arguments, context)
+        registry.register(ToolSpec(tool_id=tool_id, version='1.0', title=title, description=description,
+            input_model=input_model, output_model=ResultEnvelope, effect='device', handler=handler,
+            timeout_seconds=timeout))
+
+    device_tool('device.locate', '定位并回听', '在应用中打开指定资料和片段，并按实际播放结果回报。',
+        DeviceLocateArguments, 'locate', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)
+    device_tool('device.copy', '复制到剪贴板', '把用户要求的文字写入本机剪贴板并回报结果。',
+        DeviceClipboardArguments, 'clipboard', lambda a: a.model_dump(mode='json'))
+    device_tool('device.choose_file', '选择本机文件', '在应用中打开文件选择器，用户取消时返回取消而不是成功。',
+        DeviceChooseFileArguments, 'choose_file', lambda a: a.model_dump(mode='json'))
+    device_tool('device.export', '导出文字或整理稿', '在应用中让用户选择保存位置并导出，按真实保存或取消结果回报。',
+        DeviceExportArguments, 'export', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id or '')
+    device_tool('jobs.transcribe', '开始或重试转写', '把资料加入应用现有转写队列；完成情况以任务事件为准。',
+        RecordingActionArguments, 'transcribe', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)
+    device_tool('jobs.cancel', '取消后台任务', '取消应用正在处理的该资料任务，保留已完成部分。',
+        RecordingActionArguments, 'cancel', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)
+    device_tool('organize.start', '开始 AI 整理', '使用应用现有整理流程生成独立整理稿；分块完成进度会持续保存。',
+        OrganizeArguments, 'organize', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)

@@ -161,18 +161,35 @@ INTERVIEW_ACTUAL_TEST_DIR="$PWD/TestArtifacts" INTERVIEW_PUNCTUATION_MODEL_DIR="
 - [任务进度](specs/001-app-agent/tasks.md)
 - [开发与验收指南](specs/001-app-agent/quickstart.md)
 
-目前完成 T001—T041：基础服务与迁移、现有业务接管、右侧助手问答、修改集、资料日期与周报、
-长期记忆、TXT/Markdown 材料与关键词检索。当前应用已通过自动管理的本机后端统一读写；
-助手界面、会话事件流、资料信息编辑和记忆管理已接入。MCP 传输、设备操作桥接、可观测性、
-独立运行时打包及完整人工验收仍未完成，接口 capabilities 会如实报告这些能力。
+目前完成 T001—T054 与 T056：基础服务与迁移、现有业务接管、右侧助手问答、修改集、资料日期与周报、
+长期记忆、TXT/Markdown 材料与混合检索、对话式应用操作、外部 MCP、应用生命周期、本地可观测性与交付文档。
+T055 的真实模型、实际录音、完整界面和无开发环境验收尚未执行。
+当前应用已通过自动管理的本机后端统一读写；助手界面、会话事件流、资料信息编辑、记忆管理、
+工具启停和 MCP 设置已接入。独立 Python 运行时由 `Scripts/package_backend.py` 构建并在开发机
+验证了迁移后启动；真实模型效果、正式资料库升级、实际录音和完整 `.app` 人工验收仍未执行，
+接口 capabilities 会如实报告这些能力。
 
 ```sh
 uv sync --project backend --group dev
 uv run --project backend --frozen --group dev pytest backend/tests -q
 python3 Scripts/check_feature_docs.py
 python3 Scripts/check_backend_smoke.py
+CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-module-cache" SWIFT_MODULECACHE_PATH="$PWD/.build/swift-module-cache" swift test --disable-sandbox --cache-path .build/cache
+```
+
+打包时会下载或复用 Python 3.12，按 `backend/uv.lock` 安装后端与 Agent/MCP 依赖，生成可迁移的
+`Contents/Resources/Backend/python`。默认包含本地语义检索依赖；可用
+`PACKAGE_EMBEDDINGS=0 zsh Scripts/package.sh` 缩减体积。后端运行时和原生扩展由打包脚本签名，
+未验证无开发环境电脑上的完整验收。
+
+```sh
+# MCP stdio 入口只作为本机认证 API 的薄客户端；URL 与令牌由宿主传入。
+INTERVIEW_BACKEND_URL=http://127.0.0.1:8765 \
+INTERVIEW_BACKEND_TOKEN=local-demo-token \
+backend/.venv/bin/python -m interview_backend.tools.mcp_server
 ```
 
 基础依赖安装到 `backend/.venv`，不修改系统 Python，不使用 Docker，不注册常驻服务或开机启动。
-开发服务需手动启动并停止；冒烟脚本使用临时资料并自动停止子进程。正式应用退出及异常退出的
-完整进程回收属于后续任务，尚未验证。语义模型和 Agent/MCP 依赖按独立任务接入，不在基础启动时下载。
+开发服务需手动启动并停止；冒烟脚本使用临时资料并自动停止子进程。退出应用会先关闭生命线，
+超时后按进程组终止本应用管理的服务；相关自动测试覆盖正常退出、父进程消失和端口回收。
+语义模型和 Agent/MCP 依赖按独立任务接入，不在基础启动时下载。

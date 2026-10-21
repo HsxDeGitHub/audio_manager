@@ -48,6 +48,9 @@ struct InterviewAudioApp: App {
             CommandGroup(replacing: .appSettings) {
                 Button("模型设置…") { model.showSettings = true }.keyboardShortcut(",")
                 Button("大模型配置…") { model.showAISettings = true }
+                Divider()
+                Button("长期记忆…") { model.showMemories = true }.keyboardShortcut("m", modifiers: [.command, .shift])
+                Button("工具与 MCP…") { model.showToolSettings = true }
             }
             CommandMenu("播放") {
                 Button("播放 / 暂停") { model.player.toggle() }.keyboardShortcut(.space, modifiers: [.command])

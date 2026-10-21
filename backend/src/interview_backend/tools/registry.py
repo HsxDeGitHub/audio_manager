@@ -64,6 +64,11 @@ class ToolRegistry:
             raise DomainError('tool_not_found', '指定工具不存在。', 404)
         self._enabled[tool_id] = enabled
 
+    def unregister(self, tool_id: str):
+        """只用于重新加载外部 MCP 工具；本地业务工具不调用。"""
+        self._tools.pop(tool_id, None)
+        self._enabled.pop(tool_id, None)
+
     def list(self, include_disabled=False):
         return [{'id': spec.tool_id, 'framework_name': spec.framework_name, 'version': spec.version,
                  'title': spec.title, 'description': spec.description, 'effect': spec.effect,

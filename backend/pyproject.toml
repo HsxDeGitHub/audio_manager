@@ -11,6 +11,9 @@ dependencies = [
   "uvicorn>=0.30,<1",
 ]
 
+[project.scripts]
+interview-backend-mcp = "interview_backend.tools.mcp_server:main"
+
 [project.optional-dependencies]
 agent = ["langchain>=1,<2", "langgraph>=1,<2", "langgraph-checkpoint-sqlite>=3,<4", "langchain-openai>=1,<2", "mcp>=1,<2"]
 local-embeddings = ["fastembed>=0.7,<1", "numpy>=2,<3", "jieba>=0.42,<1"]

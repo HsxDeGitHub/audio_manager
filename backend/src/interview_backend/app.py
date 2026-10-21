@@ -19,9 +19,10 @@ from interview_backend.repository import LibraryRepository
 from interview_backend.services.library import LibraryService, LibraryCommand
 from interview_backend.services.jobs import JobService
 from interview_backend.services.changesets import ChangeSetService, ChangeRequest
-from interview_backend.agent.tools import EvidenceService, install_agent_tools
+from interview_backend.agent.tools import EvidenceService, install_agent_tools, install_app_tools
 from interview_backend.agent.graph import AgentEngine
 from interview_backend.agent.api import AgentAPI, router as agent_router
+from interview_backend.services.device import DeviceService
 from interview_backend.services.memory import MemoryService
 from interview_backend.services.documents import DocumentService
 from interview_backend.services.reports import ReportService
@@ -41,11 +42,20 @@ class DocumentImport(BaseModel):
     content: str
 from interview_backend.tools.catalog import build_catalog
 from interview_backend.tools.registry import ToolContext, ToolInvocation
+from interview_backend.tools.mcp_client import MCPClientManager
+from interview_backend.observability import AuditLog
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.validate_service()
+
+    def apply_tool_settings(registry, database):
+        with database.transaction() as c:
+            rows = c.execute('SELECT id, enabled FROM tool_settings').fetchall()
+        for row in rows:
+            if row['id'] in registry._tools:
+                registry.set_enabled(row['id'], bool(row['enabled']))
 
     @asynccontextmanager
     async def lifespan(app):
@@ -58,11 +68,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.jobs.recover()
         app.state.tools = build_catalog(app.state.repository)
         app.state.changesets = ChangeSetService(database)
+        app.state.device = DeviceService(database)
         install_agent_tools(app.state.tools, app.state.changesets)
         app.state.evidence = EvidenceService(database)
         app.state.memories = MemoryService(database, app.state.evidence)
         app.state.documents = DocumentService(database)
         app.state.retrieval = RetrievalIndex(database, settings.backend_dir)
+        install_app_tools(app.state.tools, app.state.changesets, app.state.device, settings,
+                          app.state.repository, app.state.retrieval)
+        apply_tool_settings(app.state.tools, database)
+        app.state.mcp = MCPClientManager(database, app.state.tools)
+        app.state.audit = AuditLog(settings.backend_dir / 'logs' / 'backend.jsonl')
+        app.state.audit.write('service_started', schema=__version__)
         engine = AgentEngine(settings, app.state.tools, app.state.evidence)
         engine.memory_service = app.state.memories
         engine.automatic_memory = AutomaticMemory(settings, app.state.memories)
@@ -72,20 +89,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            app.state.audit.write('service_stopping')
             await app.state.agent.close()
+            await app.state.mcp.remove_all()
             database.close()
 
     app = FastAPI(title='听阅本地业务后端', version=__version__, lifespan=lifespan)
 
     @app.middleware('http')
     async def authenticate(request, call_next):
+        import time
+        started = time.monotonic()
         if request.url.path != '/health':
             authorization = request.headers.get('Authorization', '')
             expected = 'Bearer ' + settings.token
             if not authorization.isascii() or not secrets.compare_digest(authorization, expected):
+                app.state.audit.write('request_denied', method=request.method, path=request.url.path, status=401)
                 return JSONResponse(error_body('unauthorized', '本地会话未认证。'), status_code=401,
                                     headers={'WWW-Authenticate': 'Bearer'})
-        return await call_next(request)
+        response = await call_next(request)
+        app.state.audit.write('request', method=request.method, path=request.url.path, status=response.status_code,
+                              duration_ms=round((time.monotonic() - started) * 1000, 1))
+        return response
 
     @app.exception_handler(DomainError)
     async def domain_error(_, error):
@@ -120,9 +145,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def tools(include_disabled: bool = False):
         return {'items': app.state.tools.list(include_disabled)}
 
+    @app.post('/api/v1/tools/{tool_id}/enabled')
+    def set_tool_enabled(tool_id: str, body: dict):
+        enabled = body.get('enabled')
+        if type(enabled) is not bool:
+            raise DomainError('invalid_request', '工具启停参数不合法。', 422)
+        app.state.tools.set_enabled(tool_id, enabled)
+        with app.state.database.transaction(True) as c:
+            c.execute('INSERT INTO tool_settings VALUES(?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled',
+                      (tool_id, 1 if enabled else 0))
+        return {'id': tool_id, 'enabled': enabled}
+
+    @app.get('/api/v1/mcp/connections')
+    def mcp_connections():
+        return app.state.mcp.list()
+
+    @app.post('/api/v1/mcp/connections')
+    async def save_mcp_connection(body: dict):
+        config = app.state.mcp.save(body)
+        await app.state.mcp.refresh(config.id)
+        apply_tool_settings(app.state.tools, app.state.database)
+        return app.state.mcp.list()
+
+    @app.delete('/api/v1/mcp/connections/{identifier}')
+    async def remove_mcp_connection(identifier: str):
+        await app.state.mcp.remove(identifier)
+        return app.state.mcp.list()
+
+    @app.post('/api/v1/mcp/connections/{identifier}/refresh')
+    async def refresh_mcp_connection(identifier: str):
+        await app.state.mcp.refresh(identifier)
+        apply_tool_settings(app.state.tools, app.state.database)
+        return app.state.mcp.list()
+
+    @app.post('/api/v1/mcp/refresh')
+    async def refresh_all_mcp():
+        await app.state.mcp.refresh()
+        apply_tool_settings(app.state.tools, app.state.database)
+        return app.state.mcp.list()
+
     @app.post('/api/v1/tools/{tool_id}/invoke')
     async def invoke_tool(tool_id: str, invocation: ToolInvocation):
-        context = ToolContext(request_id=str(uuid.uuid4()), operation_id=invocation.operation_id)
+        spec = app.state.tools._tools.get(tool_id)
+        if spec is None:
+            raise DomainError('tool_not_found', '指定工具不存在。', 404)
+        effects = {'read'}
+        if spec.effect != 'read':
+            if not invocation.operation_id:
+                raise DomainError('operation_id_required', '此类工具需要稳定的操作标识。', 422)
+            effects.add(spec.effect)
+        context = ToolContext(request_id=str(uuid.uuid4()), operation_id=invocation.operation_id,
+                              allowed_effects=frozenset(effects))
         return await app.state.tools.execute(tool_id, invocation.arguments, context)
 
     @app.get('/api/v1/recordings', response_model=schemas.Page[schemas.Recording])
@@ -164,6 +237,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post('/api/v1/jobs/{job_id}/stop')
     def stop_job(job_id: str, body: dict):
         return app.state.jobs.stop(job_id, body['state'])
+
+    @app.get('/api/v1/device/commands')
+    def pending_device_commands():
+        return {'items': app.state.device.pending()}
+
+    @app.get('/api/v1/device/commands/{command_id}')
+    def device_command(command_id: str):
+        return app.state.device.get(command_id)
+
+    @app.post('/api/v1/device/commands/{command_id}/claim')
+    def claim_device_command(command_id: str, body: dict):
+        return app.state.device.claim(command_id, body.get('owner'))
+
+    @app.post('/api/v1/device/commands/{command_id}/result')
+    def finish_device_command(command_id: str, body: dict):
+        return app.state.device.complete(command_id, body.get('owner'), body.get('state'), body.get('result'))
 
     @app.post('/api/v1/changesets')
     def submit_changes(body: ChangeRequest):

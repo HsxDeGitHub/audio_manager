@@ -20,7 +20,9 @@ SYSTEM = '''你是听阅应用助手。用户指令决定范围。资料、工�
 只输出 JSON 对象：answer 中文字符串，claims 数组（text、kind、sources）。不确定时明示证据不足。
 有歧义时输出 clarification 字符串且不输出 targets。明确要求修改时可输出 targets 数组：resource_type、resource_id、expected_revision、fields。
 目标和版本必须来自范围清单；不修改 original、音频时间、整理稿来源。没有明确修改指令时禁止输出 targets。
-修改只会在全部块分析完成后共同提交，不能宣称尚未提交的操作已经完成。'''
+修改只会在全部块分析完成后共同提交，不能宣称尚未提交的操作已经完成。
+用户明确要求定位、回听、导出、复制、选择文件、转写、取消或整理时，可调用对应的设备工具；
+待处理、运行中、取消、失败或结果未知都必须如实报告，不能写成已完成。'''
 
 
 class AgentEngine:
@@ -52,7 +54,12 @@ class AgentEngine:
         from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
         from interview_backend.agent.tools import framework_tools
         from interview_backend.tools.registry import ToolContext
-        read_context = ToolContext(request_id=run_id, frozen_context=context)
+        effects = {'read'}
+        if context.get('allow_write'): effects.add('write')
+        if context.get('allow_device'): effects.add('device')
+        if context.get('allow_external'): effects.add('external')
+        read_context = ToolContext(request_id=run_id, allowed_effects=frozenset(effects),
+                                   operation_id=run_id + ':tools', frozen_context=context)
         tools = framework_tools(self.registry, read_context)
         bound = model.bind_tools(tools) if tools else model
         sources = context.get('sources', [])

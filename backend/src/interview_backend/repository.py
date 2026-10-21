@@ -79,11 +79,14 @@ class LibraryRepository:
                           order=[table.c.created_at.desc(), table.c.id], offset=offset, limit=limit, convert=convert)
 
     def status(self):
+        import importlib.util
         with self.database.engine.connect() as connection:
             counts = {table.name: connection.scalar(select(func.count()).select_from(table)) for table in models.LEGACY_TABLES}
             origin = connection.execute(select(models.backend_imports.c.source_path)).first()
             revision = connection.scalar(text('SELECT version_num FROM alembic_version'))
         return {'schema_revision': revision, 'legacy_imported': bool(origin and origin[0] is not None),
                 'counts': counts, 'capabilities': {'library_read': True, 'legacy_migration': True,
-                'tool_registry': True, 'mcp': False, 'keyword_search': True,
-                'business_write': True, 'agent': True, 'memory': True, 'semantic_search': __import__('interview_backend.retrieval.semantic', fromlist=['SemanticIndex']).SemanticIndex(self.database.path.parent / 'Models').status()['ready']}}
+                'tool_registry': True, 'mcp': importlib.util.find_spec('mcp') is not None,
+                'keyword_search': True, 'business_write': True, 'device_commands': True, 'observability': True,
+                'agent': importlib.util.find_spec('langchain') is not None,
+                'memory': True, 'semantic_search': __import__('interview_backend.retrieval.semantic', fromlist=['SemanticIndex']).SemanticIndex(self.database.path.parent / 'Models').status()['ready']}}

@@ -67,6 +67,10 @@ struct LibraryView: View {
             if let client = model.backendClient { MemoryView(app: model, client: client) }
             else { VStack(spacing: 12) { Text("本地服务尚未连接，无法读取长期记忆。"); Button("关闭") { model.showMemories = false } }.padding(24) }
         }
+        .sheet(isPresented: $model.showToolSettings) {
+            if let client = model.backendClient { ToolSettingsView(app: model, client: client) }
+            else { VStack(spacing: 12) { Text("本地服务尚未连接，无法读取工具目录。"); Button("关闭") { model.showToolSettings = false } }.padding(24) }
+        }
         .alert("提示", isPresented: Binding(get: { model.alert != nil }, set: { if !$0 { model.alert = nil } })) {
             Button("好", role: .cancel) { model.alert = nil }
         } message: { Text(model.alert ?? "") }
