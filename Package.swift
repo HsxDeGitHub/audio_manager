@@ -19,6 +19,6 @@ let package = Package(
         .target(name: "AudioCore", dependencies: ["CSQLite"]),
         .executableTarget(name: "InterviewAudio", dependencies: ["AudioCore"]),
         .executableTarget(name: "AudioWorker", dependencies: ["AudioCore"]),
-        .testTarget(name: "AudioCoreTests", dependencies: ["AudioCore"], swiftSettings: testSettings)
+        .testTarget(name: "AudioCoreTests", dependencies: ["AudioCore", "InterviewAudio"], swiftSettings: testSettings)
     ]
 )
