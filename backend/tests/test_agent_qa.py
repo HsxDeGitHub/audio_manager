@@ -322,3 +322,20 @@ def test_committed_tool_change_survives_lost_response_and_restart_state(client, 
     resumed = client.post('/api/v1/agent/runs/' + identifier + '/resume').json()
     assert resumed['state'] == 'completed' and resumed['result']['changesets'][0]['count'] == 1
     assert 'event: completed' in client.get('/api/v1/agent/runs/' + identifier + '/events').text
+
+
+def test_mixed_question_sources_each_resolve_for_locating_and_playback(client, config):
+    with client.app.state.database.transaction(True) as c:
+        c.execute("UPDATE segments SET original='为什么使用 Go？' WHERE id='s1'")
+    class MixedModel(FakeModel):
+        async def ainvoke(self, messages):
+            return AIMessage(content=json.dumps({'answer': '完整问题', 'claims': [], 'questions': [
+                {'text': '请介绍一下过去的项目', 'source': {'resource_type': 'segment', 'resource_id': 's2', 'revision': 1}}]}))
+    context = client.app.state.evidence.freeze({'recording_id': 'r1'}, '列出全部问题')
+    result = asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('mixed-questions', context['instruction'], context, model=MixedModel()))
+    assert [q['source']['resource_id'] for q in result['questions']] == ['s1', 's2']
+    for question in result['questions']:
+        ref = question['source']
+        resolved = client.get(f"/api/v1/sources/{ref['resource_type']}/{ref['resource_id']}?revision={ref['revision']}").json()
+        assert resolved['recording_id'] == 'r1' and resolved['segment_id'] == ref['resource_id']
+        assert resolved['start'] == question['start']

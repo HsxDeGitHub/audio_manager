@@ -11,10 +11,15 @@ struct AssistantReference: Decodable, Hashable {
 struct AssistantClaim: Decodable { let text: String; let kind: String; let sources: [AssistantReference] }
 struct AssistantCoverage: Decodable { let total: Int; let covered: Int; let excluded: [BackendJSONValue]? }
 struct AssistantChange: Decodable { let id: String; let state: String; let count: Int; let items: [BackendJSONValue]? }
+struct AssistantQuestion: Decodable, Identifiable {
+    let text: String; let source: AssistantReference; let start: Double?
+    var id: String { "\(source.resourceType):\(source.resourceID):\(source.revision):\(text)" }
+}
 struct AssistantResult: Decodable {
     struct Failure: Decodable { let code: String; let message: String }
     let answer: String?; let claims: [AssistantClaim]?; let coverage: AssistantCoverage?; let changeset: AssistantChange?; let error: Failure?
     let changesets: [AssistantChange]?
+    let questions: [AssistantQuestion]?
     var allChanges: [AssistantChange] { changesets ?? changeset.map { [$0] } ?? [] }
 }
 struct AssistantRun: Decodable, Identifiable { let id: String; let state: String; let result: AssistantResult? }

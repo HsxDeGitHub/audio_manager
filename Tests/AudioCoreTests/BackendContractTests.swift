@@ -96,6 +96,17 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(paths.contains("/api/v1/documents/doc1"))
     }
 
+    @Test func assistantQuestionsKeepIndependentSourceAndPlaybackTime() throws {
+        let data = Data(#"{"answer":"问题汇总","questions":[{"text":"原始问题？","source":{"resource_type":"segment","resource_id":"s1","revision":1},"start":1},{"text":"请介绍你的经验","source":{"resource_type":"segment","resource_id":"s2","revision":2},"start":10}]}"#.utf8)
+        let result = try JSONDecoder().decode(AssistantResult.self, from: data)
+        let questions = try #require(result.questions)
+        #expect(questions.count == 2)
+        #expect(questions[0].source.resourceID == "s1" && questions[0].start == 1)
+        #expect(questions[1].source.revision == 2 && questions[1].text == "请介绍你的经验")
+        #expect(Set(questions.map(\.id)).count == 2)
+        #expect(try JSONDecoder().decode(AssistantResult.self, from: Data(#"{"answer":"旧结果"}"#.utf8)).questions == nil)
+    }
+
     @Test func configurationRejectsNonLocalAddressesAndUnsafeTokens() throws {
         for url in ["https://example.test", "http://localhost:8765", "http://127.0.0.1.evil.test:8765",
                     "http://127.0.0.2:8765", "https://127.0.0.1:8765", "http://127.0.0.1",

@@ -38,12 +38,29 @@ struct AssistantView: View {
                     ForEach(assistant.runs) { run in
                         if let result = run.result {
                             if let coverage = result.coverage { Text("来源覆盖 \(coverage.covered)/\(coverage.total) · 无法纳入 \(coverage.excluded?.count ?? 0) 项").font(.caption).foregroundStyle(.secondary) }
+                            if let questions = result.questions, !questions.isEmpty {
+                                DisclosureGroup("问题清单（\(questions.count) 条）") {
+                                    ForEach(Array(questions.enumerated()), id: \.element.id) { index, question in
+                                        VStack(alignment: .leading, spacing: 5) {
+                                            Text("\(index + 1). \(question.text)").textSelection(.enabled)
+                                            HStack {
+                                                Button("查看来源") { Task { await model.openAssistantSource(question.source, play: false) } }
+                                                if question.source.resourceType == "segment" {
+                                                    Button("回听") { Task { await model.openAssistantSource(question.source, play: true) } }
+                                                }
+                                                if let start = question.start { Text("\(Int(start) / 60):\(String(format: "%02d", Int(start) % 60))").foregroundStyle(.secondary) }
+                                            }.font(.caption)
+                                        }.padding(.vertical, 5)
+                                    }
+                                }
+                            }
                             if let claims = result.claims {
                                 ForEach(Array(claims.enumerated()), id: \.offset) { _, claim in
                                     VStack(alignment: .leading) {
                                         Text("\(kindTitle(claim.kind))：\(claim.text)").font(.caption)
                                         ForEach(claim.sources, id: \.self) { source in
                                             HStack {
+                                                if source.historical == true { Text("修改前历史引用").foregroundStyle(.secondary) }
                                                 Button("查看来源") { Task { await model.openAssistantSource(source, play: false) } }
                                                 if source.resourceType == "segment" { Button("回听") { Task { await model.openAssistantSource(source, play: true) } } }
                                             }.font(.caption)
