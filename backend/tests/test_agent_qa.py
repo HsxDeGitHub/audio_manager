@@ -166,3 +166,67 @@ def test_device_instruction_is_required_before_device_tools_are_offered(client):
     assert evidence.freeze({'recording_id': 'r1'}, '总结这场面试')['allow_device'] is False
     assert evidence.freeze({'recording_id': 'r1'}, '定位到当前段落并回听')['allow_device'] is True
     assert evidence.freeze({'recording_id': 'r1'}, '说明这段')['allow_write'] is False
+
+
+def test_question_enumeration_uses_model_when_no_question_punctuation(client, config):
+    from langchain_core.messages import AIMessage
+    class QuestionModel:
+        def bind_tools(self, tools): return self
+        async def ainvoke(self, messages):
+            return AIMessage(content=json.dumps({'answer': '按来源整理问题。', 'claims': [], 'questions': [
+                {'text': '原始问题', 'source': {'resource_type': 'segment', 'resource_id': 's1', 'revision': 1}},
+                {'text': '编造问题', 'source': {'resource_type': 'segment', 'resource_id': 'absent', 'revision': 1}}]}))
+    evidence = client.app.state.evidence
+    context = evidence.freeze({'recording_id': 'r1', 'run_id': 'run1'}, '列出全部问题')
+    assert '?' not in context['sources'][0]['text'] and '？' not in context['sources'][0]['text']
+    result = asyncio.run(AgentEngine(config, client.app.state.tools, evidence).execute(
+        'question-model', '列出全部问题', context, model=QuestionModel()))
+    assert len(result['questions']) == 1
+    assert result['questions'][0]['text'] == '原始问题'
+    assert result['questions'][0]['source'] == {'resource_type': 'segment', 'resource_id': 's1', 'revision': 1}
+    assert all(claim['kind'] != 'original_statement' for claim in result['claims'])
+
+
+def test_question_enumeration_falls_back_to_source_backed_original_claims(client, config):
+    from langchain_core.messages import AIMessage
+    class ClaimModel:
+        def bind_tools(self, tools): return self
+        async def ainvoke(self, messages):
+            return AIMessage(content=json.dumps({'answer': '整理问题。', 'claims': [
+                {'text': '请介绍一下你的一些过往工作经历', 'kind': 'original_statement',
+                 'sources': [{'resource_type': 'segment', 'resource_id': 's1', 'revision': 1}]},
+                {'text': '这里是一段分析', 'kind': 'analysis',
+                 'sources': [{'resource_type': 'segment', 'resource_id': 's2', 'revision': 1}]}]}))
+    evidence = client.app.state.evidence
+    context = evidence.freeze({'recording_id': 'r1', 'run_id': 'run1'}, '列出全部问题')
+    result = asyncio.run(AgentEngine(config, client.app.state.tools, evidence).execute(
+        'claim-question', '列出全部问题', context, model=ClaimModel()))
+    assert len(result['questions']) == 1
+    assert result['questions'][0]['source']['resource_id'] == 's1'
+    assert result['questions'][0]['start'] is not None
+
+
+def test_memory_is_a_valid_scoped_source_across_sessions(client, config):
+    from langchain_core.messages import AIMessage
+    from interview_backend.services.memory import MemoryService
+    database = client.app.state.database
+    with database.transaction(True) as c:
+        c.execute("INSERT INTO sessions VALUES('memory-session','合成记忆','{}',1)")
+        c.execute("INSERT INTO messages VALUES('memory-m1','memory-session','user','我更希望先给结论。','{}',1)")
+    memories = MemoryService(database, client.app.state.evidence)
+    item = memories.add({'category': 'preference', 'content': '回答先给结论', 'topic': '表达偏好', 'scope': 'global',
+                         'sources': [{'resource_type': 'message', 'resource_id': 'memory-m1', 'revision': 1}]}, 'memory-agent-source')
+    class MemoryModel:
+        def bind_tools(self, tools): return self
+        async def ainvoke(self, messages):
+            return AIMessage(content=json.dumps({'answer': '你的偏好是先给结论。', 'claims': [
+                {'text': '回答先给结论', 'kind': 'user_statement',
+                 'sources': [{'resource_type': 'memory', 'resource_id': item['id'], 'revision': 1}]}]}))
+    evidence = client.app.state.evidence
+    context = evidence.freeze({'recording_id': 'r1', 'run_id': 'run1'}, '我的回答偏好是什么')
+    context['session_id'] = 'memory-session'
+    engine = AgentEngine(config, client.app.state.tools, evidence)
+    engine.memory_service = memories
+    result = asyncio.run(engine.execute('memory-agent-run', '我的回答偏好是什么', context, model=MemoryModel()))
+    assert result['answer'].startswith('你的偏好')
+    assert result['claims'][0]['sources'][0]['resource_type'] == 'memory'

@@ -22,7 +22,9 @@ SYSTEM = '''你是听阅应用助手。用户指令决定范围。资料、工�
 目标和版本必须来自范围清单；不修改 original、音频时间、整理稿来源。没有明确修改指令时禁止输出 targets。
 修改只会在全部块分析完成后共同提交，不能宣称尚未提交的操作已经完成。
 用户明确要求定位、回听、导出、复制、选择文件、转写、取消或整理时，可调用对应的设备工具；
-待处理、运行中、取消、失败或结果未知都必须如实报告，不能写成已完成。'''
+待处理、运行中、取消、失败或结果未知都必须如实报告，不能写成已完成。
+用户要求列出全部问题时，除 answer 外输出 questions 数组；每项含 text 和 source（resource_type、
+resource_id、revision）。只列证据中实际提出的问题，来源必须来自输入，不能编造。'''
 
 
 class AgentEngine:
@@ -89,10 +91,21 @@ class AgentEngine:
                     chunks.append(current); current = []; length = 0
                 current.append(part); length += len(part['text'])
         if current: chunks.append(current)
-        answers = []; claims = []; targets = []; covered = set()
+        answers = []; claims = []; targets = []; covered = set(); model_questions = []
+        all_questions = bool(re.search(r'全部.*问题|所有.*问题|问题.*汇总|列出.*问题|哪些问题', instruction))
         for i, chunk in enumerate(chunks):
             if emit: await emit('coverage', {'chunk': i + 1, 'chunks': len(chunks), 'covered': len(covered), 'total': len(sources)})
             memory = self.memory_service.active(('global', 'session:'+context.get('session_id',''))) if hasattr(self,'memory_service') else []
+            if memory:
+                known = {(r['resource_type'], r['resource_id'], r['revision']) for r in context['resources']}
+                for item in memory:
+                    references = [{'resource_type': 'memory', 'resource_id': item['id'], 'revision': item['revision']}]
+                    references += [{'resource_type': source['resource_type'], 'resource_id': source['resource_id'],
+                                    'revision': source['revision']} for source in (item.get('sources') or [])]
+                    for reference in references:
+                        key = (reference['resource_type'], reference['resource_id'], reference['revision'])
+                        if key not in known:
+                            context['resources'].append(reference); known.add(key)
             prompt = {'current_valid_memories': memory, 'instruction': instruction, 'scope': context['resources'], 'untrusted_evidence': chunk,
                       'allow_write': context.get('allow_write', False), 'chunk': i+1, 'chunks': len(chunks)}
             try:
@@ -124,19 +137,57 @@ class AgentEngine:
             if result.get('targets') and not context.get('allow_write'):
                 raise DomainError('write_not_authorized', '当前用户消息未授权内容修改，未执行模型提出的写入。', 403)
             targets += result.get('targets', [])
+            if all_questions:
+                allowed = {(r['resource_type'], r['resource_id'], r['revision']) for r in context['resources']}
+                for question in result.get('questions') or []:
+                    if not isinstance(question, dict) or not isinstance(question.get('text'), str) or not question['text'].strip():
+                        continue
+                    source = question.get('source')
+                    if not isinstance(source, dict):
+                        continue
+                    reference = {key: source.get(key) for key in ('resource_type', 'resource_id', 'revision')}
+                    if any(reference[key] is None for key in reference) or (reference['resource_type'], reference['resource_id'], reference['revision']) not in allowed:
+                        continue
+                    if not self.evidence.valid(reference):
+                        continue
+                    start = next((s.get('start') for s in sources if s['resource_type'] == reference['resource_type'] and s['resource_id'] == reference['resource_id']), None)
+                    model_questions.append({'text': question['text'].strip()[:2000], 'source': reference, 'start': start})
             answers.append(result['answer']); claims += result['claims']
             covered.update((s['resource_type'], s['resource_id']) for s in chunk)
         for source in sources:
             if not self.evidence.valid(source):
                 raise DomainError('stale_source', '运行中资料发生变化，请基于当前版本重新执行。', 409)
         result = {'answer': '\n\n'.join(answers), 'claims': claims, 'coverage': {'total': len(sources), 'covered': len(covered), 'excluded': context.get('excluded', [])}}
-        if re.search(r'全部.*问题|所有.*问题|问题.*汇总', instruction):
-            # 明确标点的原始问题完整枚举；未标明问句的发言仍全部交给模型分析，不声称语义提取绝无遗漏。
-            result['questions'] = [{'text': s['text'], 'source': {k: s[k] for k in ('resource_type','resource_id','revision')}, 'start': s.get('start')}
-                                   for s in sources if s['resource_type'] == 'segment' and re.search(r'[?？]', s['text'])]
+        if all_questions:
+            # 标点问句做确定性兜底；模型识别结果必须再核对来源，未标点的真实录音也能进入清单。
+            deterministic = [{'text': s['text'].strip(), 'source': {k: s[k] for k in ('resource_type','resource_id','revision')}, 'start': s.get('start')}
+                             for s in sources if s['resource_type'] == 'segment' and re.search(r'[?？]', s['text'])]
+            merged = {}
+            for question in deterministic + model_questions:
+                key = re.sub(r'[\W_]+', '', question['text']) + ':' + question['source']['resource_id']
+                if key and key not in merged:
+                    merged[key] = question
+            if not merged:
+                # 某些模型会把问题写进 original_statement 陈述而不填 questions；用已校验来源补全清单。
+                question_hint = re.compile(r'吗|呢|什么|怎么|怎样|如何|为什么|为何|哪|谁|多少|是否|能否|能不能|可不可以|介绍一下|介绍下|说说|谈谈|讲讲|举个例子|有没有|是不是')
+                for claim in claims:
+                    text = claim.get('text') if isinstance(claim, dict) else None
+                    sources_list = claim.get('sources') if isinstance(claim, dict) else None
+                    if claim.get('kind') != 'original_statement' or not isinstance(text, str) or not text.strip() or not sources_list:
+                        continue
+                    if not question_hint.search(text):
+                        continue
+                    reference = sources_list[0]
+                    start = next((s.get('start') for s in sources if s['resource_type'] == reference['resource_type'] and s['resource_id'] == reference['resource_id']), None)
+                    key = re.sub(r'[\W_]+', '', text) + ':' + reference['resource_id']
+                    if key and key not in merged:
+                        merged[key] = {'text': text.strip()[:2000], 'source': {k: reference[k] for k in ('resource_type','resource_id','revision')}, 'start': start}
+            result['questions'] = sorted(merged.values(), key=lambda q: (q.get('start') is None, q.get('start') or 0, q['source']['resource_id']))
         if result.get('questions'):
             result['answer'] += '\n\n原文问题清单：\n' + '\n'.join(f"{i+1}. {q['text']}" for i,q in enumerate(result['questions']))
-            result['claims'] += [{'text':q['text'],'kind':'original_statement','sources':[q['source']]} for q in result['questions']]
+            deterministic_keys = {(re.sub(r'[\W_]+', '', q['text']), q['source']['resource_id']) for q in deterministic}
+            result['claims'] += [{'text':q['text'],'kind':'original_statement','sources':[q['source']]}
+                                 for q in result['questions'] if (re.sub(r'[\W_]+', '', q['text']), q['source']['resource_id']) in deterministic_keys]
         if targets:
             from interview_backend.tools.registry import ToolContext
             allowed = frozenset((r['resource_type'],r['resource_id']) for r in context['resources'])
