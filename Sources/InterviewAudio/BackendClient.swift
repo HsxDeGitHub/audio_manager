@@ -103,6 +103,20 @@ struct BackendSpeaker: Decodable, Sendable {
     let name: String
 }
 
+struct BackendDocument: Decodable, Identifiable, Sendable {
+    let id: String; let title: String; let format: String; let content: String; let revision: Int
+    let duplicate: Bool?
+}
+
+struct BackendSource: Decodable, Sendable {
+    let text: String
+    let recordingID: String?; let runID: String?; let segmentID: String?; let start: Double?
+    let line: Int?; let lineText: String?
+    private enum CodingKeys: String, CodingKey {
+        case text, start, line, recordingID = "recording_id", runID = "run_id", segmentID = "segment_id", lineText = "line_text"
+    }
+}
+
 struct BackendDraft: Decodable, Identifiable, Sendable {
     let id: String
     let runID: String
@@ -219,6 +233,35 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
     func drafts(runID: String, offset: Int = 0, limit: Int = 50) async throws -> BackendPage<BackendDraft> {
         try validateID(runID)
         return try await page(["transcripts", runID, "drafts"], offset: offset, limit: limit)
+    }
+
+    func documents() async throws -> [BackendDocument] {
+        struct Page: Decodable { let items: [BackendDocument] }
+        let page: Page = try await get(["api", "v1", "documents"])
+        return page.items
+    }
+    func document(id: String) async throws -> BackendDocument {
+        try validateID(id)
+        return try await get(["api", "v1", "documents", id])
+    }
+    func importDocument(title: String, format: String, content: String, operationID: String) async throws -> BackendDocument {
+        guard ["txt", "md"].contains(format), !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw BackendClientError.invalidRequest }
+        return try await get(["api", "v1", "documents"], method: "POST", body: JSONSerialization.data(withJSONObject:
+            ["title": title, "format": format, "content": content, "operation_id": operationID]))
+    }
+    func updateDocument(id: String, revision: Int, fields: [String: Any], operationID: String) async throws -> AssistantChange {
+        try validateID(id)
+        guard revision > 0 else { throw BackendClientError.invalidRequest }
+        return try await get(["api", "v1", "documents", id], method: "PATCH", body: JSONSerialization.data(withJSONObject:
+            ["expected_revision": revision, "fields": fields, "operation_id": operationID]))
+    }
+    func source(_ ref: AssistantReference) async throws -> BackendSource {
+        try validateID(ref.resourceType); try validateID(ref.resourceID)
+        guard ref.revision > 0, ref.line.map({ $0 > 0 }) ?? true else { throw BackendClientError.invalidRequest }
+        var query = [URLQueryItem(name: "revision", value: String(ref.revision))]
+        if let line = ref.line { query.append(URLQueryItem(name: "line", value: String(line))) }
+        return try await get(["api", "v1", "sources", ref.resourceType, ref.resourceID], query: query)
     }
 
     func send<Value: Decodable>(_ path: String, method: String = "GET", body: Data? = nil) async throws -> Value {

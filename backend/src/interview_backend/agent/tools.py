@@ -28,7 +28,8 @@ class EvidenceService:
         with self.database.transaction() as c:
             recordings = [dict(r) for r in c.execute('SELECT * FROM recordings ORDER BY created_at,id')] if context.scope == 'all' else [require(c, 'recordings', context.recording_id)] if context.recording_id else []
             resources = []; excluded = []; sources = []
-            if context.scope == 'current' and not recordings and not context.document_ids:
+            importing = bool(re.search(r'导入|添加材料', instruction))
+            if context.scope == 'current' and not recordings and not context.document_ids and not importing:
                 return {**context.model_dump(), 'resources': [], 'sources': [], 'excluded': [], 'allow_write': False, 'clarification': '请指定当前资料，或切换为全部资料。'}
             for recording in recordings:
                 resources.append(self.ref(c, 'recording', recording['id']))
@@ -62,15 +63,16 @@ class EvidenceService:
             for row in document_rows:
                 if row['removed']: continue
                 ref = self.ref(c, 'document', row['id']); resources.append(ref)
-                sources.append({**ref, 'text': row['content'], 'kind': 'personal_document', 'line': 1})
+                sources.append({**ref, 'title': row['title'], 'text': row['content'], 'kind': 'personal_document', 'line': 1})
             if re.search(r'这段|这一段|这句话', instruction) and not context.segment_ids and not context.draft_id and len(sources) > 1:
                 return {**context.model_dump(), 'resources': resources, 'sources': sources, 'excluded': excluded, 'allow_write': False, 'clarification': '请引用要处理的段落，避免误改其他内容。'}
             # 只有用户消息中的执行动词可允许写工具，资料正文永远不参与权限判断。
-            mutation = bool(re.search(r'(帮我|请|把|将|直接).{0,40}(修改|修正|替换|改成|改为|删除|忘记|停用|重命名|撤销|合并|设置|更正)|^(修改|修正|删除|撤销|忘记|停用|设置|记住)', instruction))
+            mutation = importing or bool(re.search(r'(帮我|请|把|将|直接).{0,40}(修改|修正|替换|改成|改为|删除|忘记|停用|重命名|撤销|合并|设置|更正)|^(修改|修正|删除|撤销|忘记|停用|设置|记住)', instruction))
             device = bool(re.search(r'定位|回听|播放|导出|保存为|复制|剪贴板|选择文件|打开文件|转写|重新识别|取消任务|整理|周报分析', instruction))
             external = bool(re.search(r'外部工具|MCP', instruction, re.IGNORECASE))
             return {**context.model_dump(), 'resources': resources, 'write_resources': list(resources), 'sources': sources, 'excluded': excluded, 'allow_write': mutation,
                     'allow_device': device, 'allow_external': external,
+                    'allow_document_import': importing,
                     'instruction': instruction, 'recording_ids': [r['id'] for r in recordings]}
 
     @staticmethod
@@ -119,6 +121,12 @@ class EvidenceService:
                 if (ref['resource_type'], ref['resource_id'], ref['revision']) not in allowed or not self.valid_after_changes(ref, changes):
                     raise DomainError('stale_source', '引用来源已变化或超出范围，请重新运行。', 409)
                 if not self.valid(ref): ref['historical'] = True
+                if ref['resource_type'] == 'document':
+                    with self.database.transaction() as c:
+                        lines = require(c, 'documents', ref['resource_id'])['content'].split('\n')
+                    if type(ref.get('line', 1)) is not int or not 1 <= ref.get('line', 1) <= len(lines):
+                        raise DomainError('invalid_line', '引用行超出材料范围。', 422)
+                    ref.setdefault('line', 1)
         return result
 
 
@@ -168,6 +176,33 @@ def install_agent_tools(registry, changesets):
         return {'result': {'sources': context.frozen_context['sources'], 'excluded': context.frozen_context.get('excluded', [])}}
     registry.register(ToolSpec(tool_id='evidence.read', version='1.0', title='读取固定范围证据',
         description='读取当前消息固定范围内的完整证据、版本和无法纳入项。', input_model=EmptyArguments, output_model=ResultEnvelope, handler=read))
+
+    from interview_backend.services.documents import DocumentService
+    documents = DocumentService(changesets.database)
+    class ImportDocument(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        title: str = Field(min_length=1)
+        format: Literal['txt', 'md']
+        content: str = Field(min_length=1)
+    class UpdateDocument(BaseModel):
+        model_config = ConfigDict(extra='forbid')
+        document_id: str = Field(min_length=1)
+        expected_revision: int = Field(ge=1)
+        fields: dict = Field(min_length=1)
+    def import_document(args, context):
+        if context.frozen_context is not None and not context.frozen_context.get('allow_document_import'):
+            raise DomainError('write_not_authorized', '本次消息未授权导入材料。', 403)
+        return {'result': documents.import_text(args.title, args.format, args.content, context.operation_id)}
+    def update_document(args, context):
+        target = ChangeTarget(resource_type='document', resource_id=args.document_id,
+                              expected_revision=args.expected_revision, fields=args.fields)
+        return apply(ApplyArguments(targets=[target]), context)
+    registry.register(ToolSpec(tool_id='documents.import', version='1.0', title='导入个人材料',
+        description='导入用户明确提供的 TXT/Markdown 文本，共用材料业务接口，返回内容去重结果。',
+        input_model=ImportDocument, output_model=ResultEnvelope, effect='write', handler=import_document))
+    registry.register(ToolSpec(tool_id='documents.update', version='1.0', title='修改或移除材料',
+        description='修改范围内材料的 title/content，或以 removed=true 移除；校验版本并保留差异与撤销。',
+        input_model=UpdateDocument, output_model=ResultEnvelope, effect='write', handler=update_document))
 
 
 class MetadataFields(BaseModel):

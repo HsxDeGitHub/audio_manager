@@ -65,6 +65,37 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(old.allChanges.first?.id == "old")
     }
 
+    @Test func documentsShareBusinessAPIAndLocateExactLines() async throws {
+        let c = try client()
+        let document = #"{"id":"doc1","title":"项目","format":"md","content":"第一行\n第二行 Redis","revision":1,"duplicate":true}"#
+        var paths: [String] = []
+        BackendStubProtocol.respond = { request in
+            paths.append(request.url!.path)
+            if request.url!.path == "/api/v1/documents", request.httpMethod == "GET" { return (200, Data("{\"items\":[\(document)]}".utf8)) }
+            if request.httpMethod == "PATCH" {
+                let body = try #require(bodyData(request))
+                let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+                #expect(json["expected_revision"] as? Int == 1)
+                #expect((json["fields"] as? [String: Any])?["removed"] as? Bool == true)
+                return (200, Data(#"{"id":"op1","state":"committed","count":1}"#.utf8))
+            }
+            if request.url!.path.hasPrefix("/api/v1/sources/") {
+                #expect(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.contains(URLQueryItem(name: "line", value: "2")) == true)
+                return (200, Data(#"{"resource_type":"document","resource_id":"doc1","revision":1,"text":"第一行\n第二行 Redis","line":2,"line_text":"第二行 Redis"}"#.utf8))
+            }
+            return (200, Data(document.utf8))
+        }
+        let imported = try await c.importDocument(title: "项目", format: "md", content: "第一行\n第二行 Redis", operationID: "import1")
+        #expect(imported.duplicate == true)
+        #expect(try await c.documents().count == 1)
+        #expect(try await c.document(id: imported.id).content.contains("Redis"))
+        let ref = try JSONDecoder().decode(AssistantReference.self, from: Data(#"{"resource_type":"document","resource_id":"doc1","revision":1,"line":2}"#.utf8))
+        let source = try await c.source(ref)
+        #expect(source.line == 2 && source.lineText == "第二行 Redis")
+        _ = try await c.updateDocument(id: imported.id, revision: 1, fields: ["removed": true], operationID: "op1")
+        #expect(paths.contains("/api/v1/documents/doc1"))
+    }
+
     @Test func configurationRejectsNonLocalAddressesAndUnsafeTokens() throws {
         for url in ["https://example.test", "http://localhost:8765", "http://127.0.0.1.evil.test:8765",
                     "http://127.0.0.2:8765", "https://127.0.0.1:8765", "http://127.0.0.1",

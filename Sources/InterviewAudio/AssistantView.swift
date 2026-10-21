@@ -9,6 +9,7 @@ struct AssistantView: View {
             HStack {
                 Text("听阅助手").font(.headline)
                 Spacer()
+                Button("材料") { model.showDocuments = true }
                 Button("记忆") { model.showMemories = true }
                 Button("工具") { model.showToolSettings = true }
                 Button("新对话") { Task { await assistant.createSession() } }

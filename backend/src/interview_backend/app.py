@@ -268,7 +268,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await tool_call_self_test(ModelSettings.load(settings.data_dir))
 
     @app.get('/api/v1/sources/{kind}/{identifier}')
-    def resolve_source(kind: str, identifier: str, revision: int):
+    def resolve_source(kind: str, identifier: str, revision: int, line: int = Query(1, ge=1)):
         from interview_backend.services.changesets import read_object
         if kind not in {'recording', 'segment', 'draft', 'document', 'speaker', 'memory', 'message'}:
             raise DomainError('invalid_source', '来源类型不正确。', 422)
@@ -278,6 +278,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with app.state.database.transaction() as c:
             row = read_object(c, kind, identifier)
             result = {'resource_type': kind, 'resource_id': identifier, 'revision': revision, 'text': row.get('content', row.get('edited') if row.get('edited') is not None else row.get('original', ''))}
+            if kind == 'document':
+                lines = result['text'].split('\n')
+                if line > len(lines): raise DomainError('invalid_line', '引用行已超出材料范围。', 422)
+                result.update({'line': line, 'line_text': lines[line - 1]})
             if kind in {'segment','draft'}:
                 from interview_backend.services.common import require
                 result.update({'run_id': row['run_id'], 'recording_id': require(c, 'runs', row['run_id'])['recording_id'], 'segment_id': identifier if kind == 'segment' else None, 'start': row.get('start')})
@@ -298,6 +302,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post('/api/v1/documents')
     def import_document(body: DocumentImport):
         return app.state.documents.import_text(body.title, body.format, body.content, body.operation_id)
+    @app.get('/api/v1/documents/{identifier}')
+    def document(identifier: str): return app.state.documents.get(identifier)
     @app.patch('/api/v1/documents/{identifier}')
     def update_document(identifier: str, body: ContentUpdate):
         return app.state.documents.update(identifier, body.fields, body.expected_revision, body.operation_id)

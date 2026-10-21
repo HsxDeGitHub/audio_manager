@@ -54,6 +54,9 @@ final class AppModel: ObservableObject {
     @Published var showAISettings = false
     @Published var showAICompose = false
     @Published var showMemories = false
+    @Published var showDocuments = false
+    @Published var documentSourceID: String?
+    @Published var documentSourceLine: Int = 1
     @Published var showToolSettings = false
     @Published var aiSettings = AISettings()
     @Published var aiDrafts: [AIDraft] = []
@@ -164,16 +167,15 @@ final class AppModel: ObservableObject {
         }
     }
     func openAssistantSource(_ source: AssistantReference, play: Bool) async {
-        struct Resolved: Decodable {
-            let recording_id: String?; let run_id: String?; let segment_id: String?; let start: Double?; let text: String
-        }
         do {
             guard let client = assistant.client else { return }
-            let resolved: Resolved = try await client.send("/api/v1/sources/\(source.resourceType)/\(source.resourceID)?revision=\(source.revision)")
-            if let recordingID = resolved.recording_id {
+            let resolved = try await client.source(source)
+            if source.resourceType == "document" {
+                documentSourceID = source.resourceID; documentSourceLine = resolved.line ?? 1; showDocuments = true
+            } else if let recordingID = resolved.recordingID {
                 await select(recordingID)
-                if let run = resolved.run_id, selected?.activeRun != run { switchRun(run) }
-                readerShowsAI = false; reviewFilter = .all; focusSegmentID = resolved.segment_id; focusRequestID = UUID()
+                if let run = resolved.runID, selected?.activeRun != run { switchRun(run) }
+                readerShowsAI = false; reviewFilter = .all; focusSegmentID = resolved.segmentID; focusRequestID = UUID()
                 if play, let start = resolved.start { player.seek(max(0, start - preRoll), play: true) }
             } else { notice = resolved.text }
         } catch { alert = error.localizedDescription }

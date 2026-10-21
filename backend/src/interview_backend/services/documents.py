@@ -7,6 +7,11 @@ from interview_backend.errors import DomainError
 
 class DocumentService:
     def __init__(self, database): self.database = database
+    def get(self, identifier):
+        with self.database.transaction() as c:
+            row = require(c, 'documents', identifier)
+            if row['removed']: raise DomainError('not_found', '材料已移除。', 404)
+            return row
     def import_text(self, title, format, content, operation_id):
         if format not in {'txt','md'} or not isinstance(title,str) or not title.strip() or not isinstance(content,str) or not content.strip():
             raise DomainError('invalid_document', '只支持非空 TXT/Markdown 文本材料。', 422)

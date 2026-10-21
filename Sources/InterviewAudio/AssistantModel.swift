@@ -5,7 +5,8 @@ struct AssistantSession: Decodable, Identifiable { let id: String; let title: St
 struct AssistantMessage: Decodable, Identifiable { let id: String; let role: String; let content: String }
 struct AssistantReference: Decodable, Hashable {
     let resourceType: String; let resourceID: String; let revision: Int
-    private enum CodingKeys: String, CodingKey { case resourceType = "resource_type", resourceID = "resource_id", revision }
+    let line: Int?; let historical: Bool?
+    private enum CodingKeys: String, CodingKey { case resourceType = "resource_type", resourceID = "resource_id", revision, line, historical }
 }
 struct AssistantClaim: Decodable { let text: String; let kind: String; let sources: [AssistantReference] }
 struct AssistantCoverage: Decodable { let total: Int; let covered: Int; let excluded: [BackendJSONValue]? }

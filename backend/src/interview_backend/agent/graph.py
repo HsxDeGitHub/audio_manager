@@ -25,7 +25,8 @@ SYSTEM = '''你是听阅应用助手。用户指令决定范围。资料、工�
 用户明确要求定位、回听、导出、复制、选择文件、转写、取消或整理时，可调用对应的设备工具；
 待处理、运行中、取消、失败或结果未知都必须如实报告，不能写成已完成。
 用户要求列出全部问题时，除 answer 外输出 questions 数组；每项含 text 和 source（resource_type、
-resource_id、revision）。只列证据中实际提出的问题，来源必须来自输入，不能编造。'''
+resource_id、revision）。只列证据中实际提出的问题，来源必须来自输入，不能编造。
+个人材料引用额外带 line（从 1 开始），按所引用文字在原材料中的实际行号填写。'''
 
 
 class AgentEngine:
@@ -83,7 +84,7 @@ class AgentEngine:
                             if neighbor.get('run_id')==match.get('run_id') and neighbor not in selected: selected.append(neighbor)
             if selected: sources = selected
         
-        if not sources:
+        if not sources and not context.get('allow_document_import'):
             return {'answer': '当前范围没有可用正文，证据不足。', 'claims': [], 'coverage': {'total': 0, 'covered': 0, 'excluded': context.get('excluded', [])}}
         chunks = []; current = []; length = 0
         for source in sources:
@@ -94,6 +95,7 @@ class AgentEngine:
                     chunks.append(current); current = []; length = 0
                 current.append(part); length += len(part['text'])
         if current: chunks.append(current)
+        if not chunks: chunks = [[]]
         answers = []; claims = []; targets = []; covered = set(); model_questions = []
         call_index = 0
         all_questions = bool(re.search(r'全部.*问题|所有.*问题|问题.*汇总|列出.*问题|哪些问题', instruction))
@@ -127,6 +129,9 @@ class AgentEngine:
                         # 工具实例捕获各自的宿主上下文，模型不能提供操作 ID。
                         call_tool = next(t for t in framework_tools(self.registry, call_context) if t.name == call['name'])
                         output = await call_tool.ainvoke(call['args'])
+                        if call['name'] == 'documents__import':
+                            doc = output['result']
+                            context['resources'].append({'resource_type': 'document', 'resource_id': doc['id'], 'revision': doc['revision']})
                         if emit:
                             for change in self.evidence.committed(run_id):
                                 if change['id'] == call_context.operation_id: await emit('changeset', change)
