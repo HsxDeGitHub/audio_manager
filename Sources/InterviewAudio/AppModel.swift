@@ -53,6 +53,8 @@ final class AppModel: ObservableObject {
     @Published var showAbout = false
     @Published var showAISettings = false
     @Published var showAICompose = false
+    @Published var showMemories = false
+    @Published var showToolSettings = false
     @Published var aiSettings = AISettings()
     @Published var aiDrafts: [AIDraft] = []
     @Published var selectedAIDraftID: String?
@@ -78,7 +80,9 @@ final class AppModel: ObservableObject {
     let dataDirectory: URL
     let toolsDirectory: URL
     private(set) var store: BackendLibraryStore?
+    private(set) var backendClient: BackendClient?
     let backendProcess = BackendProcess()
+    let assistant = AssistantModel()
     @Published var backendState = "正在连接本地服务…"
     @Published var backendUnavailable = false
     private var queue: [QueuedJob] = []
@@ -144,11 +148,28 @@ final class AppModel: ObservableObject {
         do {
             let connection = try await backendProcess.start(dataDirectory: dataDirectory)
             store = BackendLibraryStore(connection: connection)
+            backendClient = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 30)
+            await assistant.attach(connection)
             backendUnavailable = false; backendState = "本地服务已连接"; reload()
         } catch {
-            store = nil; backendUnavailable = true
+            store = nil; backendClient = nil; backendUnavailable = true
             backendState = backendProcess.diagnostic ?? "服务不可用，请重试。"
         }
+    }
+    func openAssistantSource(_ source: AssistantReference, play: Bool) async {
+        struct Resolved: Decodable {
+            let recording_id: String?; let run_id: String?; let segment_id: String?; let start: Double?; let text: String
+        }
+        do {
+            guard let client = assistant.client else { return }
+            let resolved: Resolved = try await client.send("/api/v1/sources/\(source.resourceType)/\(source.resourceID)?revision=\(source.revision)")
+            if let recordingID = resolved.recording_id {
+                await select(recordingID)
+                if let run = resolved.run_id, selected?.activeRun != run { switchRun(run) }
+                readerShowsAI = false; reviewFilter = .all; focusSegmentID = resolved.segment_id; focusRequestID = UUID()
+                if play, let start = resolved.start { player.seek(max(0, start - preRoll), play: true) }
+            } else { notice = resolved.text }
+        } catch { alert = error.localizedDescription }
     }
     func reload() {
         do {
@@ -156,6 +177,19 @@ final class AppModel: ObservableObject {
             loadTranscript()
             refreshSearch()
         } catch { alert = error.localizedDescription }
+    }
+    /// 界面与助手共用同一业务修改接口；版本冲突由后端统一返回 409。
+    func recordingMetadata(_ id: String) async throws -> BackendRecording {
+        guard let backendClient else { throw BackendClientError.unavailable }
+        return try await backendClient.send("/api/v1/recordings/\(id)")
+    }
+    func updateRecordingMetadata(_ id: String, fields: [String: Any], revision: Int) async throws {
+        guard let backendClient else { throw BackendClientError.unavailable }
+        struct Receipt: Decodable { let id: String; let state: String; let count: Int }
+        let body = try JSONSerialization.data(withJSONObject: ["operation_id": UUID().uuidString,
+                                                               "expected_revision": revision, "fields": fields])
+        let _: Receipt = try await backendClient.send("/api/v1/recordings/\(id)", method: "PATCH", body: body)
+        reload()
     }
     private func loadTranscript() {
         do {
@@ -555,6 +589,6 @@ final class AppModel: ObservableObject {
         queue = []
         if let id = activeRecordingID, var r = recordings.first(where: { $0.id == id }) { r.state = .interrupted; try? store?.save(r) }
         cancelledJob = true; worker?.terminate(); player.pause()
-        store = nil; backendProcess.stop()
+        assistant.stop(); store = nil; backendProcess.stop()
     }
 }

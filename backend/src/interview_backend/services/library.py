@@ -255,3 +255,9 @@ class LibraryService:
     @staticmethod
     def _protected(state):
         return any(s.get('edited') is not None or s['speakerEdited'] or s['reviewed'] for s in state['items']) or any(name != default_name(int(k)) for k, name in state['names'].items())
+
+    def update_metadata(self, identifier, fields, revision, operation_id):
+        from interview_backend.services.changesets import ChangeSetService
+        if set(fields) - {'title','kind','interview_date','company','role'}:
+            raise DomainError('invalid_metadata','资料信息字段不正确。',422)
+        return ChangeSetService(self.database).submit({'operation_id':operation_id,'targets':[{'resource_type':'recording','resource_id':identifier,'expected_revision':revision,'fields':fields}]})

@@ -47,7 +47,7 @@ def main():
             with urlopen(request, timeout=2) as response:
                 status = json.load(response)
             assert status['counts']['recordings'] == 0
-            assert status['capabilities']['agent'] is False
+            assert status['capabilities']['agent'] is True
             request = Request(base_url + '/api/v1/tools/library.list_recordings/invoke',
                 data=json.dumps({'arguments': {'limit': 1}}).encode(),
                 headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})

@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-agent = ["langchain>=1,<2", "langgraph>=1,<2", "langgraph-checkpoint-sqlite>=3,<4", "langchain-openai>=1,<2"]
+agent = ["langchain>=1,<2", "langgraph>=1,<2", "langgraph-checkpoint-sqlite>=3,<4", "langchain-openai>=1,<2", "mcp>=1,<2"]
 local-embeddings = ["fastembed>=0.7,<1", "numpy>=2,<3", "jieba>=0.42,<1"]
 
 [dependency-groups]

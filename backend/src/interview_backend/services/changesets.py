@@ -23,7 +23,7 @@ class ChangeRequest(BaseModel):
     targets: list[ChangeTarget] = Field(min_length=1, max_length=10000)
 
 
-TABLES = {'recording': 'recordings', 'segment': 'segments', 'draft': 'ai_drafts', 'document': 'documents', 'memory': 'memories'}
+TABLES = {'recording': 'recordings', 'segment': 'segments', 'draft': 'ai_drafts', 'document': 'documents', 'memory': 'memories', 'message': 'messages'}
 
 
 def read_object(c, kind, identifier):
@@ -136,6 +136,7 @@ class ChangeSetService:
             if target.resource_type == 'memory' and updated['state'] == 'deleted':
                 for source in json.loads(updated['sources']):
                     c.execute('INSERT OR IGNORE INTO suppressions VALUES(?,?)', (updated['topic'], encode(source)))
+                    c.execute('INSERT OR IGNORE INTO suppressions VALUES(?,?)', ('*', encode(source)))
             items.append({'resource_type': key[0], 'resource_id': key[1], 'before': old, 'after': read_object(c, *key),
                           'before_revision': revision, 'after_revision': after_revision})
         c.execute('INSERT INTO changesets VALUES(?,?,?,?,NULL)', (request.operation_id, 'committed', encode(items), time.time()))

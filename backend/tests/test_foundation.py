@@ -61,7 +61,7 @@ def test_capabilities_are_honest_and_foreign_keys_are_enabled(client):
     assert result['legacy_imported'] is True
     assert result['counts']['recordings'] == 2
     assert result['capabilities']['library_read'] is True
-    for capability in ['agent', 'memory', 'semantic_search']:
+    for capability in ['semantic_search']:
         assert result['capabilities'][capability] is False
     with client.app.state.database.engine.connect() as connection:
         assert connection.scalar(text('PRAGMA foreign_keys')) == 1

@@ -85,5 +85,5 @@ class LibraryRepository:
             revision = connection.scalar(text('SELECT version_num FROM alembic_version'))
         return {'schema_revision': revision, 'legacy_imported': bool(origin and origin[0] is not None),
                 'counts': counts, 'capabilities': {'library_read': True, 'legacy_migration': True,
-                'tool_registry': True, 'mcp': False, 'keyword_search': False,
-                'business_write': True, 'agent': False, 'memory': False, 'semantic_search': False}}
+                'tool_registry': True, 'mcp': False, 'keyword_search': True,
+                'business_write': True, 'agent': True, 'memory': True, 'semantic_search': __import__('interview_backend.retrieval.semantic', fromlist=['SemanticIndex']).SemanticIndex(self.database.path.parent / 'Models').status()['ready']}}

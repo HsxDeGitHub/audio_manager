@@ -48,7 +48,7 @@ def test_unknown_resources_return_safe_404(client, path):
 def test_existing_read_endpoints_do_not_allow_writes(client):
     before = client.get('/api/v1/recordings/r1').json()
     response = client.patch('/api/v1/recordings/r1', json={'title': '未实现的修改'})
-    assert response.status_code == 405
+    assert response.status_code == 422
     assert client.get('/api/v1/recordings/r1').json() == before
 
 
@@ -60,3 +60,29 @@ def test_invalid_stored_data_returns_safe_error(client):
     assert response.status_code == 503
     assert response.json()['error']['code'] == 'invalid_stored_data'
     assert 'private-corrupted-content' not in response.text
+
+
+def test_metadata_update_uses_changeset_versioning_and_unknown_date_stays_empty(client):
+    before = client.get('/api/v1/recordings/r1').json()
+    response = client.patch('/api/v1/recordings/r1', json={
+        'operation_id': 'metadata-1', 'expected_revision': before['revision'],
+        'fields': {'kind': 'interview', 'interview_date': '2026-10-19', 'company': '合成公司', 'role': '合成岗位'}})
+    assert response.status_code == 200
+    assert response.json()['count'] == 1
+    updated = client.get('/api/v1/recordings/r1').json()
+    assert (updated['kind'], updated['interview_date'], updated['company'], updated['role']) == (
+        'interview', '2026-10-19', '合成公司', '合成岗位')
+    assert updated['revision'] == before['revision'] + 1
+    assert client.patch('/api/v1/recordings/r1', json={
+        'operation_id': 'metadata-2', 'expected_revision': before['revision'],
+        'fields': {'company': '过期修改'}}).status_code == 409
+    assert client.get('/api/v1/recordings/r1').json()['company'] == '合成公司'
+    assert client.patch('/api/v1/recordings/r1', json={
+        'operation_id': 'metadata-3', 'expected_revision': updated['revision'],
+        'fields': {'interview_date': '2026-02-30'}}).status_code == 422
+    assert client.get('/api/v1/recordings/r1').json()['interview_date'] == '2026-10-19'
+    cleared = client.patch('/api/v1/recordings/r1', json={
+        'operation_id': 'metadata-4', 'expected_revision': updated['revision'],
+        'fields': {'interview_date': None}})
+    assert cleared.status_code == 200
+    assert client.get('/api/v1/recordings/r1').json()['interview_date'] is None

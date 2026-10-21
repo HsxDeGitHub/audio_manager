@@ -9,7 +9,7 @@ def encode(value):
 
 def require(c, table, resource_id):
     # 表名仅允许代码内固定常量，外部调用不能选择 SQL 标识符。
-    if table not in {'recordings', 'runs', 'segments', 'ai_drafts', 'documents', 'memories', 'jobs', 'sessions', 'agent_runs', 'device_commands', 'changesets'}:
+    if table not in {'recordings', 'runs', 'segments', 'ai_drafts', 'documents', 'memories', 'jobs', 'sessions', 'agent_runs', 'device_commands', 'changesets', 'messages'}:
         raise ValueError('不支持的资源表。')
     row = c.execute(f'SELECT * FROM {table} WHERE id=?', (resource_id,)).fetchone()
     if row is None:
@@ -25,8 +25,9 @@ def version(c, kind, resource_id):
 def bump(c, kind, resource_id):
     revision = version(c, kind, resource_id) + 1
     c.execute('INSERT INTO object_versions VALUES(?,?,?) ON CONFLICT(resource_type,resource_id) DO UPDATE SET revision=excluded.revision', (kind, resource_id, revision))
-    if kind == 'recording':
-        c.execute('UPDATE recordings SET revision=? WHERE id=?', (revision, resource_id))
+    if kind in {'recording', 'document', 'memory'}:
+        table = {'recording':'recordings', 'document':'documents', 'memory':'memories'}[kind]
+        c.execute(f'UPDATE {table} SET revision=? WHERE id=?', (revision, resource_id))
     c.execute('INSERT INTO index_queue VALUES(?,?,?,?) ON CONFLICT(resource_type,resource_id) DO UPDATE SET revision=excluded.revision,state=excluded.state', (kind, resource_id, revision, 'pending'))
     for row in c.execute("SELECT id,sources FROM memories WHERE state='active'").fetchall():
         if any(s.get('resource_type') == kind and s.get('resource_id') == resource_id for s in json.loads(row['sources'])):

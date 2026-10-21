@@ -35,3 +35,15 @@ def test_revert_is_atomic_and_retry_returns_saved_result(client):
     result = service.revert('edit', 'undo')
     assert service.revert('edit', 'undo') == result
     assert client.get('/api/v1/recordings/r1').json()['title'] == '合成面试甲'
+
+
+def test_concurrent_edit_only_one_expected_revision_can_commit(client):
+    from concurrent.futures import ThreadPoolExecutor
+    service = ChangeSetService(client.app.state.database)
+    def attempt(i):
+        try:
+            service.submit({'operation_id':f'concurrent-{i}','targets':[{'resource_type':'segment','resource_id':'s1','expected_revision':1,'fields':{'text':str(i)}}]})
+            return 200
+        except DomainError as error: return error.status_code
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(attempt,[1,2])) == [200,409]

@@ -9,6 +9,7 @@ struct LibraryView: View {
     @ObservedObject var model: AppModel
     @UIState private var removeID: String?
     @UIState private var renaming: Recording?
+    @UIState private var metadataRecording: Recording?
     @UIState private var nameDraft = ""
     @FocusState private var searchFocused: Bool
     @ObservedObject private var installer: ModelInstaller
@@ -42,6 +43,7 @@ struct LibraryView: View {
                     searchResults.frame(minWidth: 240, idealWidth: 270, maxWidth: 330)
                 }
                 detail.frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
+                AssistantView(model: model, assistant: model.assistant).frame(minWidth: 300, idealWidth: 350, maxWidth: 500)
             }
         }
         .tint(accent)
@@ -57,6 +59,13 @@ struct LibraryView: View {
                 Text("只修改资料库中的名称。").font(.caption).foregroundStyle(.secondary)
                 HStack { Spacer(); Button("取消") { renaming = nil }.keyboardShortcut(.cancelAction); Button("保存") { model.renameRecording(recording.id, name: nameDraft); renaming = nil }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(nameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
             }.padding(24).frame(width: 420)
+        }
+        .sheet(item: $metadataRecording) { recording in
+            RecordingMetadataView(model: model, recording: recording)
+        }
+        .sheet(isPresented: $model.showMemories) {
+            if let client = model.backendClient { MemoryView(app: model, client: client) }
+            else { VStack(spacing: 12) { Text("本地服务尚未连接，无法读取长期记忆。"); Button("关闭") { model.showMemories = false } }.padding(24) }
         }
         .alert("提示", isPresented: Binding(get: { model.alert != nil }, set: { if !$0 { model.alert = nil } })) {
             Button("好", role: .cancel) { model.alert = nil }
@@ -155,6 +164,7 @@ struct LibraryView: View {
                         }.buttonStyle(.plain)
                             .contextMenu {
                                 Button("重命名…") { nameDraft = recording.title; renaming = recording }
+                                Button("资料信息…") { metadataRecording = recording }
                                 Divider()
                                 Button("转写 / 重试") { model.enqueue(recording.id) }
                                 if recording.state.isRunning || recording.state == .queued { Button("取消任务") { model.cancel(recording.id) } }
@@ -167,6 +177,10 @@ struct LibraryView: View {
             Divider()
             VStack(alignment: .leading, spacing: 10) {
                 Button("转写全部待处理录音") { model.enqueuePending() }.disabled(model.recordings.allSatisfy { $0.state != .idle })
+                if let selected = model.selected {
+                    Button("编辑「\(selected.title)」资料信息…") { metadataRecording = selected }.font(.caption)
+                }
+                Button("长期记忆…") { model.showMemories = true }.font(.caption)
                 HStack {
                     Label(model.ready ? "模型已就绪 · 可离线识别" : "模型准备中 / 尚未就绪", systemImage: model.ready ? "checkmark.shield" : "cpu").font(.caption).foregroundStyle(.secondary)
                     Spacer()
@@ -321,5 +335,120 @@ struct ModelSettingsView: View {
                 Button(installer.ready ? "完成" : "稍后设置") { dismiss(); model.refreshPunctuation(); if installer.ready { model.enqueuePending() } }.keyboardShortcut(.defaultAction)
             }
         }.padding(28).frame(width: 610)
+    }
+}
+
+/// 资料类型与真实面试信息由用户直接填写；助手修改走同一 PATCH 业务接口和版本校验。
+struct RecordingMetadataView: View {
+    @ObservedObject var model: AppModel
+    let recording: Recording
+    @UIState private var kind = "unknown"
+    @UIState private var dateText = ""
+    @UIState private var company = ""
+    @UIState private var role = ""
+    @UIState private var revision = 1
+    @UIState private var loading = true
+    @UIState private var saving = false
+    @Environment(\.dismiss) private var dismiss
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
+    private var parsedDate: Date? { Self.dateFormatter.date(from: dateText) }
+    private var dateValid: Bool {
+        if dateText.isEmpty { return true }
+        guard let parsed = parsedDate else { return false }
+        return Self.dateFormatter.string(from: parsed) == dateText
+    }
+    private var kindTitle: String { ["unknown": "未分类", "interview": "面试", "other": "其他"][kind] ?? kind }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "info.circle").font(.title).foregroundStyle(accent)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("资料信息").font(.title2.weight(.semibold))
+                    Text(recording.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer()
+                if loading { ProgressView().controlSize(.small) }
+            }
+            Divider()
+            HStack {
+                Text("类型").frame(width: 90, alignment: .leading)
+                Picker("类型", selection: $kind) {
+                    Text("未分类").tag("unknown"); Text("面试").tag("interview"); Text("其他").tag("other")
+                }.labelsHidden().frame(width: 150)
+                Text("周报只纳入已分类且已知实际日期的面试。").font(.caption2).foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("实际面试日期").frame(width: 90, alignment: .leading)
+                TextField("YYYY-MM-DD，留空表示未知", text: $dateText).textFieldStyle(.roundedBorder).frame(width: 190)
+                Button("今天") { dateText = Self.dateFormatter.string(from: Date()) }.font(.caption)
+                Button("清空") { dateText = "" }.font(.caption)
+            }
+            if !dateValid {
+                Text("日期需为有效的 YYYY-MM-DD；导入时间不会被当作实际面试日期。")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            HStack {
+                Text("公司").frame(width: 90, alignment: .leading)
+                TextField("可选", text: $company).textFieldStyle(.roundedBorder)
+            }
+            HStack {
+                Text("岗位").frame(width: 90, alignment: .leading)
+                TextField("可选", text: $role).textFieldStyle(.roundedBorder)
+            }
+            if !loading {
+                Text("当前类型：\(kindTitle) · 版本 \(revision)").font(.caption2).foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("资料正文不会被当成操作指令。").font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存") { Task { await save() } }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    .disabled(loading || saving || !dateValid)
+            }
+        }
+        .padding(26).frame(width: 560)
+        .task { await load() }
+    }
+
+    private func load() async {
+        do {
+            let value = try await model.recordingMetadata(recording.id)
+            kind = value.kind
+            dateText = value.interviewDate ?? ""
+            company = value.company ?? ""
+            role = value.role ?? ""
+            revision = value.revision
+            loading = false
+        } catch {
+            loading = false
+            model.alert = error.localizedDescription
+        }
+    }
+
+    private func save() async {
+        saving = true; defer { saving = false }
+        let companyText = company.trimmingCharacters(in: .whitespacesAndNewlines)
+        let roleText = role.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fields: [String: Any] = [
+            "kind": kind,
+            "interview_date": dateText.isEmpty ? NSNull() : dateText,
+            "company": companyText.isEmpty ? NSNull() : companyText,
+            "role": roleText.isEmpty ? NSNull() : roleText
+        ]
+        do {
+            try await model.updateRecordingMetadata(recording.id, fields: fields, revision: revision)
+            dismiss()
+        } catch {
+            model.alert = error.localizedDescription
+        }
     }
 }

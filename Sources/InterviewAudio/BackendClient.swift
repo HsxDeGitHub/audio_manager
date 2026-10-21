@@ -221,6 +221,50 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
         return try await page(["transcripts", runID, "drafts"], offset: offset, limit: limit)
     }
 
+    func send<Value: Decodable>(_ path: String, method: String = "GET", body: Data? = nil) async throws -> Value {
+        guard let parsed = URLComponents(string: path), parsed.scheme == nil, parsed.host == nil, parsed.fragment == nil, parsed.path.hasPrefix("/") else { throw BackendClientError.invalidRequest }
+        let parts = parsed.path.split(separator: "/").map(String.init)
+        for component in parts { try validateID(component) }
+        return try await get(parts, query: parsed.queryItems ?? [], method: method, body: body)
+    }
+
+    struct Event: Sendable { let id: Int; let kind: String; let data: Data }
+    func events(runID: String, after: Int) -> AsyncThrowingStream<Event, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    try validateID(runID)
+                    var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/agent/runs/\(runID)/events"), timeoutInterval: 120)
+                    request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+                    request.setValue(String(after), forHTTPHeaderField: "Last-Event-ID")
+                    let (bytes, response) = try await session.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse else { throw BackendClientError.invalidResponse }
+                    guard http.statusCode == 200 else { throw http.statusCode == 401 ? BackendClientError.unauthorized : BackendClientError.unavailable }
+                    var identifier = after, kind = "message", lines: [String] = []
+                    var buffer = Data()
+                    for try await byte in bytes {
+                        try Task.checkCancellation()
+                        buffer.append(byte)
+                        guard byte == 10 else { continue }
+                        let line = String(decoding: buffer.dropLast(), as: UTF8.self).trimmingCharacters(in: .newlines)
+                        buffer.removeAll(keepingCapacity: true)
+                        if line.isEmpty {
+                            if !lines.isEmpty { continuation.yield(Event(id: identifier, kind: kind, data: Data(lines.joined(separator: "\n").utf8))) }
+                            lines = []; kind = "message"
+                        } else if line.hasPrefix("id: ") { identifier = Int(line.dropFirst(4)) ?? identifier }
+                        else if line.hasPrefix("event: ") { kind = String(line.dropFirst(7)) }
+                        else if line.hasPrefix("data: ") { lines.append(String(line.dropFirst(6))) }
+                    }
+                    continuation.finish()
+                } catch {
+                    if Task.isCancelled { continuation.finish(throwing: CancellationError()) }
+                    else { continuation.finish(throwing: (error as? BackendClientError) ?? BackendClientError.unavailable) }
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     private func validateID(_ id: String) throws {
         guard !id.isEmpty, id != ".", id != "..", !id.contains("/"), !id.contains("\\"),
               id.rangeOfCharacter(from: .controlCharacters) == nil else { throw BackendClientError.invalidRequest }
@@ -238,7 +282,7 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
     }
 
     private func get<Value: Decodable>(_ path: [String], query: [URLQueryItem] = [],
-                                       authenticated: Bool = true) async throws -> Value {
+                                       authenticated: Bool = true, method: String = "GET", body: Data? = nil) async throws -> Value {
         try Task.checkCancellation()
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
         var parts = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
@@ -246,7 +290,9 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
         parts.queryItems = query.isEmpty ? nil : query
         guard let url = parts.url else { throw BackendClientError.invalidRequest }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: timeout)
-        request.httpMethod = "GET"
+        request.httpMethod = method
+        request.httpBody = body
+        if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if authenticated { request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization") }
         let data: Data

@@ -23,6 +23,19 @@ private final class BackendStubProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+private func bodyData(_ request: URLRequest) -> Data? {
+    if let body = request.httpBody { return body }
+    guard let stream = request.httpBodyStream else { return nil }
+    stream.open(); defer { stream.close() }
+    var data = Data(), buffer = [UInt8](repeating: 0, count: 4096)
+    while stream.hasBytesAvailable {
+        let read = stream.read(&buffer, maxLength: buffer.count)
+        if read <= 0 { break }
+        data.append(buffer, count: read)
+    }
+    return data
+}
+
 @Suite(.serialized) final class BackendContractTests {
     private let token = "synthetic-backend-token"
     deinit { BackendStubProtocol.respond = nil }
@@ -255,6 +268,15 @@ private final class BackendStubProtocol: URLProtocol, @unchecked Sendable {
         #expect(draft.payload["chunks"] == .array([.object(["blocks": .array([
             .object(["text": .string("合成整理稿"), "sourceIDs": .array([.string("s1")])])])])]))
         #expect(try await c.drafts(runID: "run2").items.isEmpty)
+        struct Source: Decodable { let recording_id: String; let segment_id: String; let start: Double }
+        let source: Source = try await c.send("/api/v1/sources/segment/s1?revision=1")
+        #expect(source.recording_id == "r1" && source.segment_id == "s1" && source.start == 1)
+        let session: AssistantAcknowledgment = try await c.send("/api/v1/sessions", method: "POST", body: JSONSerialization.data(withJSONObject: ["title": "合成对话", "scope": [:]]))
+        let run: AssistantAcknowledgment = try await c.send("/api/v1/agent/runs", method: "POST", body: JSONSerialization.data(withJSONObject: ["session_id": session.id, "instruction": "分析当前资料", "context": ["recording_id": "r1"]]))
+        var events: [BackendClient.Event] = []
+        for try await event in c.events(runID: run.id, after: 0) { events.append(event) }
+        #expect(events.contains { $0.kind == "failed" }) // 临时资料没有模型配置，真实状态必须报告失败。
+        #expect(events.map(\.id) == events.map(\.id).sorted())
         await #expect(throws: BackendClientError.notFound) { try await c.recording(id: "absent") }
         let unauthenticated = try BackendClient(baseURL: baseURL, token: "wrong-synthetic-token")
         await #expect(throws: BackendClientError.unauthorized) { try await unauthenticated.status() }
@@ -302,6 +324,43 @@ private final class BackendStubProtocol: URLProtocol, @unchecked Sendable {
         #expect(try restarted.historyLabel(runID: "parity-run", redo: true) == "修改文字")
         #expect(try restarted.restoreEdit(runID: "parity-run", redo: true))
         #expect(try restarted.segments(runID: "parity-run").first?.text == "后端修正")
+    }
+
+    @Test func metadataAndMemoryUseVersionedBusinessEndpoints() async throws {
+        let expectedToken = token
+        BackendStubProtocol.respond = { request in
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer " + expectedToken)
+            #expect(request.httpMethod == "PATCH")
+            let body = try #require(bodyData(request))
+            let value = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(value["expected_revision"] as? Int == 3)
+            if request.url?.path == "/api/v1/recordings/r1" {
+                let fields = try #require(value["fields"] as? [String: Any])
+                #expect(fields["kind"] as? String == "interview")
+                #expect(fields["interview_date"] as? String == "2026-10-19")
+                return (200, Data(#"{"id":"metadata-1","state":"committed","count":1,"items":[]}"#.utf8))
+            }
+            #expect(request.url?.path == "/api/v1/memories/m1")
+            let fields = try #require(value["fields"] as? [String: Any])
+            #expect(fields["state"] as? String == "disabled")
+            return (200, Data(#"{"id":"memory-1","state":"committed","count":1,"items":[]}"#.utf8))
+        }
+        let c = try client()
+        let fields: [String: Any] = ["kind": "interview", "interview_date": "2026-10-19", "company": NSNull()]
+        let metadataBody = try JSONSerialization.data(withJSONObject: ["operation_id": "metadata-1",
+                                                                       "expected_revision": 3, "fields": fields])
+        struct Receipt: Decodable { let id: String; let state: String; let count: Int }
+        let receipt: Receipt = try await c.send("/api/v1/recordings/r1", method: "PATCH", body: metadataBody)
+        #expect(receipt.id == "metadata-1" && receipt.state == "committed" && receipt.count == 1)
+        let memoryBody = try JSONSerialization.data(withJSONObject: ["operation_id": "memory-1",
+                                                                     "expected_revision": 3, "fields": ["state": "disabled"]])
+        let memory: Receipt = try await c.send("/api/v1/memories/m1", method: "PATCH", body: memoryBody)
+        #expect(memory.id == "memory-1")
+
+        let json = Data(#"{"id":"m1","category":"preference","content":"偏好先说明背景","scope":"global","sources":[{"resource_type":"message","resource_id":"msg1","revision":1}],"topic":"表达方式","state":"active","supersedes":null,"revision":2}"#.utf8)
+        let item = try JSONDecoder().decode(MemoryItem.self, from: json)
+        #expect(item.categoryTitle == "偏好" && item.stateTitle == "生效" && item.revision == 2)
+        #expect(item.sources.first?.resourceType == "message" && item.sources.first?.resourceID == "msg1")
     }
 }
 

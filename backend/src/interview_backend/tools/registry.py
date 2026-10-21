@@ -14,6 +14,8 @@ class ToolContext:
     request_id: str
     allowed_effects: frozenset[str] = field(default_factory=lambda: frozenset({'read'}))
     operation_id: str | None = None
+    resource_scope: frozenset[tuple[str, str]] | None = None
+    frozen_context: dict | None = None
 
 
 @dataclass(frozen=True)

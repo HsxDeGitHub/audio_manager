@@ -147,3 +147,32 @@ INTERVIEW_ACTUAL_TEST_DIR="$PWD/TestArtifacts" INTERVIEW_PUNCTUATION_MODEL_DIR="
 接口必须返回文本，并按提示生成带来源引用的 JSON。程序检查来源是否合法，完整对话/主题模式要求所有正文片段被引用，拒绝无效结构和已截断输出；这些检查不能保证模型没有遗漏细节或改写错误，仍需结合原文和录音核对。若上下文不足或输出被截断，可减少每块字数或调整输出 token 上限后生成新稿。未完成稿允许导出，文件标题会明确标注进度。
 
 当前使用原生 SwiftUI 应用，通过 `zsh Scripts/package.sh` 重新编译打包；退出并重开 `dist/听阅.app` 即可使用新版。资料库和配置位于应用包外，更新沿用现有数据。目前未接入在线自动更新。
+
+## 助手与本地后端开发（进行中）
+
+本项目已接入 Spec Kit 1.2.2 的项目模板、脚本和工作流。项目原则位于
+[.specify/memory/constitution.md](.specify/memory/constitution.md)，当前功能通过
+`.specify/feature.json` 定位。面向审阅的文档使用中文：
+
+- [功能规格](specs/001-app-agent/spec.md)
+- [技术方案](specs/001-app-agent/plan.md)
+- [RAG 与组件生命周期](specs/001-app-agent/contracts/rag-lifecycle.md)
+- [统一工具与 MCP](specs/001-app-agent/contracts/tools-mcp.md)
+- [任务进度](specs/001-app-agent/tasks.md)
+- [开发与验收指南](specs/001-app-agent/quickstart.md)
+
+目前完成 T001—T041：基础服务与迁移、现有业务接管、右侧助手问答、修改集、资料日期与周报、
+长期记忆、TXT/Markdown 材料与关键词检索。当前应用已通过自动管理的本机后端统一读写；
+助手界面、会话事件流、资料信息编辑和记忆管理已接入。MCP 传输、设备操作桥接、可观测性、
+独立运行时打包及完整人工验收仍未完成，接口 capabilities 会如实报告这些能力。
+
+```sh
+uv sync --project backend --group dev
+uv run --project backend --frozen --group dev pytest backend/tests -q
+python3 Scripts/check_feature_docs.py
+python3 Scripts/check_backend_smoke.py
+```
+
+基础依赖安装到 `backend/.venv`，不修改系统 Python，不使用 Docker，不注册常驻服务或开机启动。
+开发服务需手动启动并停止；冒烟脚本使用临时资料并自动停止子进程。正式应用退出及异常退出的
+完整进程回收属于后续任务，尚未验证。语义模型和 Agent/MCP 依赖按独立任务接入，不在基础启动时下载。
