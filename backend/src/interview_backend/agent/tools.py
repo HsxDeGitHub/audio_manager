@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from interview_backend.errors import DomainError
 from interview_backend.services.common import require, version, encode
+from interview_backend.services.draft_sources import draft_current
 from interview_backend.tools.registry import ToolSpec
 
 
@@ -55,6 +56,10 @@ class EvidenceService:
                 for draft in drafts:
                     if context.draft_id and context.draft_id != draft['id']:
                         continue
+                    if not draft_current(c, draft):
+                        excluded.append({'id': draft['id'], 'code': 'stale_draft',
+                                         'reason': '整理稿来源已变化或缺少来源快照，已退出当前证据；请重新整理。'})
+                        continue
                     ref = self.ref(c, 'draft', draft['id']); resources.append(ref)
                     if context.draft_id:
                         sources.append({**ref, 'recording_id': recording['id'], 'run_id': run_id,
@@ -84,6 +89,7 @@ class EvidenceService:
         with self.database.transaction() as c:
             try:
                 obj = read_object(c, reference['resource_type'], reference['resource_id'])
+                if reference['resource_type'] == 'draft' and not draft_current(c, obj): return False
                 return version(c, reference['resource_type'], reference['resource_id']) == reference['revision'] and not obj.get('removed') and (reference['resource_type'] != 'memory' or obj.get('state') == 'active')
             except (DomainError, KeyError, ValueError):
                 return False

@@ -3,6 +3,7 @@ import json
 from interview_backend.retrieval.lexical import tokens, query
 from interview_backend.retrieval.semantic import SemanticIndex
 from interview_backend.services.common import version, encode
+from interview_backend.services.draft_sources import draft_current
 
 
 class RetrievalIndex:
@@ -19,6 +20,7 @@ class RetrievalIndex:
         for row in c.execute('SELECT * FROM documents WHERE removed=0'):
             values.append(('document',row['id'],row['revision'],row['content']))
         for row in c.execute('SELECT * FROM ai_drafts'):
+            if not draft_current(c, row): continue
             payload = json.loads(row['payload'])
             text = '\n\n'.join(b.get('text','') for chunk in payload.get('chunks',[]) for b in chunk.get('blocks') or [])
             if text: values.append(('draft',row['id'],version(c,'draft',row['id']),text))

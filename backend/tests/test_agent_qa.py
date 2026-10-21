@@ -339,3 +339,15 @@ def test_mixed_question_sources_each_resolve_for_locating_and_playback(client, c
         resolved = client.get(f"/api/v1/sources/{ref['resource_type']}/{ref['resource_id']}?revision={ref['revision']}").json()
         assert resolved['recording_id'] == 'r1' and resolved['segment_id'] == ref['resource_id']
         assert resolved['start'] == question['start']
+
+
+def test_stale_draft_is_reported_and_never_sent_to_model(client, config):
+    class InspectModel(FakeModel):
+        async def ainvoke(self, messages):
+            prompt = json.loads(messages[-1].content)
+            assert all(s['resource_type'] != 'draft' for s in prompt['untrusted_evidence'])
+            return await super().ainvoke(messages)
+    context = client.app.state.evidence.freeze({'recording_id': 'r1', 'draft_id': 'draft1'}, '分析整理稿')
+    result = asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('stale-draft', context['instruction'], context, model=InspectModel()))
+    assert '整理稿来源已变化' in result['answer']
+    assert result['coverage']['excluded'][0]['code'] == 'stale_draft'

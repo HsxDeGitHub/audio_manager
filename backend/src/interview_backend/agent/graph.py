@@ -85,7 +85,8 @@ class AgentEngine:
             if selected: sources = selected
         
         if not sources and not context.get('allow_document_import'):
-            return {'answer': '当前范围没有可用正文，证据不足。', 'claims': [], 'coverage': {'total': 0, 'covered': 0, 'excluded': context.get('excluded', [])}}
+            reasons = '\n'.join(item['reason'] for item in context.get('excluded', []) if item.get('reason'))
+            return {'answer': '当前范围没有可用正文，证据不足。' + ('\n' + reasons if reasons else ''), 'claims': [], 'coverage': {'total': 0, 'covered': 0, 'excluded': context.get('excluded', [])}}
         chunks = []; current = []; length = 0
         for source in sources:
             text = source['text']
@@ -227,4 +228,6 @@ class AgentEngine:
             if len(changes) == 1: result['changeset'] = changes[0]
             result['historical_sources'] = [{**{k: s[k] for k in ('resource_type', 'resource_id', 'revision')}, 'historical': True}
                                             for s in sources if not self.evidence.valid(s)]
+        warnings = list(dict.fromkeys(item['reason'] for item in context.get('excluded', []) if item.get('code') == 'stale_draft'))
+        if warnings: result['answer'] += '\n\n资料状态：' + '；'.join(warnings)
         return result
