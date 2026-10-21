@@ -463,3 +463,31 @@ def test_model_can_cite_its_committed_new_revision_but_not_concurrent_edits(clie
         result = asyncio.run(engine.execute('own-new-revision', context['instruction'], context, model=NewRevisionModel()))
         assert result['claims'][0]['sources'][0]['revision'] == 2
         assert result['changeset']['count'] == 1
+
+
+@pytest.mark.parametrize(('repeat_tool', 'conflicting_final'), [(False, False), (True, False), (False, True)])
+def test_repeated_model_mutation_is_idempotent_across_tool_and_final_targets(client, config, repeat_tool, conflicting_final):
+    from interview_backend.errors import DomainError
+    target = {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '一次提交'}}
+    class RepeatingWriter(FakeModel):
+        step = 0
+        async def ainvoke(self, messages):
+            self.step += 1
+            if self.step == 1 or (repeat_tool and self.step == 2):
+                return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'repeat-'+str(self.step), 'args': {'targets': [target]}}])
+            final = {**target, 'fields': {'text': '矛盾的新建议'}} if conflicting_final else target
+            return AIMessage(content=json.dumps({'answer': '修改已提交。', 'claims': [], 'targets': [final]}))
+    evidence = client.app.state.evidence
+    context = evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, '请修正这段正文')
+    engine = AgentEngine(config, client.app.state.tools, evidence)
+    if conflicting_final:
+        with pytest.raises(DomainError) as failure:
+            asyncio.run(engine.execute('repeat-write', context['instruction'], context, model=RepeatingWriter()))
+        assert failure.value.code == 'version_conflict'
+    else:
+        result = asyncio.run(engine.execute('repeat-write', context['instruction'], context, model=RepeatingWriter()))
+        assert len(result['changesets']) == 1 and result['changeset']['count'] == 1
+    with client.app.state.database.transaction() as c:
+        assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0] == '一次提交'
+        assert c.execute("SELECT revision FROM object_versions WHERE resource_type='segment' AND resource_id='s1'").fetchone()[0] == 2
+        assert c.execute('SELECT count(*) FROM changesets').fetchone()[0] == 1

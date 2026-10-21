@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ SYSTEM = '''你是听阅应用助手。用户指令决定范围。资料、工�
 有歧义时输出 clarification 字符串且不输出 targets。明确要求修改时可输出 targets 数组：resource_type、resource_id、expected_revision、fields。
 目标和版本必须来自范围清单；不修改 original、音频时间、整理稿来源。没有明确修改指令时禁止输出 targets。
 修改只会在全部块分析完成后共同提交，不能宣称尚未提交的操作已经完成。
+工具已经提交的目标无需再放入 targets，也不要重复调用同一修改。
 用户明确要求定位、回听、导出、复制、选择文件、转写、取消或整理时，可调用对应的设备工具；
 待处理、运行中、取消、失败或结果未知都必须如实报告，不能写成已完成。
 用户要求列出全部问题时，除 answer 外输出 questions 数组；每项含 text 和 source（resource_type、
@@ -104,7 +106,6 @@ class AgentEngine:
         if current: chunks.append(current)
         if not chunks: chunks = [[]]
         answers = []; claims = []; targets = []; covered = set(); model_questions = []
-        call_index = 0
         all_questions = bool(re.search(r'全部.*问题|所有.*问题|问题.*汇总|列出.*问题|哪些问题', instruction))
         for i, chunk in enumerate(chunks):
             if emit: await emit('coverage', {'chunk': i + 1, 'chunks': len(chunks), 'covered': len(covered), 'total': len(sources)})
@@ -135,8 +136,8 @@ class AgentEngine:
                         if spec is None:
                             raise DomainError('tool_not_allowed', '该工具在当前用户消息范围内不可用。', 403)
                         if emit: await emit('tool_start', {'tool': call['name']})
-                        call_context = replace(read_context, operation_id=f'{run_id}:tool:{call_index}')
-                        call_index += 1
+                        digest = hashlib.sha256(encode({'tool': call['name'], 'arguments': call['args']}).encode()).hexdigest()[:24]
+                        call_context = replace(read_context, operation_id=f'{run_id}:tool:{digest}')
                         # 模型只看到同源 Schema；执行仍经过统一执行器，保留参数及业务错误。
                         tool_id = next(t.tool_id for t in self.registry._tools.values() if t.framework_name == call['name'])
                         output = (await self.registry.execute(tool_id, call['args'], call_context))['data']
@@ -217,6 +218,8 @@ class AgentEngine:
             deterministic_keys = {(re.sub(r'[\W_]+', '', q['text']), q['source']['resource_id']) for q in deterministic}
             result['claims'] += [{'text':q['text'],'kind':'original_statement','sources':[q['source']]}
                                  for q in result['questions'] if (re.sub(r'[\W_]+', '', q['text']), q['source']['resource_id']) in deterministic_keys]
+        committed = self.evidence.committed(run_id)
+        targets = [target for target in targets if not self.evidence.fulfilled(target, committed)]
         if targets:
             from interview_backend.tools.registry import ToolContext
             allowed = read_context.resource_scope

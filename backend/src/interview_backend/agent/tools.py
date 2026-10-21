@@ -126,6 +126,21 @@ class EvidenceService:
         with self.database.transaction() as c:
             return version(c, *key) == latest['after_revision'] and read_object(c, *key) == latest['after']
 
+    def fulfilled(self, target, changes):
+        """模型重复申报已提交目标时复用事实；不同建议或并发修改仍走版本冲突。"""
+        from interview_backend.services.changesets import ChangeTarget, patch
+        from pydantic import ValidationError
+        try:
+            target = ChangeTarget.model_validate(target)
+            items = [item for change in changes if change['state'] == 'committed' for item in change['items']
+                     if (item['resource_type'], item['resource_id']) == (target.resource_type, target.resource_id)]
+            if not items or target.expected_revision not in {v for item in items for v in (item['before_revision'], item['after_revision'])}: return False
+            latest = max(items, key=lambda item: item['after_revision'])
+            ref = {'resource_type': target.resource_type, 'resource_id': target.resource_id, 'revision': latest['before_revision']}
+            return self.valid_after_changes(ref, changes) and patch(target.resource_type, latest['after'], target.fields) == latest['after']
+        except (ValidationError, DomainError):
+            return False
+
     def validate_result(self, result, context, changes=()):
         allowed = {(r['resource_type'], r['resource_id'], r['revision']) for r in context['resources']}
         frozen_keys = {(kind, identifier) for kind, identifier, _ in allowed}
