@@ -13,6 +13,8 @@ struct AssistantChange: Decodable { let id: String; let state: String; let count
 struct AssistantResult: Decodable {
     struct Failure: Decodable { let code: String; let message: String }
     let answer: String?; let claims: [AssistantClaim]?; let coverage: AssistantCoverage?; let changeset: AssistantChange?; let error: Failure?
+    let changesets: [AssistantChange]?
+    var allChanges: [AssistantChange] { changesets ?? changeset.map { [$0] } ?? [] }
 }
 struct AssistantRun: Decodable, Identifiable { let id: String; let state: String; let result: AssistantResult? }
 struct AssistantHistory: Decodable { let items: [AssistantMessage]; let runs: [AssistantRun] }

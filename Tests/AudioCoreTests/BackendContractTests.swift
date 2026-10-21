@@ -55,6 +55,16 @@ private func bodyData(_ request: URLRequest) -> Data? {
         Data("{\"items\":[\(items)],\"total\":\(total),\"offset\":\(offset),\"limit\":\(limit)}".utf8)
     }
 
+    @Test func assistantKeepsAllCommittedChangesOnFailure() throws {
+        let data = Data(#"{"error":{"code":"model_failed","message":"模型失败"},"changesets":[{"id":"run:tool:0","state":"committed","count":1,"items":[{"before":{"edited":null},"after":{"edited":"修正"}}]},{"id":"run:tool:1","state":"reverted","count":1}]}"#.utf8)
+        let result = try JSONDecoder().decode(AssistantResult.self, from: data)
+        #expect(result.error?.code == "model_failed")
+        #expect(result.allChanges.count == 2)
+        #expect(result.allChanges.first?.items?.count == 1)
+        let old = try JSONDecoder().decode(AssistantResult.self, from: Data(#"{"changeset":{"id":"old","state":"committed","count":1}}"#.utf8))
+        #expect(old.allChanges.first?.id == "old")
+    }
+
     @Test func configurationRejectsNonLocalAddressesAndUnsafeTokens() throws {
         for url in ["https://example.test", "http://localhost:8765", "http://127.0.0.1.evil.test:8765",
                     "http://127.0.0.2:8765", "https://127.0.0.1:8765", "http://127.0.0.1",

@@ -103,18 +103,24 @@ class AgentAPI:
             code = error.code if isinstance(error, DomainError) else 'agent_failed'
             message = error.message if isinstance(error, DomainError) else '运行失败，可检查配置后继续。'
             with self.database.transaction(True) as c:
-                c.execute("UPDATE agent_runs SET state='failed',result=? WHERE id=?", (encode({'error': {'code': code, 'message': message}}), identifier))
-                self.append_event(c, identifier, 'failed', {'error': {'code': code, 'message': message}})
+                result = self.with_changes({'error': {'code': code, 'message': message}}, identifier)
+                c.execute("UPDATE agent_runs SET state='failed',result=? WHERE id=?", (encode(result), identifier))
+                self.append_event(c, identifier, 'failed', result)
         finally:
             self.tasks.pop(identifier, None)
 
-    @staticmethod
-    def current_result(c, row):
-        result = json.loads(row['result']) if row['result'] else None
-        if result and result.get('changeset'):
-            current = c.execute('SELECT state FROM changesets WHERE id=?',(result['changeset']['id'],)).fetchone()
-            if current: result['changeset']['state'] = current[0]
+    def with_changes(self, result, identifier):
+        changes = self.evidence.committed(identifier)
+        if not changes: return result
+        result = dict(result or {})
+        result['changesets'] = changes
+        if len(changes) == 1: result['changeset'] = changes[0]
+        result.setdefault('answer', '已提交的修改已保留，可查看差异或撤销。')
         return result
+
+    def current_result(self, c, row):
+        result = json.loads(row['result']) if row['result'] else None
+        return self.with_changes(result, row['id'])
 
     def get(self, identifier):
         with self.database.transaction() as c:
@@ -134,14 +140,18 @@ class AgentAPI:
         if run['state'] not in {'interrupted', 'failed', 'cancelled'}:
             raise DomainError('not_resumable', '当前运行状态不可继续。', 409)
         with self.database.transaction(True) as c:
-            operation = c.execute('SELECT result FROM operations WHERE id=?', (identifier + ':changes',)).fetchone()
-            if operation:
-                result = {'answer': '已恢复此前提交的修改，未重复执行。', 'changeset': json.loads(operation[0]), 'claims': []}
+            if c.execute("SELECT 1 FROM agent_runs WHERE session_id=? AND id<>? AND state IN ('queued','running')", (run['session_id'], identifier)).fetchone():
+                raise DomainError('session_busy', '此会话仍有运行任务，请先取消或等待。', 409)
+            changes = self.evidence.committed(identifier)
+            if changes:
+                result = self.with_changes({'answer': '已恢复此前提交的修改，未重复执行；其余未完成内容请发送新指令。', 'claims': []}, identifier)
                 c.execute("UPDATE agent_runs SET state='completed',result=? WHERE id=?", (encode(result), identifier))
-                return self.get(identifier)
-            if any(not self.evidence.valid(source) for source in run['context'].get('sources', [])):
-                raise DomainError('stale_context', '源版本已变化，请发送基于当前资料的新指令。', 409)
-            c.execute("UPDATE agent_runs SET state='queued' WHERE id=?", (identifier,))
+                self.append_event(c, identifier, 'completed', {'state': 'completed', 'result': result})
+            else:
+                if any(not self.evidence.valid(source) for source in run['context'].get('sources', [])):
+                    raise DomainError('stale_context', '源版本已变化，请发送基于当前资料的新指令。', 409)
+                c.execute("UPDATE agent_runs SET state='queued' WHERE id=?", (identifier,))
+        if changes: return self.get(identifier)
         self.tasks[identifier] = asyncio.create_task(self._execute(identifier))
         return {'id': identifier, 'state': 'queued'}
 

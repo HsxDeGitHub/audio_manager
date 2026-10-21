@@ -86,7 +86,27 @@ class EvidenceService:
             except (DomainError, KeyError, ValueError):
                 return False
 
-    def validate_result(self, result, context):
+    def committed(self, run_id):
+        """业务账本是提交事实；不依赖模型响应或另一个数据库的检查点。"""
+        prefix = run_id + ':tool:'
+        with self.database.transaction() as c:
+            return [{'id': r['id'], 'state': r['state'], 'items': json.loads(r['items']),
+                     'count': len(json.loads(r['items']))} for r in c.execute(
+                'SELECT * FROM changesets WHERE id IN (?,?) OR substr(id,1,?)=? ORDER BY created_at,id',
+                (run_id + ':changes', run_id + ':tools', len(prefix), prefix))]
+
+    def valid_after_changes(self, reference, changes):
+        if self.valid(reference): return True
+        from interview_backend.services.changesets import read_object
+        key = (reference['resource_type'], reference['resource_id'])
+        items = [item for change in changes if change['state'] == 'committed' for item in change['items']
+                 if (item['resource_type'], item['resource_id']) == key]
+        if not any(item['before_revision'] == reference['revision'] for item in items): return False
+        latest = max(items, key=lambda item: item['after_revision'])
+        with self.database.transaction() as c:
+            return version(c, *key) == latest['after_revision'] and read_object(c, *key) == latest['after']
+
+    def validate_result(self, result, context, changes=()):
         allowed = {(r['resource_type'], r['resource_id'], r['revision']) for r in context['resources']}
         for claim in result.get('claims', []):
             if claim.get('kind') not in {'original_statement', 'user_statement', 'analysis', 'suggestion', 'insufficient_evidence'}:
@@ -96,8 +116,9 @@ class EvidenceService:
             for ref in claim.get('sources', []):
                 if claim['kind'] == 'user_statement' and any(s['resource_type'] == ref['resource_type'] and s['resource_id'] == ref['resource_id'] and s.get('kind') == 'original_statement' and not s.get('speaker_confirmed') for s in context.get('sources', [])):
                     raise DomainError('identity_unconfirmed', '未确认的说话人不能作为用户经历来源。', 409)
-                if (ref['resource_type'], ref['resource_id'], ref['revision']) not in allowed or not self.valid(ref):
+                if (ref['resource_type'], ref['resource_id'], ref['revision']) not in allowed or not self.valid_after_changes(ref, changes):
                     raise DomainError('stale_source', '引用来源已变化或超出范围，请重新运行。', 409)
+                if not self.valid(ref): ref['historical'] = True
         return result
 
 

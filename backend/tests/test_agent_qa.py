@@ -245,3 +245,80 @@ def test_model_tool_cannot_write_outside_frozen_selection(client, config):
     with client.app.state.database.transaction() as c:
         assert c.execute("SELECT edited FROM segments WHERE id='s3'").fetchone()[0] == ''
         assert c.execute("SELECT count(*) FROM changesets WHERE id='escape:tools'").fetchone()[0] == 0
+
+
+class ToolWriter(FakeModel):
+    def __init__(self, fail=False): self.step = 0; self.fail = fail
+    async def ainvoke(self, messages):
+        self.step += 1
+        if self.step <= 2:
+            identifier = ['s1', 's2'][self.step - 1]
+            return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': f'write-{self.step}', 'args': {'targets': [
+                {'resource_type': 'segment', 'resource_id': identifier, 'expected_revision': 1, 'fields': {'text': '工具修正' + identifier}}]}}])
+        if self.fail: raise RuntimeError('synthetic provider failure')
+        return await super().ainvoke(messages)
+
+
+def wait_for_run(client, identifier):
+    import time
+    for _ in range(200):
+        run = client.get('/api/v1/agent/runs/' + identifier).json()
+        if run['state'] not in {'queued', 'running'}: return run
+        time.sleep(0.005)
+    pytest.fail('合成运行未结束')
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_tool_changes_survive_generation_failure_and_resume_without_replay(client, monkeypatch, fail):
+    from interview_backend.agent.models import ModelSettings
+    model = ToolWriter(fail)
+    # 替换工厂，绝不读取模型配置或使用网络。
+    class Settings:
+        def client(self): return model
+    monkeypatch.setattr(ModelSettings, 'load', classmethod(lambda cls, path: Settings()))
+    session = client.post('/api/v1/sessions', json={}).json()['id']
+    identifier = client.post('/api/v1/agent/runs', json={'session_id': session, 'instruction': '请修正当前资料',
+                                                       'context': {'recording_id': 'r1'}}).json()['id']
+    run = wait_for_run(client, identifier)
+    assert run['state'] == ('failed' if fail else 'completed')
+    assert len(run['result']['changesets']) == 2
+    assert all(change['items'] and change['count'] == 1 for change in run['result']['changesets'])
+    if fail:
+        assert run['result']['error']['code'] == 'model_failed'
+        before = model.step
+        resumed = client.post('/api/v1/agent/runs/' + identifier + '/resume').json()
+        assert resumed['state'] == 'completed'
+        assert len(resumed['result']['changesets']) == 2 and model.step == before
+    for change in reversed(run['result']['changesets']):
+        assert client.post('/api/v1/changesets/' + change['id'] + '/revert', json={'operation_id': 'undo-' + change['id']}).status_code == 200
+    history = client.get('/api/v1/sessions/' + session).json()
+    assert all(change['state'] == 'reverted' for change in history['runs'][0]['result']['changesets'])
+    with client.app.state.database.transaction() as c:
+        assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0] is None
+        assert c.execute("SELECT edited FROM segments WHERE id='s2'").fetchone()[0] == '校对后的回答'
+
+
+def test_committed_tool_change_survives_lost_response_and_restart_state(client, monkeypatch):
+    from interview_backend.agent.models import ModelSettings
+    from interview_backend.errors import DomainError
+    from dataclasses import replace
+    registry = client.app.state.tools
+    original = registry._tools['changesets.apply']
+    def lose_response(args, context):
+        original.handler(args, context)
+        raise DomainError('synthetic_lost_response', '合成响应丢失', 503)
+    registry._tools['changesets.apply'] = replace(original, handler=lose_response)
+    class Settings:
+        def client(self): return ToolWriter()
+    monkeypatch.setattr(ModelSettings, 'load', classmethod(lambda cls, path: Settings()))
+    session = client.post('/api/v1/sessions', json={}).json()['id']
+    identifier = client.post('/api/v1/agent/runs', json={'session_id': session, 'instruction': '请修正当前资料', 'context': {'recording_id': 'r1'}}).json()['id']
+    run = wait_for_run(client, identifier)
+    assert len(run['result']['changesets']) == 1
+    # 模拟主进程在检查点保存前消失，只有业务提交账本仍在。
+    with client.app.state.database.transaction(True) as c:
+        c.execute("UPDATE agent_runs SET state='interrupted',result=NULL WHERE id=?", (identifier,))
+    assert len(client.get('/api/v1/agent/runs/' + identifier).json()['result']['changesets']) == 1
+    resumed = client.post('/api/v1/agent/runs/' + identifier + '/resume').json()
+    assert resumed['state'] == 'completed' and resumed['result']['changesets'][0]['count'] == 1
+    assert 'event: completed' in client.get('/api/v1/agent/runs/' + identifier + '/events').text

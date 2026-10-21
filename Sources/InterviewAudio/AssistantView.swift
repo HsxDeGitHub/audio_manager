@@ -50,7 +50,7 @@ struct AssistantView: View {
                                     }
                                 }
                             }
-                            if let change = result.changeset {
+                            ForEach(result.allChanges, id: \.id) { change in
                                 Text("修改 \(change.count) 项 · \(change.state == "reverted" ? "已撤销" : "已提交")").font(.caption)
                                 if let items = change.items { DisclosureGroup("前后差异") { ForEach(Array(items.enumerated()), id: \.offset) { _, item in Text(difference(item)).font(.caption).textSelection(.enabled) } } }
                                 Button("撤销整次修改") { Task { await assistant.revert(change.id, model: model) } }.disabled(assistant.activeRun != nil || change.state == "reverted")

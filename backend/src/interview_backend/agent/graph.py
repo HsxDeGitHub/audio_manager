@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import json
 from pathlib import Path
 import re
@@ -94,6 +95,7 @@ class AgentEngine:
                 current.append(part); length += len(part['text'])
         if current: chunks.append(current)
         answers = []; claims = []; targets = []; covered = set(); model_questions = []
+        call_index = 0
         all_questions = bool(re.search(r'全部.*问题|所有.*问题|问题.*汇总|列出.*问题|哪些问题', instruction))
         for i, chunk in enumerate(chunks):
             if emit: await emit('coverage', {'chunk': i + 1, 'chunks': len(chunks), 'covered': len(covered), 'total': len(sources)})
@@ -120,7 +122,14 @@ class AgentEngine:
                         spec = next((t for t in tools if t.name == call['name']), None)
                         if spec is None: raise ValueError()
                         if emit: await emit('tool_start', {'tool': call['name']})
-                        output = await spec.ainvoke(call['args'])
+                        call_context = replace(read_context, operation_id=f'{run_id}:tool:{call_index}')
+                        call_index += 1
+                        # 工具实例捕获各自的宿主上下文，模型不能提供操作 ID。
+                        call_tool = next(t for t in framework_tools(self.registry, call_context) if t.name == call['name'])
+                        output = await call_tool.ainvoke(call['args'])
+                        if emit:
+                            for change in self.evidence.committed(run_id):
+                                if change['id'] == call_context.operation_id: await emit('changeset', change)
                         messages.append(ToolMessage(content=encode(output), tool_call_id=call['id']))
                         if emit: await emit('tool_end', {'tool': call['name']})
                     response = await bound.ainvoke(messages)
@@ -135,7 +144,7 @@ class AgentEngine:
                 raise DomainError('model_failed', '模型调用失败或结果结构不合法；已完成业务操作可从运行记录恢复。', 503) from None
             if result.get('clarification'):
                 return {'answer': result['clarification'], 'clarification': result['clarification'], 'claims': [], 'coverage': {'total': len(sources), 'covered': len(covered), 'excluded': context.get('excluded', [])}}
-            self.evidence.validate_result(result, context)
+            self.evidence.validate_result(result, context, self.evidence.committed(run_id))
             if result.get('targets') and not context.get('allow_write'):
                 raise DomainError('write_not_authorized', '当前用户消息未授权内容修改，未执行模型提出的写入。', 403)
             targets += result.get('targets', [])
@@ -157,7 +166,7 @@ class AgentEngine:
             answers.append(result['answer']); claims += result['claims']
             covered.update((s['resource_type'], s['resource_id']) for s in chunk)
         for source in sources:
-            if not self.evidence.valid(source):
+            if not self.evidence.valid_after_changes(source, self.evidence.committed(run_id)):
                 raise DomainError('stale_source', '运行中资料发生变化，请基于当前版本重新执行。', 409)
         result = {'answer': '\n\n'.join(answers), 'claims': claims, 'coverage': {'total': len(sources), 'covered': len(covered), 'excluded': context.get('excluded', [])}}
         if all_questions:
@@ -207,4 +216,10 @@ class AgentEngine:
             value = await self.registry.execute('changesets.apply', {'targets': list(merged.values())}, call_context)
             result['changeset'] = value['data']['result']
             if emit: await emit('changeset', result['changeset'])
+        changes = self.evidence.committed(run_id)
+        if changes:
+            result['changesets'] = changes
+            if len(changes) == 1: result['changeset'] = changes[0]
+            result['historical_sources'] = [{**{k: s[k] for k in ('resource_type', 'resource_id', 'revision')}, 'historical': True}
+                                            for s in sources if not self.evidence.valid(s)]
         return result
