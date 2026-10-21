@@ -61,7 +61,9 @@ class AgentEngine:
         if context.get('allow_device'): effects.add('device')
         if context.get('allow_external'): effects.add('external')
         read_context = ToolContext(request_id=run_id, allowed_effects=frozenset(effects),
-                                   operation_id=run_id + ':tools', frozen_context=context)
+                                   operation_id=run_id + ':tools', frozen_context=context,
+                                   resource_scope=frozenset((r['resource_type'], r['resource_id'])
+                                                            for r in context.get('write_resources', context['resources'])))
         tools = framework_tools(self.registry, read_context)
         bound = model.bind_tools(tools) if tools else model
         sources = context.get('sources', [])
@@ -190,7 +192,7 @@ class AgentEngine:
                                  for q in result['questions'] if (re.sub(r'[\W_]+', '', q['text']), q['source']['resource_id']) in deterministic_keys]
         if targets:
             from interview_backend.tools.registry import ToolContext
-            allowed = frozenset((r['resource_type'],r['resource_id']) for r in context['resources'])
+            allowed = read_context.resource_scope
             # 不同块同一对象的字段合并；互相矛盾的修改拒绝整次请求。
             merged = {}
             for target in targets:

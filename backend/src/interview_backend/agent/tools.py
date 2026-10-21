@@ -69,7 +69,7 @@ class EvidenceService:
             mutation = bool(re.search(r'(帮我|请|把|将|直接).{0,40}(修改|修正|替换|改成|改为|删除|忘记|停用|重命名|撤销|合并|设置|更正)|^(修改|修正|删除|撤销|忘记|停用|设置|记住)', instruction))
             device = bool(re.search(r'定位|回听|播放|导出|保存为|复制|剪贴板|选择文件|打开文件|转写|重新识别|取消任务|整理|周报分析', instruction))
             external = bool(re.search(r'外部工具|MCP', instruction, re.IGNORECASE))
-            return {**context.model_dump(), 'resources': resources, 'sources': sources, 'excluded': excluded, 'allow_write': mutation,
+            return {**context.model_dump(), 'resources': resources, 'write_resources': list(resources), 'sources': sources, 'excluded': excluded, 'allow_write': mutation,
                     'allow_device': device, 'allow_external': external,
                     'instruction': instruction, 'recording_ids': [r['id'] for r in recordings]}
 
@@ -129,10 +129,18 @@ def install_agent_tools(registry, changesets):
     class ApplyArguments(BaseModel):
         model_config = ConfigDict(extra='forbid')
         targets: list[ChangeTarget]
+    def apply(args, context):
+        allowed = context.resource_scope
+        if context.frozen_context is not None:
+            frozen = frozenset((r['resource_type'], r['resource_id']) for r in
+                               context.frozen_context.get('write_resources', context.frozen_context.get('resources', [])))
+            allowed = frozen if allowed is None else frozen & allowed
+        return {'result': changesets.submit({'operation_id': context.operation_id,
+                    'targets': [t.model_dump() for t in args.targets]}, allowed)}
     registry.register(ToolSpec(tool_id='changesets.apply', version='1.0', title='提交范围内修改',
         description='一次事务提交用户明确授权的全部目标，校验预期版本并记录差异和撤销。',
         input_model=ApplyArguments, output_model=ResultEnvelope, effect='write',
-        handler=lambda args, context: {'result': changesets.submit({'operation_id': context.operation_id, 'targets': [t.model_dump() for t in args.targets]}, context.resource_scope)}))
+        handler=apply))
     def read(args, context):
         if context.frozen_context is None:
             raise DomainError('scope_required', '需要先确定资料范围。', 409)

@@ -230,3 +230,18 @@ def test_memory_is_a_valid_scoped_source_across_sessions(client, config):
     result = asyncio.run(engine.execute('memory-agent-run', '我的回答偏好是什么', context, model=MemoryModel()))
     assert result['answer'].startswith('你的偏好')
     assert result['claims'][0]['sources'][0]['resource_type'] == 'memory'
+
+
+def test_model_tool_cannot_write_outside_frozen_selection(client, config):
+    from interview_backend.errors import DomainError
+    class EscapingModel(FakeModel):
+        async def ainvoke(self, messages):
+            return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'escape', 'args': {'targets': [
+                {'resource_type': 'segment', 'resource_id': 's3', 'expected_revision': 1, 'fields': {'text': '越界修改'}}]}}])
+    evidence = client.app.state.evidence
+    context = evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, '请修正这段回答')
+    with pytest.raises(DomainError):
+        asyncio.run(AgentEngine(config, client.app.state.tools, evidence).execute('escape', context['instruction'], context, model=EscapingModel()))
+    with client.app.state.database.transaction() as c:
+        assert c.execute("SELECT edited FROM segments WHERE id='s3'").fetchone()[0] == ''
+        assert c.execute("SELECT count(*) FROM changesets WHERE id='escape:tools'").fetchone()[0] == 0
