@@ -132,13 +132,14 @@ class AgentEngine:
                     messages.append(response)
                     for call in response.tool_calls:
                         spec = next((t for t in tools if t.name == call['name']), None)
-                        if spec is None: raise ValueError()
+                        if spec is None:
+                            raise DomainError('tool_not_allowed', '该工具在当前用户消息范围内不可用。', 403)
                         if emit: await emit('tool_start', {'tool': call['name']})
                         call_context = replace(read_context, operation_id=f'{run_id}:tool:{call_index}')
                         call_index += 1
-                        # 工具实例捕获各自的宿主上下文，模型不能提供操作 ID。
-                        call_tool = next(t for t in framework_tools(self.registry, call_context) if t.name == call['name'])
-                        output = await call_tool.ainvoke(call['args'])
+                        # 模型只看到同源 Schema；执行仍经过统一执行器，保留参数及业务错误。
+                        tool_id = next(t.tool_id for t in self.registry._tools.values() if t.framework_name == call['name'])
+                        output = (await self.registry.execute(tool_id, call['args'], call_context))['data']
                         if call['name'] == 'documents__import':
                             doc = output['result']
                             context['resources'].append({'resource_type': 'document', 'resource_id': doc['id'], 'revision': doc['revision']})
@@ -154,6 +155,8 @@ class AgentEngine:
                 result = json.loads(content)
                 if not isinstance(result.get('answer'), str) or not isinstance(result.get('claims'), list): raise ValueError()
             except asyncio.CancelledError:
+                raise
+            except DomainError:
                 raise
             except Exception:
                 raise DomainError('model_failed', '模型调用失败或结果结构不合法；已完成业务操作可从运行记录恢复。', 503) from None

@@ -361,3 +361,27 @@ def test_answer_reports_semantic_not_ready_without_download(client, config):
     assert result['retrieval']['keyword_fallback'] and result['retrieval']['state'] == 'unprepared'
     assert '语义索引未就绪' in result['answer'] and '全量任务仍按范围完整读取' in result['answer']
     assert not (config.backend_dir / 'Models').exists()
+
+
+@pytest.mark.parametrize(('target', 'code'), [
+    ({'resource_type': 'segment', 'resource_id': 's3', 'expected_revision': 1, 'fields': {'text': '越界'}}, 'scope_denied'),
+    ({'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 99, 'fields': {'text': '旧版本'}}, 'version_conflict'),
+    ({'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 'invalid', 'fields': {'text': '参数错误'}}, 'invalid_tool_arguments'),
+    ({'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'original': '禁止覆盖原稿'}}, 'invalid_fields'),
+])
+def test_model_tool_domain_errors_keep_stable_code_in_run_result(client, monkeypatch, target, code):
+    from interview_backend.agent.models import ModelSettings
+    class InvalidToolModel(FakeModel):
+        async def ainvoke(self, messages):
+            return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'invalid-tool', 'args': {'targets': [target]}}])
+    class Settings:
+        def client(self): return InvalidToolModel()
+    monkeypatch.setattr(ModelSettings, 'load', classmethod(lambda cls, path: Settings()))
+    session = client.post('/api/v1/sessions', json={}).json()['id']
+    identifier = client.post('/api/v1/agent/runs', json={'session_id': session, 'instruction': '请修正这段回答',
+        'context': {'recording_id': 'r1', 'segment_ids': ['s1']}}).json()['id']
+    run = wait_for_run(client, identifier)
+    assert run['state'] == 'failed' and run['result']['error']['code'] == code
+    assert any('\u4e00' <= char <= '\u9fff' for char in run['result']['error']['message'])
+    with client.app.state.database.transaction() as c:
+        assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0] is None
