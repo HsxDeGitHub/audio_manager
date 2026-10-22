@@ -37,7 +37,25 @@ struct AssistantView: View {
                     }
                     ForEach(assistant.runs) { run in
                         if let result = run.result {
-                            if let coverage = result.coverage { Text("来源覆盖 \(coverage.covered)/\(coverage.total) · 无法纳入 \(coverage.excluded?.count ?? 0) 项").font(.caption).foregroundStyle(.secondary) }
+                            if let coverage = result.coverage {
+                                Text("\(coverage.progressTitle) · 无法纳入 \(coverage.excluded?.count ?? 0) 项").font(.caption).foregroundStyle(.secondary)
+                                if let covered = coverage.sourceCovered, let total = coverage.sourceTotal { Text("完整来源 \(covered)/\(total)").font(.caption2).foregroundStyle(.secondary) }
+                                if let parts = coverage.parts, !parts.isEmpty {
+                                    DisclosureGroup("已完成与剩余范围") {
+                                        ForEach(parts) { part in
+                                            HStack {
+                                                Button(part.label) { Task { await model.openAssistantSource(part.reference, play: false) } }.buttonStyle(.link)
+                                                Spacer(); Text(part.stateTitle)
+                                            }.font(.caption)
+                                        }
+                                    }
+                                }
+                            }
+                            if let partial = result.partialResults, !partial.isEmpty {
+                                DisclosureGroup("已保留的分块分析（\(partial.count)）") {
+                                    ForEach(Array(partial.enumerated()), id: \.offset) { _, item in Text(item.answer).font(.caption).textSelection(.enabled) }
+                                }
+                            }
                             if let questions = result.questions, !questions.isEmpty {
                                 DisclosureGroup("问题清单（\(questions.count) 条）") {
                                     ForEach(Array(questions.enumerated()), id: \.element.id) { index, question in

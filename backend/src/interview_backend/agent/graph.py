@@ -112,20 +112,27 @@ class AgentEngine:
         for source in sources:
             text = source['text']
             for start in range(0, max(1, len(text)), 6000):
-                part = {**source, 'text': text[start:start+6000]}
+                part = {**source, 'text': text[start:start+6000], 'char_start':source.get('char_start',0)+start,
+                        'char_end':source.get('char_start',0)+min(start+6000,len(text))}
+                if source['resource_type']=='document':part['line']=source.get('line',1)+text[:start].count('\n')
                 if current and length + len(part['text']) > 10000:
                     chunks.append(current); current = []; length = 0
                 current.append(part); length += len(part['text'])
         if current: chunks.append(current)
         if not chunks: chunks = [[]]
+        def live_memories():
+            scopes=['global','session:'+context.get('session_id','')]+['recording:'+identifier for identifier in context.get('recording_ids',[])]
+            scopes+=['document:'+r['resource_id'] for r in context.get('write_resources',context.get('resources',[])) if r['resource_type']=='document']
+            return self.memory_service.active(scopes) if hasattr(self,'memory_service') else []
+        from interview_backend.agent.coverage import Coverage
+        initial_dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources]
+        initial_dependencies += [{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in live_memories()]
+        coverage=Coverage(work,chunks,context.get('excluded',[]),initial_dependencies,configuration)
         answers = []; claims = []; targets = []; covered = set(); model_questions = []
         all_questions = bool(re.search(r'全部.*问题|所有.*问题|问题.*汇总|列出.*问题|哪些问题', instruction))
         for i, chunk in enumerate(chunks):
-            if emit: await emit('coverage', {'chunk': i + 1, 'chunks': len(chunks), 'covered': len(covered), 'total': len(sources)})
-            scopes = ['global', 'session:' + context.get('session_id', '')]
-            scopes += ['recording:' + identifier for identifier in context.get('recording_ids', [])]
-            scopes += ['document:' + r['resource_id'] for r in context.get('write_resources', context.get('resources', [])) if r['resource_type'] == 'document']
-            memory = self.memory_service.active(scopes) if hasattr(self,'memory_service') else []
+            await coverage.begin(i,chunk,emit)
+            memory=live_memories()
             if memory:
                 known = {(r['resource_type'], r['resource_id'], r['revision']) for r in context['resources']}
                 for item in memory:
@@ -197,16 +204,24 @@ class AgentEngine:
                 result = json.loads(content)
                 if not isinstance(result.get('answer'), str) or not isinstance(result.get('claims'), list): raise ValueError()
             except asyncio.CancelledError:
+                await coverage.fail(chunk,'cancelled',emit)
                 raise
             except DomainError:
+                await coverage.fail(chunk,'failed',emit)
                 raise
             except Exception:
+                await coverage.fail(chunk,'failed',emit)
                 work.discard(model_key)
                 raise DomainError('model_failed', '模型调用失败或结果结构不合法；已完成业务操作可从运行记录恢复。', 503) from None
             if result.get('clarification'):
-                return {'answer': result['clarification'], 'clarification': result['clarification'], 'claims': [], 'coverage': {'total': len(sources), 'covered': len(covered), 'excluded': context.get('excluded', [])}}
-            self.evidence.validate_result(result, context, self.evidence.committed(run_id) + ([plan.preview] if plan.preview else []))
+                await coverage.fail(chunk,'pending',emit)
+                return {'answer':result['clarification'],'clarification':result['clarification'],'claims':[],'coverage':coverage.snapshot()}
+            try:self.evidence.validate_result(result,context,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []))
+            except DomainError:
+                await coverage.fail(chunk,'failed',emit)
+                raise
             if result.get('targets') and not context.get('allow_write'):
+                await coverage.fail(chunk,'failed',emit)
                 raise DomainError('write_not_authorized', '当前用户消息未授权内容修改，未执行模型提出的写入。', 403)
             targets += result.get('targets', [])
             if all_questions:
@@ -227,10 +242,11 @@ class AgentEngine:
                     model_questions.append({'text': question['text'].strip()[:2000], 'source': reference, 'start': start})
             answers.append(result['answer']); claims += result['claims']
             covered.update((s['resource_type'], s['resource_id']) for s in chunk)
+            await coverage.complete(chunk,result,context,dependencies,emit)
         for source in sources:
             if not self.evidence.valid_after_changes(source, self.evidence.committed(run_id)):
                 raise DomainError('stale_source', '运行中资料发生变化，请基于当前版本重新执行。', 409)
-        result = {'answer': '\n\n'.join(answers), 'claims': claims, 'coverage': {'total': len(sources), 'covered': len(covered), 'excluded': context.get('excluded', [])}}
+        result = {'answer': '\n\n'.join(answers), 'claims': claims, 'coverage':coverage.snapshot()}
         if all_questions:
             # 标点问句做确定性兜底；模型识别结果必须再核对来源，未标点的真实录音也能进入清单。
             deterministic = [{'text': s['text'].strip(), 'source': {k: s[k] for k in ('resource_type','resource_id','revision')}, 'start': s.get('start')}

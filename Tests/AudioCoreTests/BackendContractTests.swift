@@ -437,6 +437,19 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(item.sources.first?.resourceType == "message" && item.sources.first?.resourceID == "msg1")
     }
 
+    @Test func partialCoverageUsesRangesAndKeepsLegacyResponsesReadable() throws {
+        let data = Data(#"{"total":3,"covered":1,"unit":"parts","source_total":1,"source_covered":0,"parts":[{"id":"part2","resource_type":"segment","resource_id":"s1","revision":1,"char_start":6000,"char_end":12000,"state":"failed","start":1}],"excluded":[]}"#.utf8)
+        let coverage = try JSONDecoder().decode(AssistantCoverage.self, from: data)
+        #expect(coverage.progressTitle == "资料分块 1/3" && coverage.sourceCovered == 0)
+        #expect(coverage.parts?.first?.label.contains("6001–12000") == true)
+        #expect(coverage.parts?.first?.stateTitle == "失败，可继续")
+        #expect(coverage.parts?.first?.reference.resourceID == "s1")
+        let old = try JSONDecoder().decode(AssistantCoverage.self, from: Data(#"{"total":20,"covered":20}"#.utf8))
+        #expect(old.progressTitle == "来源覆盖 20/20")
+        let result = try JSONDecoder().decode(AssistantResult.self, from: Data(#"{"partial_results":[{"answer":"保留的分析"}]}"#.utf8))
+        #expect(result.partialResults?.first?.answer == "保留的分析")
+    }
+
     @Test @MainActor func cancelPinsTheActualOrganizationTask() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

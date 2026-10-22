@@ -59,12 +59,12 @@ class ReportService:
             except DomainError as error:
                 if parent.get('allow_write'): raise
                 failed.append({'id': recording['id'], 'title': recording['title'], 'reason': error.message})
-            if emit: await emit('coverage', {'covered': len(items), 'total': len(plan['targets']), 'completed_ids': [i['id'] for i in items], 'failed': failed})
+            if emit: await emit('coverage', {'unit':'interviews','covered': len(items), 'total': len(plan['targets']), 'completed_ids': [i['id'] for i in items], 'failed': failed})
         description = f"本周面试（{plan['start']} 至 {plan['end_exclusive']} 前）：共 {len(plan['targets'])} 场，完成分析 {len(items)} 场。"
         answer = '\n\n'.join([description] + [f"{r['date']} · {r['title']}\n{r['result']['answer']}" for r in items])
         if failed or plan['excluded']:
             answer += '\n\n未纳入或未完成：\n' + '\n'.join(f"{r['title']}：{r['reason']}" for r in failed + plan['excluded'])
-        result = {'answer': answer, 'claims': claims, 'report': {**plan, 'items': items}, 'coverage': {'total': len(plan['targets']), 'covered': len(items), 'excluded': failed + plan['excluded']}}
+        result = {'answer': answer, 'claims': claims, 'report': {**plan, 'items': items}, 'coverage': {'unit':'interviews','total': len(plan['targets']), 'covered': len(items), 'excluded': failed + plan['excluded']}}
         read_resources = [r for child in frozen['contexts'].values() for r in child.get('resources', [])]
         if any(not self.evidence.valid_after_changes(r, self.evidence.committed(run_id)) for r in read_resources):
             raise DomainError('stale_context', '周报运行中来源发生变化，请基于当前资料重新执行。', 409)

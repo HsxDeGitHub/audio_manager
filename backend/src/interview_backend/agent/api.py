@@ -80,6 +80,7 @@ class AgentAPI:
     def append_event(c, run_id, kind, payload):
         sequence = c.execute('SELECT coalesce(max(seq),0)+1 FROM events WHERE run_id=?', (run_id,)).fetchone()[0]
         c.execute('INSERT INTO events VALUES(?,?,?,?)', (run_id, sequence, kind, encode(payload)))
+        if kind=='coverage':c.execute('INSERT INTO agent_work VALUES(?,?,?) ON CONFLICT(run_id,step_key) DO UPDATE SET payload=excluded.payload',(run_id,'coverage',encode(payload)))
 
     async def _execute(self, identifier):
         try:
@@ -130,9 +131,23 @@ class AgentAPI:
     def current_result(self, c, row):
         result = json.loads(row['result']) if row['result'] else None
         result = self.with_changes(result, row['id'])
-        last = c.execute("SELECT payload FROM events WHERE run_id=? AND kind='coverage' ORDER BY seq DESC LIMIT 1", (row['id'],)).fetchone()
-        if last and not (result or {}).get('coverage'):
-            result = {**(result or {}), 'coverage': json.loads(last[0])}
+        from interview_backend.agent.work import WorkLog
+        work=WorkLog(self.database,row['id'])
+        progress=work.get('coverage_progress')
+        coverage=progress['coverage'] if progress else work.get('coverage')
+        if not coverage:
+            last=c.execute("SELECT payload FROM events WHERE run_id=? AND kind='coverage' ORDER BY seq DESC LIMIT 1",(row['id'],)).fetchone()
+            coverage=json.loads(last[0]) if last else None
+        if coverage and (row['state']!='completed' or not (result or {}).get('coverage')):result={**(result or {}),'coverage':coverage}
+        if row['state'] in {'failed','cancelled','interrupted'}:
+            partial=work.get('part_results')
+            values=[]
+            for part in (partial or {}).get('items',{}).values():
+                if not work.valid(part.get('dependencies',[])):continue
+                try:self.evidence.validate_result(part['result'],part['context'],self.evidence.committed(row['id']))
+                except DomainError:continue
+                values.append({'answer':part['result'].get('answer',''),'part_ids':part['part_ids']})
+            if values:result={**(result or {}),'partial_results':values}
         return result
 
     def get(self, identifier):

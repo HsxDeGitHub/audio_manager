@@ -9,7 +9,24 @@ struct AssistantReference: Decodable, Hashable {
     private enum CodingKeys: String, CodingKey { case resourceType = "resource_type", resourceID = "resource_id", revision, line, historical, blockID = "block_id" }
 }
 struct AssistantClaim: Decodable { let text: String; let kind: String; let sources: [AssistantReference] }
-struct AssistantCoverage: Decodable { let total: Int; let covered: Int; let excluded: [BackendJSONValue]? }
+struct AssistantCoveragePart: Decodable, Identifiable {
+    let id: String; let resourceType: String; let resourceID: String; let revision: Int
+    let charStart: Int; let charEnd: Int; let state: String; let start: Double?; let line: Int?; let title: String?
+    private enum CodingKeys: String, CodingKey { case id, revision, state, start, line, title, resourceType = "resource_type", resourceID = "resource_id", charStart = "char_start", charEnd = "char_end" }
+    var label: String {
+        let source = title ?? start.map { "音频片段 \(TimeFormat.clock($0))" } ?? "资料文本"
+        return source + (charEnd > charStart ? " · 第 \(charStart + 1)–\(charEnd) 字" : " · 空文本")
+    }
+    var stateTitle: String { ["pending":"未处理", "running":"处理中", "completed":"已完成", "failed":"失败，可继续", "cancelled":"已取消"][state] ?? state }
+    var reference: AssistantReference { AssistantReference(resourceType: resourceType, resourceID: resourceID, revision: revision, line: line, historical: nil, blockID: nil) }
+}
+struct AssistantCoverage: Decodable {
+    let total: Int; let covered: Int; let excluded: [BackendJSONValue]?
+    let unit: String?; let sourceCovered: Int?; let sourceTotal: Int?; let parts: [AssistantCoveragePart]?
+    private enum CodingKeys: String, CodingKey { case total, covered, excluded, unit, parts, sourceCovered = "source_covered", sourceTotal = "source_total" }
+    var progressTitle: String { (unit == "parts" ? "资料分块" : unit == "interviews" ? "面试覆盖" : "来源覆盖") + " \(covered)/\(total)" }
+}
+struct AssistantPartialResult: Decodable { let answer: String }
 struct AssistantChange: Decodable { let id: String; let state: String; let count: Int; let items: [BackendJSONValue]? }
 struct AssistantQuestion: Decodable, Identifiable {
     let text: String; let source: AssistantReference; let start: Double?
@@ -20,6 +37,8 @@ struct AssistantResult: Decodable {
     let answer: String?; let claims: [AssistantClaim]?; let coverage: AssistantCoverage?; let changeset: AssistantChange?; let error: Failure?
     let changesets: [AssistantChange]?
     let questions: [AssistantQuestion]?
+    let partialResults: [AssistantPartialResult]?
+    private enum CodingKeys: String, CodingKey { case answer, claims, coverage, changeset, error, changesets, questions, partialResults = "partial_results" }
     var allChanges: [AssistantChange] { changesets ?? changeset.map { [$0] } ?? [] }
 }
 struct AssistantRun: Decodable, Identifiable { let id: String; let state: String; let result: AssistantResult? }
@@ -89,7 +108,7 @@ final class AssistantModel: ObservableObject {
                 guard let client else { return }
                 for try await event in client.events(runID: id, after: cursors[id] ?? 0) {
                     cursors[id] = event.id
-                    if event.kind == "coverage", let coverage = try? JSONDecoder().decode(AssistantCoverage.self, from: event.data) { progress = "已覆盖 \(coverage.covered)/\(coverage.total) 个来源" }
+                    if event.kind == "coverage", let coverage = try? JSONDecoder().decode(AssistantCoverage.self, from: event.data) { progress = coverage.progressTitle }
                     else if event.kind == "tool_start" { progress = "正在执行工具…" }
                 }
                 try await loadHistory(); model.reload()
