@@ -57,7 +57,7 @@ def test_invalid_pagination_is_localized_and_does_not_echo_input(client, query):
 def test_capabilities_are_honest_and_foreign_keys_are_enabled(client):
     from sqlalchemy import text
     result = client.get('/api/v1/system/status').json()
-    assert result['schema_revision'] == '0002_application'
+    assert result['schema_revision'] == '0004_agent_work'
     assert result['legacy_imported'] is True
     assert result['counts']['recordings'] == 2
     assert result['capabilities']['library_read'] is True
@@ -75,3 +75,18 @@ def test_importing_package_has_no_data_side_effects(tmp_path):
         env={**os.environ, 'INTERVIEW_AUDIO_DATA_DIR': str(target)}, capture_output=True, text=True)
     assert result.returncode == 0
     assert not target.exists()
+
+
+def test_existing_application_database_upgrades_and_restarts_without_losing_content(client,config):
+    from interview_backend.legacy import initialize_database
+    db=client.app.state.database
+    with db.transaction(True) as c:
+        c.execute("UPDATE segments SET edited='保留既有校对' WHERE id='s1'")
+        c.execute('DROP TABLE agent_work')
+        c.execute("UPDATE alembic_version SET version_num='0002_application'")
+    assert initialize_database(config).reused
+    assert initialize_database(config).reused
+    with db.transaction() as c:
+        assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0]=='保留既有校对'
+        assert c.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0004_agent_work'
+        assert c.execute('SELECT count(*) FROM agent_work').fetchone()[0]==0

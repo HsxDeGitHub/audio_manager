@@ -6,7 +6,9 @@ final class BackendLibraryStore {
     private let connection: BackendConnection
     private let session: URLSession
     private var versions: [String: Int] = [:]
-    init(connection: BackendConnection) {
+    private let onTransportFailure: (@Sendable () -> Void)?
+    init(connection: BackendConnection, onTransportFailure: (@Sendable () -> Void)? = nil) {
+        self.onTransportFailure = onTransportFailure
         self.connection = connection
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil; config.httpCookieStorage = nil; config.urlCredentialStorage = nil
@@ -34,10 +36,12 @@ final class BackendLibraryStore {
         request.httpMethod = method
         request.setValue("Bearer " + connection.token, forHTTPHeaderField: "Authorization")
         if let body { request.httpBody = try JSONSerialization.data(withJSONObject: body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        let onFailure = onTransportFailure
         let box = ResultBox(), semaphore = DispatchSemaphore(value: 0)
         let task = session.dataTask(with: request) { data, response, error in
             defer { semaphore.signal() }
             if let error {
+                if (error as? URLError)?.code != .cancelled { onFailure?() }
                 box.set(.failure((error as? URLError)?.code == .timedOut ? BackendClientError.timedOut : BackendClientError.unavailable)); return
             }
             guard let response = response as? HTTPURLResponse, let data else { box.set(.failure(BackendClientError.invalidResponse)); return }

@@ -165,11 +165,12 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
     private let token: String
     private let timeout: TimeInterval
     private let session: URLSession
+    private let onTransportFailure: (@Sendable () -> Void)?
     var description: String { "BackendClient（本机业务服务）" }
     var debugDescription: String { description }
 
     init(baseURL: URL, token: String, timeout: TimeInterval = 15,
-         configuration: URLSessionConfiguration = .ephemeral) throws {
+         configuration: URLSessionConfiguration = .ephemeral, onTransportFailure: (@Sendable () -> Void)? = nil) throws {
         guard let parts = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
               parts.scheme == "http", parts.host == "127.0.0.1", let port = parts.port, (1...65535).contains(port),
               parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil,
@@ -180,6 +181,7 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
         self.baseURL = baseURL
         self.token = token
         self.timeout = timeout
+        self.onTransportFailure = onTransportFailure
         let config = configuration.copy() as! URLSessionConfiguration
         config.urlCache = nil
         config.httpCookieStorage = nil
@@ -319,7 +321,7 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
                     continuation.finish()
                 } catch {
                     if Task.isCancelled { continuation.finish(throwing: CancellationError()) }
-                    else { continuation.finish(throwing: (error as? BackendClientError) ?? BackendClientError.unavailable) }
+                    else { if error is URLError { onTransportFailure?() }; continuation.finish(throwing: (error as? BackendClientError) ?? BackendClientError.unavailable) }
                 }
             }
             continuation.onTermination = { _ in task.cancel() }
@@ -364,6 +366,7 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
             if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
                 throw CancellationError()
             }
+            onTransportFailure?()
             if (error as? URLError)?.code == .timedOut { throw BackendClientError.timedOut }
             throw BackendClientError.unavailable
         }

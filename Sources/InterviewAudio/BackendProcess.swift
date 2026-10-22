@@ -10,9 +10,44 @@ final class BackendProcess: ObservableObject {
     private var child: Process?
     private var lifeline: Pipe?
     private var connection: BackendConnection?
+    private var monitor: Task<Void, Never>?
+    var onUnavailable: ((String) -> Void)?
+    var processIdentifier: Int32? { child?.isRunning == true ? child?.processIdentifier : nil }
+
+    private func becameUnavailable(_ message: String) {
+        guard connection != nil else { return }
+        connection = nil; monitor?.cancel(); monitor = nil
+        state = "本地服务不可用"; diagnostic = message
+        onUnavailable?(message)
+    }
+
+    private func watch(_ process: Process, connection: BackendConnection) {
+        monitor?.cancel()
+        monitor = Task { [weak self] in
+            var failures = 0
+            guard let client = try? BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 1) else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    _ = try await client.status(); failures = 0
+                } catch {
+                    if Task.isCancelled { return }
+                    failures += 1
+                    if failures >= 2, let self, self.child === process {
+                        self.becameUnavailable("本地服务连接已中断，请重试。未完成任务会保留恢复状态。")
+                        return
+                    }
+                }
+            }
+        }
+    }
 
     func start(dataDirectory: URL) async throws -> BackendConnection {
-        if let connection, child?.isRunning == true { return connection }
+        if let connection, child?.isRunning == true {
+            let client = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 1)
+            if let status = try? await client.status(), status.supports("business_write") { return connection }
+            becameUnavailable("本地服务连接已失效，正在重新连接。")
+        }
         stop(); state = "正在准备本地资料库…"; diagnostic = nil
         let runtime = dataDirectory.appendingPathComponent("Backend/Runtime", isDirectory: true)
         try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
@@ -38,6 +73,12 @@ final class BackendProcess: ObservableObject {
         process.standardInput = pipe
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] process in
+            Task { @MainActor in
+                guard let self, self.child === process else { return }
+                self.becameUnavailable("本地服务意外退出，请重试。已保存资料仍保留在本机。")
+            }
+        }
         child = process; lifeline = pipe
         do {
             try process.run()
@@ -50,7 +91,7 @@ final class BackendProcess: ObservableObject {
                     let client = try BackendClient(baseURL: url, token: token, timeout: 1)
                     if let status = try? await client.status(), status.supports("business_write") {
                         let result = BackendConnection(baseURL: url, token: token)
-                        connection = result; state = "本地服务已连接"; return result
+                        connection = result; state = "本地服务已连接"; watch(process, connection: result); return result
                     }
                 }
                 try await Task.sleep(nanoseconds: 100_000_000)
@@ -64,6 +105,7 @@ final class BackendProcess: ObservableObject {
     }
 
     func stop() {
+        monitor?.cancel(); monitor = nil
         connection = nil
         try? lifeline?.fileHandleForWriting.close(); lifeline = nil
         if let process = child, process.isRunning {

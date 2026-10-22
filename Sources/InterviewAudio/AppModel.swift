@@ -93,6 +93,9 @@ final class AppModel: ObservableObject {
     let assistant = AssistantModel()
     @Published var backendState = "正在连接本地服务…"
     @Published var backendUnavailable = false
+    @Published var backendConnecting = false
+    private var backendGeneration = UUID()
+    private var shuttingDown = false
     private var queue: [QueuedJob] = []
     private var worker: Process?
     private var request: WorkerRequest?
@@ -152,13 +155,29 @@ final class AppModel: ObservableObject {
         loadTranscript()
         if !installer.ready { showSettings = true }
     }
+    func backendDisconnected(_ message: String) {
+        guard !shuttingDown else { return }
+        backendUnavailable = true; backendState = message
+        store = nil; backendClient = nil; changeHistory.client = nil
+        deviceBridge?.stop(); deviceBridge = nil; assistant.disconnected()
+    }
     func connectBackend() async {
+        guard !backendConnecting, !shuttingDown else { return }
+        backendConnecting = true; defer { backendConnecting = false }
+        let generation = UUID(); backendGeneration = generation
+        backendProcess.onUnavailable = { [weak self] message in self?.backendDisconnected(message) }
+        let onFailure: @Sendable () -> Void = { [weak self] in
+            Task { @MainActor in
+                guard let self, self.backendGeneration == generation else { return }
+                self.backendDisconnected("本地服务连接已中断，请重试；未完成任务可在重连后继续。")
+            }
+        }
         do {
             let connection = try await backendProcess.start(dataDirectory: dataDirectory)
-            store = BackendLibraryStore(connection: connection)
-            backendClient = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 30)
+            store = BackendLibraryStore(connection: connection, onTransportFailure: onFailure)
+            backendClient = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 30, onTransportFailure: onFailure)
             changeHistory.client = backendClient
-            await assistant.attach(connection)
+            try await assistant.attach(connection, onTransportFailure: onFailure)
             deviceBridge?.stop()
             deviceBridge = nil
             if let backendClient {
@@ -167,8 +186,7 @@ final class AppModel: ObservableObject {
             }
             backendUnavailable = false; backendState = "本地服务已连接"; reload()
         } catch {
-            store = nil; backendClient = nil; deviceBridge?.stop(); deviceBridge = nil; backendUnavailable = true
-            backendState = backendProcess.diagnostic ?? "服务不可用，请重试。"
+            backendDisconnected(backendProcess.diagnostic ?? "服务不可用，请重试。")
         }
     }
     func openAssistantSource(_ source: AssistantReference, play: Bool) async {
@@ -617,6 +635,7 @@ final class AppModel: ObservableObject {
         await installer.validate(directory: url)
     }
     func shutdown() {
+        shuttingDown = true; backendGeneration = UUID()
         stopAIForShutdown()
         if let job = activeJobID { try? store?.stopWorker(job, state: "interrupted") }
         savePosition(); installer.cancel(); punctuationTask?.cancel(); punctuationProcessor.cancel()

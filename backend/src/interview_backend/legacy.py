@@ -88,11 +88,14 @@ def _validate(connection):
 def _existing_report(path, explicit_source):
     with closing(_read_only(path)) as check:
         old = check.execute('SELECT version_num FROM alembic_version').fetchone()
-    if old and old[0] == '0001_backend_baseline':
+    supported = {'0001_backend_baseline', '0002_application', '0003_memory_versions', SCHEMA_REVISION}
+    if not old or old[0] not in supported:
+        raise DomainError('unsupported_schema', '目标资料库版本不受当前后端支持。', 409)
+    if old[0] != SCHEMA_REVISION:
         upgrade_database(path)
     with closing(_read_only(path)) as connection:
         revision = connection.execute('SELECT version_num FROM alembic_version').fetchone()
-        if not revision or revision[0] not in {'0001_backend_baseline', SCHEMA_REVISION}:
+        if not revision or revision[0] != SCHEMA_REVISION:
             raise DomainError('unsupported_schema', '目标资料库版本不受当前后端支持。', 409)
         origin = connection.execute('SELECT source_path FROM backend_imports WHERE id=1').fetchone()
         if not origin:

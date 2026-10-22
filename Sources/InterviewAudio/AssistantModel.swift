@@ -43,9 +43,9 @@ final class AssistantModel: ObservableObject {
     private var listener: Task<Void, Never>?
     private var cursors: [String: Int] = [:]
 
-    func attach(_ connection: BackendConnection) async {
-        do { client = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 120); try await reloadSessions() }
-        catch { self.error = error.localizedDescription }
+    func attach(_ connection: BackendConnection, onTransportFailure: (@Sendable () -> Void)? = nil) async throws {
+        client = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 120, onTransportFailure: onTransportFailure)
+        try await reloadSessions()
     }
     func reloadSessions() async throws {
         guard let client else { return }
@@ -111,6 +111,12 @@ final class AssistantModel: ObservableObject {
         guard let client else { return }
         do { error = nil; let _: AssistantChange = try await client.send("/api/v1/changesets/\(id)/revert", method: "POST", body: JSONSerialization.data(withJSONObject: ["operation_id": UUID().uuidString])); model.reload(); try await loadHistory() }
         catch { self.error = error.localizedDescription }
+    }
+    func disconnected() {
+        listener?.cancel(); client = nil; activeRun = nil; progress = "本地服务已失联，连接恢复后可继续中断任务。"
+        runs = runs.map { run in
+            AssistantRun(id: run.id, state: ["queued", "running"].contains(run.state) ? "interrupted" : run.state, result: run.result)
+        }
     }
     func stop() { listener?.cancel() }
 }

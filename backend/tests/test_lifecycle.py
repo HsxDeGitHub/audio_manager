@@ -89,3 +89,26 @@ def test_parent_disappearance_triggers_cleanup(tmp_path):
     finally:
         if process.poll() is None:
             process.kill(); process.wait(timeout=5)
+
+
+def test_hard_exit_restart_preserves_queued_job_as_interrupted(tmp_path):
+    from urllib.request import Request
+    token='lifecycle-synthetic-token'
+    def api(url,path,body=None):
+        request=Request(url+path,data=json.dumps(body).encode() if body is not None else None,
+                        headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+        with urlopen(request,timeout=3) as response: return json.load(response)
+    process,ready=start(tmp_path)
+    try:
+        url=wait_ready(process,ready)
+        recording={'id':'recovery-r','title':'合成恢复','path':'/synthetic.wav','fingerprint':'synthetic','duration':3,'createdAt':1,'state':'idle','playPosition':0}
+        api(url,'/api/v1/library/execute',{'action':'save','operation_id':'recovery-save','arguments':{'recording':recording}})
+        api(url,'/api/v1/jobs/queue',{'jobID':'recovery-job','recordingID':'recovery-r','runID':'recovery-run'})
+        process.kill(); process.wait(timeout=10); assert_released(url)
+        ready.unlink(missing_ok=True)
+        process,ready=start(tmp_path)
+        url=wait_ready(process,ready)
+        assert api(url,'/api/v1/jobs/recovery-job')['state']=='interrupted'
+        assert api(url,'/api/v1/recordings/recovery-r')['title']=='合成恢复'
+    finally:
+        if process.poll() is None: process.stdin.close(); process.wait(timeout=10)

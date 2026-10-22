@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import Darwin
 import Testing
 import AudioCore
 @testable import InterviewAudio
@@ -434,6 +435,48 @@ private func bodyData(_ request: URLRequest) -> Data? {
         let item = try JSONDecoder().decode(MemoryItem.self, from: json)
         #expect(item.categoryTitle == "偏好" && item.stateTitle == "生效" && item.revision == 2)
         #expect(item.sources.first?.resourceType == "message" && item.sources.first?.resourceID == "msg1")
+    }
+
+    @Test @MainActor func transportLossPreservesHistoryAndDisablesBusinessWrites() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(dataDirectoryOverride: root)
+        app.assistant.runs = [AssistantRun(id: "unfinished", state: "running", result: nil)]
+        app.backendDisconnected("合成连接中断")
+        #expect(app.backendUnavailable && app.store == nil && app.backendClient == nil)
+        #expect(app.assistant.runs.first?.state == "interrupted" && app.assistant.client == nil)
+        #expect(app.backendState.contains("连接中断"))
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["INTERVIEW_BACKEND_CONTRACT_INTEGRATION"] == "1"))
+    @MainActor func successfulBackendDeathIsDetectedAndRetryRebindsState() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("backend-reconnect-\(UUID().uuidString)")
+        let app = AppModel(dataDirectoryOverride: root)
+        defer { app.shutdown(); try? FileManager.default.removeItem(at: root) }
+        do {
+            let store = try LibraryStore(url: root.appendingPathComponent("library.sqlite"))
+            try store.save(Recording(id: "reconnect-r", title: "合成重连", path: "/synthetic.wav", fingerprint: "synthetic", duration: 3))
+        }
+        await app.connectBackend()
+        #expect(!app.backendUnavailable)
+        let client = try #require(app.backendClient)
+        let session: AssistantAcknowledgment = try await client.send("/api/v1/sessions", method: "POST", body: Data("{}".utf8))
+        try await app.assistant.reloadSessions()
+        struct JobStart: Decodable { let state: String }
+        let _: JobStart = try await client.send("/api/v1/jobs/queue", method: "POST", body: JSONSerialization.data(withJSONObject: ["jobID":"reconnect-job","recordingID":"reconnect-r","runID":"reconnect-run"]))
+        let pid = try #require(app.backendProcess.processIdentifier)
+        kill(pid, SIGKILL)
+        for _ in 0..<60 { if app.backendUnavailable { break }; try await Task.sleep(nanoseconds: 100_000_000) }
+        #expect(app.backendUnavailable && app.store == nil && app.assistant.client == nil)
+        await app.connectBackend()
+        #expect(!app.backendUnavailable && app.store != nil && app.assistant.client != nil && app.changeHistory.client != nil)
+        #expect(app.assistant.sessions.contains(where: { $0.id == session.id }))
+        let reconnected = try #require(app.backendClient)
+        let job: AssistantAcknowledgment = try await reconnected.send("/api/v1/jobs/reconnect-job")
+        #expect(job.state == "interrupted")
+        #expect(try app.store?.recordings().first?.title == "合成重连")
+        app.shutdown()
+        #expect(!app.backendUnavailable)
     }
 
     @Test func draftAndHistoricalReferencesCarryExactDestination() async throws {

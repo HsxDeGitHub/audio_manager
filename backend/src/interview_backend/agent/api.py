@@ -109,7 +109,7 @@ class AgentAPI:
                 c.execute("UPDATE agent_runs SET state='failed',result=? WHERE id=?", (encode(result), identifier))
                 self.append_event(c, identifier, 'failed', result)
         finally:
-            self.tasks.pop(identifier, None)
+            if self.tasks.get(identifier) is asyncio.current_task(): self.tasks.pop(identifier, None)
 
     def with_changes(self, result, identifier):
         changes = self.evidence.committed(identifier)
@@ -140,7 +140,10 @@ class AgentAPI:
                 c.execute("UPDATE agent_runs SET state='cancelled' WHERE id=?", (identifier,))
                 from interview_backend.services.device import DeviceService
                 DeviceService.cancel_run(c, identifier)
-        if identifier in self.tasks: self.tasks[identifier].cancel()
+        task = self.tasks.get(identifier)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         return self.get(identifier)
 
     async def resume(self, identifier):

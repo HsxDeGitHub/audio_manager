@@ -65,11 +65,15 @@ class ReportService:
         if failed or plan['excluded']:
             answer += '\n\n未纳入或未完成：\n' + '\n'.join(f"{r['title']}：{r['reason']}" for r in failed + plan['excluded'])
         result = {'answer': answer, 'claims': claims, 'report': {**plan, 'items': items}, 'coverage': {'total': len(plan['targets']), 'covered': len(items), 'excluded': failed + plan['excluded']}}
+        read_resources = [r for child in frozen['contexts'].values() for r in child.get('resources', [])]
+        if any(not self.evidence.valid_after_changes(r, self.evidence.committed(run_id)) for r in read_resources):
+            raise DomainError('stale_context', '周报运行中来源发生变化，请基于当前资料重新执行。', 409)
         if batch.targets:
             if failed: raise DomainError('incomplete_batch', '批量目标尚未全部完成，整次修改未提交。', 409)
             call = ToolContext(request_id=run_id, operation_id=batch.operation_id, allowed_effects=frozenset({'write'}), resource_scope=batch.allowed, prepared_documents=tuple(batch.documents.values()))
             await engine.registry.execute('changesets.apply', {'targets': list(batch.targets.values())}, call)
         changes = self.evidence.committed(run_id)
+        self.evidence.validate_result(result, {'resources':read_resources, 'sources':[s for child in frozen['contexts'].values() for s in child.get('sources', [])]}, changes)
         if changes:
             result['changesets'] = changes
             if len(changes) == 1: result['changeset'] = changes[0]

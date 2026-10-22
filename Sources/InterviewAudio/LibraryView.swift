@@ -18,7 +18,7 @@ struct LibraryView: View {
         VStack(spacing: 0) {
             header
             if model.backendUnavailable {
-                HStack { Text(model.backendState); Spacer(); Button("重试本地服务") { Task { await model.connectBackend() } } }
+                HStack { Text(model.backendState); Spacer(); Button("重试本地服务") { Task { await model.connectBackend() } }.disabled(model.backendConnecting) }
                     .font(.caption).padding(12).background(Color.orange.opacity(0.12))
             }
             if model.aiActiveDraftID != nil {

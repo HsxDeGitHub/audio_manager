@@ -44,4 +44,4 @@ backend_imports = Table('backend_imports', metadata,
     Column('created_at', Float, nullable=False), Column('counts_json', Text, nullable=False))
 
 LEGACY_TABLES = (recordings, runs, segments, speakers, edit_history, reading_cache, ai_drafts)
-SCHEMA_REVISION = '0002_application'
+SCHEMA_REVISION = '0004_agent_work'

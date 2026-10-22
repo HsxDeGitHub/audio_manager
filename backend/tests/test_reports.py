@@ -90,3 +90,21 @@ def test_weekly_subtasks_cannot_write_outside_parent_or_use_changed_source(clien
     with pytest.raises(DomainError) as error: asyncio.run(engine.execute('week-stale', parent['instruction'], parent, model=Model()))
     assert error.value.code == 'stale_context'
     assert evidence.committed('week-stale') == []
+
+
+def test_weekly_result_rechecks_earlier_child_after_later_child_runs(client):
+    import pytest
+    from interview_backend.errors import DomainError
+    from interview_backend.services.common import bump
+    week_fixture(client)
+    service=client.app.state.agent.engine.reports
+    parent=client.app.state.evidence.freeze({'scope':'all'},'分析本周全部面试')
+    parent['report_plan']=service.freeze(parent,parent['instruction'],'2026-10-21')
+    class Engine:
+        async def execute(self,child_id,*args,**kwargs):
+            if child_id.endswith(':r2'):
+                with client.app.state.database.transaction(True) as c: bump(c,'segment','s1')
+            return {'answer':'合成分析','claims':[]}
+    with pytest.raises(DomainError) as error:
+        asyncio.run(service.render('week-recheck',parent['instruction'],Engine(),context=parent))
+    assert error.value.code=='stale_context'
