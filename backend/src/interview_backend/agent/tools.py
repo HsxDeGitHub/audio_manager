@@ -19,39 +19,7 @@ class MessageContext(BaseModel):
     document_ids: list[str] = Field(default_factory=list)
 
 
-def write_permissions(instruction):
-    # 引文与代码是用户提供的材料，不能因其包含执行动词而开放写工具。
-    command = re.sub(r'```[\s\S]*?```|“[^”]*”|「[^」]*」|『[^』]*』|"[^"]*"|`[^`]*`', '', instruction)
-    verbs = r'修改|修正|替换|改成|改为|删除|忘记|停用|重命名|撤销|合并|设置|更正|导入|添加材料|记住|更改|改动|编辑|写入'
-    negative = re.search(r'(?:不要|勿|禁止|不准|不许|不允许|不能|不可|不必|无需|不需要|暂不|先不|别).{0,20}(?:' + verbs + '|执行|操作)', command)
-    readonly = re.search(r'只读|(?:只|仅)(?:需要|需|要)?(?:分析|阅读|解释|总结|评估|检查|讨论|查看|告诉|提供建议)', command)
-    discussion = re.search(r'(?:怎么|如何|怎样|能否|是否|可否|能不能|可不可以).{0,12}(?:' + verbs + ')', command)
-    if negative or readonly or discussion: return False, False
-    importing = bool(re.search(r'(?:帮我|请|把|将|直接).{0,40}(?:导入|添加材料)|^(?:导入|添加材料)', command))
-    mutation = importing or bool(re.search(r'^(?:本周|这周)(?:只|仅)(?:' + verbs + ')|(?:帮我|请|把|将|直接).{0,40}(?:' + verbs + ')|^(?:' + verbs + ')', command))
-    return mutation, importing
-
-
-ACTION_VERBS = {
-    'device.locate': r'定位|回听|播放', 'device.export': r'导出|保存为',
-    'device.copy': r'复制|剪贴板', 'device.choose_file': r'选择文件|打开文件',
-    'jobs.transcribe': r'转写|重新识别', 'jobs.cancel': r'取消任务|取消后台任务',
-    'organize.start': r'整理',
-}
-
-
-def action_permissions(instruction):
-    command = re.sub(r'```[\s\S]*?```|“[^”]*”|「[^」]*」|『[^』]*』|"[^"]*"|`[^`]*`', '', instruction)
-    actions = set()
-    for clause in re.split(r'[，,。；;\n]', command):
-        if re.search(r'不要|勿|禁止|不准|不许|不允许|不能|不可|不必|无需|不需要|暂不|先不|(?<![识区分告级])别|只读|(?:只|仅)(?:需|要|需要)?(?:分析|阅读|解释|总结|讨论|查看)|怎么|如何|怎样|能否|是否|可否|能不能|可不可以', clause):
-            continue
-        for tool_id, verbs in ACTION_VERBS.items():
-            if re.search(r'(?:帮我|请|把|将|直接|并|再).{0,40}(?:' + verbs + ')|^(?:' + verbs + ')', clause.strip()):
-                actions.add(tool_id)
-        if re.search(r'调用|执行|使用', clause):
-            actions.update(re.findall(r'\bmcp\.[a-z0-9_.-]+', clause))
-    return sorted(actions)
+from interview_backend.agent.permissions import ACTION_VERBS, action_allowed, action_permissions, write_permissions
 
 
 class EvidenceService:
@@ -112,7 +80,7 @@ class EvidenceService:
                 return {**context.model_dump(), 'resources': resources, 'sources': sources, 'excluded': excluded, 'allow_write': False, 'clarification': '请引用要处理的段落，避免误改其他内容。'}
             # 只有用户消息中的执行动词可允许写工具，资料正文永远不参与权限判断。
             actions = action_permissions(instruction)
-            device = any(a in ACTION_VERBS for a in actions)
+            device = any(a.startswith(('device.', 'jobs.', 'organize.')) for a in actions)
             external = any(a.startswith('mcp.') for a in actions)
             return {**context.model_dump(), 'resources': resources, 'write_resources': list(resources), 'sources': sources, 'excluded': excluded, 'allow_write': mutation,
                     'allow_device': device, 'allow_external': external, 'allowed_actions': actions,
@@ -208,7 +176,7 @@ def framework_tools(registry, context):
     for metadata in registry.list():
         spec = registry._tools[metadata['id']]
         if spec.effect not in context.allowed_effects: continue
-        if context.frozen_context is not None and spec.effect in {'device', 'external'} and spec.tool_id not in context.frozen_context.get('allowed_actions', []): continue
+        if context.frozen_context is not None and spec.effect in {'device', 'external'} and not action_allowed(spec.tool_id, context.frozen_context): continue
         # 冻结范围时只允许固定证据读取；写和设工具由执行器再次校验范围。
         if context.frozen_context is not None and spec.effect == 'read' and spec.tool_id not in {'evidence.read', 'models.status', 'system.status'}: continue
         async def execute(_tool_id=spec.tool_id, **arguments):

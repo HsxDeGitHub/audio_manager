@@ -1,0 +1,48 @@
+"""只有用户消息的执行语句能授权工具；引文及讨论不构成操作许可。"""
+import re
+
+ACTION_VERBS = {
+    'device.locate': r'定位|回听|播放', 'device.export': r'导出|保存为',
+    'device.copy': r'复制|剪贴板', 'device.choose_file': r'选择文件|打开文件',
+    'jobs.transcribe': r'转写|重新识别', 'organize.start': r'整理',
+}
+NEGATIVE = r'不要|勿|禁止|不准|不许|不允许|不能|不可|不必|无需|不需要|暂不|先不|(?<![识区分告级])别|只读'
+READONLY = r'(?:只|仅)(?:需要|需|要)?(?:分析|阅读|解释|总结|评估|检查|讨论|查看|告诉|提供建议)'
+DISCUSSION = r'怎么|如何|怎样|能否|是否|可否|能不能|可不可以|(?:请|帮我)?(?:解释|说明|讨论|讲解|翻译).*(?:意思|含义|指令|句话)|^(?:请|帮我)?(?:解释|说明|讨论|讲解)'
+
+
+def command_text(instruction):
+    text = re.sub(r'(?m)^\s*>.*$', '', instruction)
+    text = re.sub(r'```[\s\S]*?(?:```|$)|~~~[\s\S]*?(?:~~~|$)', '', text)
+    return re.sub(r'“[^”]*”|「[^」]*」|『[^』]*』|‘[^’]*’|"[^"\n]*"|\'[^\'\n]*\'|`[^`]*`', '', text)
+
+
+def write_permissions(instruction):
+    command = command_text(instruction)
+    verbs = r'修改|修正|替换|改成|改为|删除|忘记|停用|重命名|撤销|合并|设置|更正|导入|添加材料|记住|更改|改动|编辑|写入'
+    if re.search(r'(?:'+NEGATIVE+r').{0,20}(?:'+verbs+r'|执行|操作)',command) or re.search(READONLY,command) or re.search(DISCUSSION,command):
+        return False,False
+    importing = bool(re.search(r'(?:帮我|请|把|将|直接).{0,40}(?:导入|添加材料)|^(?:导入|添加材料)',command))
+    mutation = importing or bool(re.search(r'^(?:本周|这周)(?:只|仅)(?:'+verbs+r')|(?:帮我|请|把|将|直接).{0,40}(?:'+verbs+r')|^(?:'+verbs+r')',command))
+    return mutation,importing
+
+
+def action_permissions(instruction):
+    actions=set()
+    for clause in re.split(r'[，,。；;\n]',command_text(instruction)):
+        if re.search(NEGATIVE+'|'+READONLY+'|'+DISCUSSION,clause): continue
+        # 先消费完整取消短语，转写/整理在这里是目标名词，不能授权启动。
+        cancel = r'(?:取消|停止|终止|中止)(?:(?!并|然后|再).)*(?:任务|转写|识别|整理)'
+        if re.search(cancel,clause):
+            actions.add('jobs.cancel'); clause=re.sub(cancel,'',clause)
+        for tool_id,verbs in ACTION_VERBS.items():
+            if re.search(r'(?:帮我|请|把|将|直接|并|然后|再).{0,40}(?:'+verbs+r')|^(?:'+verbs+r')',clause.strip()): actions.add(tool_id)
+        if re.search(r'调用|执行|使用',clause): actions.update(re.findall(r'\bmcp\.[a-z0-9_.-]+',clause))
+    return sorted(actions)
+
+
+def action_allowed(tool_id, frozen):
+    granted=set(frozen.get('allowed_actions',[]))
+    # 持久化的旧上下文也必须服从当前授权规则。
+    if frozen.get('instruction'): granted &= set(action_permissions(frozen['instruction']))
+    return tool_id in granted

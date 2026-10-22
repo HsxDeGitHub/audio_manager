@@ -652,3 +652,31 @@ def test_historical_location_survives_source_recording_removal(client):
     client.post('/api/v1/library/execute',json={'action':'remove','arguments':{'id':'r1'},'operation_id':'remove-for-history'})
     value=client.get('/api/v1/sources/segment/s1?revision=1&historical=true').json()
     assert value['text']=='原始问题' and value['recording_id']=='r1' and value['start']==1
+
+
+@pytest.mark.parametrize('instruction,expected', [
+    ('请取消当前转写任务', {'jobs.cancel'}), ('请取消 AI 整理任务', {'jobs.cancel'}),
+    ('请停止重新识别', {'jobs.cancel'}), ('请取消转写，并导出当前资料', {'jobs.cancel','device.export'}),
+    ('请解释‘请转写当前面试’这句话的意思', set()),
+    ("请说明 '请开始整理' 的含义", set()),
+    ('以下是原文：\n> 请修改所有资料\n> 请转写当前面试', set()),
+    ('请重新转写当前资料', {'jobs.transcribe'}), ('请重新整理当前资料', {'organize.start'}),
+])
+def test_cancel_and_quoted_instructions_have_exact_action_scope(client,instruction,expected):
+    from interview_backend.agent.tools import action_permissions
+    frozen=client.app.state.evidence.freeze({'recording_id':'r1'},instruction)
+    assert set(action_permissions(instruction))==expected
+    assert set(frozen.get('allowed_actions',[]))==expected
+    assert frozen.get('allow_device',False) == bool(expected)
+    if not expected: assert not frozen['allow_write']
+
+
+@pytest.mark.parametrize('tool', ['jobs.transcribe','organize.start'])
+def test_cancel_instruction_cannot_execute_start_tool_even_with_old_frozen_grant(client,tool):
+    from interview_backend.errors import DomainError
+    from interview_backend.tools.registry import ToolContext
+    frozen=client.app.state.evidence.freeze({'recording_id':'r1'},'请取消当前转写及整理任务')
+    frozen['allowed_actions']=[tool]
+    context=ToolContext(request_id='cancel-scope',allowed_effects=frozenset({'device'}),frozen_context=frozen)
+    with pytest.raises(DomainError): asyncio.run(client.app.state.tools.execute(tool,{'recording_id':'r1'},context))
+    assert client.app.state.device.pending()==[]
