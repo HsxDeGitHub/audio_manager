@@ -415,6 +415,9 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
             target = arguments.get('recording_id') or (target_builder(args) if target_builder else '')
             if target:
                 scope(context, target)
+            if context.change_plan is not None and context.frozen_context and context.frozen_context.get('allow_write') and kind in {'export','clipboard','organize','transcribe'}:
+                context.change_plan.device_actions[context.operation_id]={'tool_id':tool_id,'arguments':request['arguments'],'operation_id':context.operation_id}
+                return {'result':{'state':'planned','step_id':context.operation_id,'message':'内容事务完成后执行此步骤，当前尚未执行。'}}
             return await run_device(kind, target, arguments, context, request)
         registry.register(ToolSpec(tool_id=tool_id, version='1.0', title=title, description=description,
             input_model=input_model, output_model=ResultEnvelope, effect='device', handler=handler,

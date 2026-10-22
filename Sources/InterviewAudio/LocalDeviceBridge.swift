@@ -207,9 +207,11 @@ final class DeviceBridge {
         } catch DeviceBridgeError.cancelled {
             return ("cancelled", ["message": "用户取消了操作。"])
         } catch DeviceBridgeError.failed(let message) {
-            return ("failed", ["message": message])
+            return ("failed", ["message": message, "retry_safe": true])
+        } catch let error as AudioError {
+            return ("failed", ["message": error.localizedDescription, "retry_safe": true])
         } catch {
-            return ("failed", ["message": "设备操作失败，未修改内容。"])
+            return ("unknown", ["message": "设备结果无法确认，不会自动重放。"])
         }
     }
 

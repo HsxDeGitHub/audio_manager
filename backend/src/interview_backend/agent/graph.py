@@ -38,6 +38,10 @@ class AgentEngine:
     async def execute(self, run_id, instruction, context, model=None, emit=None, change_plan=None):
         from langgraph.graph import StateGraph, START, END
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+        from interview_backend.agent.work import WorkLog
+        from interview_backend.agent.finalization import resume
+        finalization=WorkLog(self.evidence.database,run_id).get('finalization')
+        if finalization is not None: return await resume(self,run_id,finalization,emit)
         if context.get('clarification'):
             return {'answer': context['clarification'], 'clarification': context['clarification'], 'claims': [], 'coverage': {'total': 0, 'covered': 0, 'excluded': context.get('excluded', [])}}
         if hasattr(self, 'reports') and not context.get('report_subtask') and re.search(r'本周|这周|周报', instruction):
@@ -150,7 +154,7 @@ class AgentEngine:
                         step_key = f'chunk:{i}:tool:{turn}:{digest}'
                         cached = work.get(step_key)
                         effect = self.registry._tools[tool_id].effect
-                        if cached is not None and (effect != 'write' or self.evidence.committed(run_id)):
+                        if cached is not None and cached.get('result',{}).get('state')!='planned' and (effect != 'write' or self.evidence.committed(run_id)):
                             output = cached
                             if effect == 'device' and cached.get('result', {}).get('command_id'):
                                 command = self.evidence.database
@@ -247,19 +251,10 @@ class AgentEngine:
         committed = self.evidence.committed(run_id)
         targets = [target for target in targets if not self.evidence.fulfilled(target, committed)]
         if targets: plan.stage(targets)
-        if plan.targets and not context.get('defer_changes'):
-            call_context = ToolContext(request_id=run_id, operation_id=plan.operation_id, allowed_effects=frozenset({'write'}), resource_scope=plan.allowed, prepared_documents=tuple(plan.documents.values()))
-            value = await self.registry.execute('changesets.apply', {'targets': list(plan.targets.values())}, call_context)
-            result['changeset'] = value['data']['result']
-            self.evidence.validate_result(result, context, self.evidence.committed(run_id))
-            if emit: await emit('changeset', result['changeset'])
+        if not context.get('defer_changes'):
+            from interview_backend.agent.finalization import finalize
+            result = await finalize(self,run_id,result,context,plan,emit)
         work.save('answer', result)
-        changes = self.evidence.committed(run_id)
-        if changes:
-            result['changesets'] = changes
-            if len(changes) == 1: result['changeset'] = changes[0]
-            result['historical_sources'] = [{**{k: s[k] for k in ('resource_type', 'resource_id', 'revision')}, 'historical': True}
-                                            for s in sources if not self.evidence.valid(s)]
         warnings = list(dict.fromkeys(item['reason'] for item in context.get('excluded', []) if item.get('code') == 'stale_draft'))
         if warnings: result['answer'] += '\n\n资料状态：' + '；'.join(warnings)
         return result

@@ -92,7 +92,7 @@ class AgentAPI:
             if hasattr(self.engine, 'automatic_memory') and not result.get('clarification'):
                 try: result['memories'] = await self.engine.automatic_memory.extract(context, result=result)
                 except Exception: await self.emit(identifier, 'memory_pending', {'message':'自动记忆尚未完成，当前回答已保留。'})
-            state = 'awaiting_input' if result.get('clarification') else 'completed'
+            state = 'awaiting_input' if result.get('clarification') else 'interrupted' if result.get('incomplete') else 'completed'
             with self.database.transaction(True) as c:
                 c.execute('UPDATE agent_runs SET state=?,result=? WHERE id=?', (state, encode(result), identifier))
                 c.execute('INSERT INTO messages VALUES(?,?,?,?,?,?)', (str(uuid.uuid4()), run['session_id'], 'assistant', result['answer'], encode({'run_id': identifier}), time.time()))
@@ -112,6 +112,13 @@ class AgentAPI:
             if self.tasks.get(identifier) is asyncio.current_task(): self.tasks.pop(identifier, None)
 
     def with_changes(self, result, identifier):
+        from interview_backend.agent.work import WorkLog
+        progress=WorkLog(self.database,identifier).get('finalization_result')
+        if progress:
+            if (result or {}).get('error'):
+                progress={k:v for k,v in progress.items() if k not in {'claims','questions'}}
+                if result['error']['code'] in {'stale_source','stale_context'}:progress.pop('answer',None)
+            result={**progress,**(result or {})}
         changes = self.evidence.committed(identifier)
         if not changes: return result
         result = dict(result or {})

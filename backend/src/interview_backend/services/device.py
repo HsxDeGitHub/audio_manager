@@ -104,12 +104,13 @@ class DeviceService:
     @staticmethod
     def resume_run(c, run_id):
         from interview_backend.services.device_targets import validate
-        rows = c.execute("SELECT * FROM device_commands WHERE run_id=? AND state='cancelled' AND owner IS NULL", (run_id,)).fetchall()
+        rows = c.execute("SELECT * FROM device_commands WHERE run_id=? AND state IN ('cancelled','failed')", (run_id,)).fetchall()
         for row in rows:
             result = json.loads(row['result']) if row['result'] else {}
-            if result.get('reason') not in {'run_cancelled','restart'}: continue
+            if row['state']=='failed' and not result.get('retry_safe'): continue
+            if row['state']=='cancelled' and row['owner'] is None and result.get('reason') not in {'run_cancelled','restart'}: continue
             validate(c, json.loads(row['arguments']))
-            c.execute("UPDATE device_commands SET state='pending',result=NULL,updated_at=? WHERE id=?", (time.time(),row['id']))
+            c.execute("UPDATE device_commands SET state='pending',result=NULL,owner=NULL,updated_at=? WHERE id=?", (time.time(),row['id']))
 
     def operation(self, operation_id, request):
         if not operation_id: return None

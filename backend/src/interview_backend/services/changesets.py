@@ -192,6 +192,7 @@ class ChangePlan:
         self.service, self.operation_id, self.allowed = service, operation_id, allowed
         self.targets = {}
         self.documents = {}
+        self.device_actions = {}
         self.preview = None
 
     def stage(self, targets, allowed=None):
