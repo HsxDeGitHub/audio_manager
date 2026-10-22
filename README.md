@@ -148,7 +148,7 @@ INTERVIEW_ACTUAL_TEST_DIR="$PWD/TestArtifacts" INTERVIEW_PUNCTUATION_MODEL_DIR="
 
 当前使用原生 SwiftUI 应用，通过 `zsh Scripts/package.sh` 重新编译打包；退出并重开 `dist/听阅.app` 即可使用新版。资料库和配置位于应用包外，更新沿用现有数据。目前未接入在线自动更新。
 
-## 助手与本地后端开发（进行中）
+## 助手与本地后端
 
 个人规格、方案、任务和 Agent 开发约定位于本机的 `specs/`、`.specify/` 与 `AGENTS.md`，
 这些文件仅保留本地并由 Git 忽略；仓库克隆不包含它们，也不把规划文件提交至 GitHub。
@@ -159,13 +159,16 @@ INTERVIEW_ACTUAL_TEST_DIR="$PWD/TestArtifacts" INTERVIEW_PUNCTUATION_MODEL_DIR="
 模型工具受消息冻结范围约束；提交后失败可恢复差异与撤销；否定和只读消息不授权写入。
 整理稿来源变化会退出当前证据，分析记忆按来源和资料范围使用，检索设置显示准备进度、失败与关键词回退。
 
-最新自动验证累计通过后端 133 项、Swift 80 项，包含临时合成资料的真实后端联调；沙箱禁止监听导致的失败项
-已在允许本机端口监听的环境单独重跑通过。最新 `.app` 已构建、签名，在隔离合成资料中验证了材料窗口、
-检索状态页和正常退出回收。验证细节见 [VALIDATION.md](VALIDATION.md)。
+2026-10-22，T055 已按用户确认的本轮口径验收通过：后端 142 项、Swift 80 项测试通过；
+真实 `deepseek-flash` 使用合成资料完成20问、批量修改与撤销、周报、长期记忆、材料更新及整理验收。
+另换用22分45秒录音完成本地处理和回听，原文件未改变，真实录音与转写未向模型发送。
+原生窗口验证了迁移后的阅读、旧校对撤销/重做、四种导出及文件取消；MCP 使用真实独立 stdio 进程验收。
+验收发现并修复提交后引用新版本、重复修改及外部 MCP 退出残留；受控宿主在长任务中强制结束后，
+后端、监督器及工具在2.32秒内全部退出。验证细节见 [VALIDATION.md](VALIDATION.md)。
 
-此前真实录音及 `deepseek-flash` 的转写、问答、全部问题、引用和跨会话记忆仅为部分验收；源录音缺少候选人
-麦克风内容。本轮未重新调用真实模型或上传真实录音。完整功能界面场景、完整问答素材、正式资料库升级、
-真实外部 MCP 子进程及无开发环境电脑上的打包验收仍未全部完成，不宣称整体验收通过。
+独立应用在禁止工程、开发工具、系统 Python/uv 和外网的同机受限环境中，通过启动、离线阅读和回听验收。
+这不代表已在另一台干净 Mac 或其他系统版本验证；本轮未操作正式资料库，也未验证语义模型下载后的效果。
+语义能力未准备时明确使用关键词回退，首次语音处理仍需准备对应模型资源。
 
 ```sh
 uv sync --project backend --group dev
@@ -177,7 +180,7 @@ CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-module-cache" SWIFT_MODULECACHE_PATH=
 打包时会下载或复用 Python 3.12，按 `backend/uv.lock` 安装后端与 Agent/MCP 依赖，生成可迁移的
 `Contents/Resources/Backend/python`。默认包含本地语义检索依赖；可用
 `PACKAGE_EMBEDDINGS=0 zsh Scripts/package.sh` 缩减体积。后端运行时和原生扩展由打包脚本签名，
-未验证无开发环境电脑上的完整验收。
+本轮已按确认口径完成同机受限环境验收；另一台物理 Mac 尚未验证。
 
 ```sh
 # MCP stdio 入口只作为本机认证 API 的薄客户端；URL 与令牌由宿主传入。
