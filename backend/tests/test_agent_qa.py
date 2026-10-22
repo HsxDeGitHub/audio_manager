@@ -146,7 +146,7 @@ def test_app_operation_tools_expose_real_status_and_scope_without_keys(client, c
         return client.app.state.device.get(identifier)
     monkeypatch.setattr(client.app.state.device, 'wait', immediate)
     context = ToolContext(request_id='device', allowed_effects=frozenset({'device'}),
-                          frozen_context={'allowed_actions': ['device.locate', 'device.copy'], 'recording_ids': ['r1'], 'resources': [{'resource_type':'recording','resource_id':'r1'}]})
+                          frozen_context=client.app.state.evidence.freeze({'recording_id': 'r1'}, '请定位并复制当前资料'))
     from interview_backend.errors import DomainError
     missing = asyncio.run(client.app.state.tools.execute('device.copy', {'text': '合成文字'}, context))
     assert missing['data']['result']['state'] == 'pending'

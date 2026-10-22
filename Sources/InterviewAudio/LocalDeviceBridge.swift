@@ -30,11 +30,17 @@ struct DeviceCommand: Decodable, Identifiable {
 }
 
 private struct DeviceCommandPage: Decodable { let items: [DeviceCommand] }
-private struct DeviceAcknowledgment: Decodable { let id: String; let state: String? }
+struct DeviceAcknowledgment: Decodable { let id: String; let state: String? }
 
 private enum DeviceBridgeError: Error {
     case cancelled
     case failed(String)
+}
+
+extension BackendClient {
+    func validateDeviceCommand(_ id: String) async throws {
+        let _: DeviceAcknowledgment = try await send("/api/v1/device/commands/\(id)/validate")
+    }
 }
 
 extension BackendJSONValue {
@@ -103,6 +109,7 @@ final class DeviceBridge {
     private func execute(_ command: DeviceCommand) async -> (String, [String: Any]?) {
         guard let app else { return ("failed", ["message": "应用界面不可用。"]) }
         do {
+            try await client.validateDeviceCommand(command.id)
             switch command.kind {
             case "locate":
                 guard let recordingID = command.arguments["recording_id"]?.stringValue else {
@@ -155,6 +162,7 @@ final class DeviceBridge {
                       let mode = AIOrganizationMode(rawValue: rawMode) else { return ("failed", ["message": "整理参数不正确。"]) }
                 if app.aiActiveDraftID != nil { return ("failed", ["message": "已有整理任务在进行。"]) }
                 await app.select(recordingID)
+                if let runID = command.arguments["run_id"]?.stringValue, app.selected?.activeRun != runID { app.switchRun(runID) }
                 let instructions = command.arguments["instructions"]?.stringValue ?? ""
                 app.startAI(mode: mode, instructions: instructions)
                 return ("completed", ["state": "started", "recording_id": recordingID,
@@ -235,6 +243,7 @@ final class DeviceBridge {
             guard let url = await chooseSaveFile(name: suggested ?? "\(parsed.recordingTitle)-\(parsed.mode.title).\(ext)", extension: ext) else {
                 throw DeviceBridgeError.cancelled
             }
+            try await client.validateDeviceCommand(command.id)
             try text.write(to: url, atomically: true, encoding: .utf8)
             return ("completed", ["path": url.path, "name": url.lastPathComponent])
         }
@@ -242,7 +251,7 @@ final class DeviceBridge {
             throw DeviceBridgeError.failed("缺少导出资料标识。")
         }
         let recording = try await client.recording(id: recordingID)
-        let runID = command.arguments["run_id"]?.stringValue ?? recording.activeRun
+        let runID = command.arguments["run_id"]?.stringValue
         guard let runID else { throw DeviceBridgeError.failed("当前资料没有可导出的转写。") }
         let segments = try await allSegments(runID: runID)
         let names = Dictionary(uniqueKeysWithValues: try await allSpeakers(runID: runID).map { ($0.speaker, $0.name) })
@@ -254,6 +263,7 @@ final class DeviceBridge {
         guard let url = await chooseSaveFile(name: suggested ?? recording.title, extension: ext) else {
             throw DeviceBridgeError.cancelled
         }
+        try await client.validateDeviceCommand(command.id)
         try text.write(to: url, atomically: true, encoding: .utf8)
         return ("completed", ["path": url.path, "name": url.lastPathComponent])
     }

@@ -64,16 +64,20 @@ class EvidenceService:
             raise DomainError('invalid_scope', '资料范围不正确。', 422)
         with self.database.transaction() as c:
             recordings = [dict(r) for r in c.execute('SELECT * FROM recordings ORDER BY created_at,id')] if context.scope == 'all' else [require(c, 'recordings', context.recording_id)] if context.recording_id else []
-            resources = []; excluded = []; sources = []
+            resources = []; excluded = []; sources = []; device_targets = []
             if context.scope == 'current' and not recordings and not context.document_ids and not importing:
                 return {**context.model_dump(), 'resources': [], 'sources': [], 'excluded': [], 'allow_write': False, 'clarification': '请指定当前资料，或切换为全部资料。'}
             for recording in recordings:
                 resources.append(self.ref(c, 'recording', recording['id']))
                 run_id = context.run_id if context.scope == 'current' and context.run_id else recording['active_run']
                 if not run_id:
+                    from interview_backend.services.device_targets import snapshot
+                    device_targets.append(snapshot(c, recording['id'], None))
                     excluded.append({'id': recording['id'], 'reason': '暂无转写'}); continue
                 if require(c, 'runs', run_id)['recording_id'] != recording['id']:
                     raise DomainError('wrong_scope', '转写版本不属于当前资料。', 409)
+                from interview_backend.services.device_targets import snapshot
+                device_targets.append(snapshot(c, recording['id'], run_id, context.draft_id))
                 rows = c.execute('SELECT * FROM segments WHERE run_id=? ORDER BY start,id', (run_id,)).fetchall()
                 available = {r['id'] for r in rows}
                 if context.segment_ids and context.scope == 'current':
@@ -113,7 +117,7 @@ class EvidenceService:
             return {**context.model_dump(), 'resources': resources, 'write_resources': list(resources), 'sources': sources, 'excluded': excluded, 'allow_write': mutation,
                     'allow_device': device, 'allow_external': external, 'allowed_actions': actions,
                     'allow_document_import': importing,
-                    'instruction': instruction, 'recording_ids': [r['id'] for r in recordings]}
+                    'device_targets': device_targets, 'instruction': instruction, 'recording_ids': [r['id'] for r in recordings]}
 
     @staticmethod
     def ref(c, kind, identifier):
@@ -416,7 +420,10 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
     def device_tool(tool_id, title, description, input_model, kind, argument_builder, target_builder=None, timeout=20):
         async def handler(args, context):
             arguments = argument_builder(args)
-            target = target_builder(args) if target_builder else ''
+            from interview_backend.services.device_targets import prepare
+            with device.database.transaction() as c:
+                arguments = prepare(c, kind, arguments, context.frozen_context)
+            target = arguments.get('recording_id') or (target_builder(args) if target_builder else '')
             if target:
                 scope(context, target)
             return await run_device(kind, target, arguments, context)

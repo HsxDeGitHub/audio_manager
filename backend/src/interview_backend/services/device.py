@@ -82,7 +82,13 @@ class DeviceService:
         self.database = database
 
     def enqueue(self, kind, target, arguments, run_id=None, command_id=None):
+        raw = arguments
         arguments = validate_arguments(kind, arguments)
+        if raw.get('frozen_target'):
+            arguments.update({k: raw[k] for k in ('frozen_target', 'run_id') if k in raw})
+        from interview_backend.services.device_targets import prepare
+        with self.database.transaction() as c:
+            if not arguments.get('frozen_target'): arguments = prepare(c, kind, arguments)
         identifier = command_id or str(uuid.uuid4())
         if not isinstance(identifier, str) or not 1 <= len(identifier) <= 200:
             raise DomainError('invalid_device_command', '设备命令标识不正确。', 422)
@@ -125,9 +131,20 @@ class DeviceService:
                 return _decode(command)
             if command['state'] != 'pending':
                 raise DomainError('command_not_claimable', '设备命令已被领取或已结束。', 409)
+            from interview_backend.services.device_targets import validate
+            validate(c, json.loads(command['arguments']))
             c.execute("UPDATE device_commands SET state='running',owner=?,updated_at=? WHERE id=? AND state='pending'",
                       (owner, time.time(), identifier))
             return _decode(require(c, 'device_commands', identifier))
+
+    def validate(self, identifier):
+        from interview_backend.services.device_targets import validate
+        with self.database.transaction() as c:
+            command = require(c, 'device_commands', identifier)
+            if command['state'] not in {'pending', 'running'}:
+                raise DomainError('command_not_running', '设备命令已结束。', 409)
+            validate(c, json.loads(command['arguments']))
+            return {'id': identifier, 'state': command['state']}
 
     def complete(self, identifier, owner, state, result=None):
         if state not in TERMINAL:

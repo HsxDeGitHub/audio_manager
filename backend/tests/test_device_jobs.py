@@ -58,7 +58,7 @@ def test_device_tool_reports_actual_result_and_pending_is_not_success(client, mo
     device = DeviceService(client.app.state.database)
     context = ToolContext(request_id='device-run', operation_id='device-run:tools',
                           allowed_effects=frozenset({'device'}),
-                          frozen_context={'allowed_actions': ['device.locate', 'device.copy'], 'recording_ids': ['r1'], 'resources': [{'resource_type': 'recording', 'resource_id': 'r1'}]})
+                          frozen_context=client.app.state.evidence.freeze({'recording_id': 'r1'}, '请定位并复制当前资料'))
 
     async def scenario():
         task = asyncio.create_task(client.app.state.tools.execute('device.locate',
@@ -104,3 +104,47 @@ def test_cancelled_file_choice_is_not_success(client):
     device.claim(command['id'], 'synthetic-device')
     value = device.complete(command['id'], 'synthetic-device', 'cancelled', {'message': '用户取消'})
     assert value['state'] == 'cancelled' and value['result']['message'] == '用户取消'
+
+
+def device_context(client, instruction='请导出当前面试'):
+    from interview_backend.tools.registry import ToolContext
+    return ToolContext(request_id='frozen-device', allowed_effects=frozenset({'device'}),
+                       frozen_context=client.app.state.evidence.freeze({'recording_id': 'r1'}, instruction))
+
+
+@pytest.mark.parametrize('arguments', [
+    {'draft_id': 'other', 'run_id': 'run2', 'format': 'md'},
+    {'recording_id': 'r1', 'run_id': 'run2', 'format': 'txt'},
+])
+def test_device_export_rejects_cross_recording_targets(client, arguments):
+    import asyncio
+    with client.app.state.database.transaction(True) as c:
+        c.execute("INSERT INTO ai_drafts VALUES('other','run2',1,'{}')")
+    with pytest.raises(DomainError):
+        asyncio.run(client.app.state.tools.execute('device.export', arguments, device_context(client)))
+    assert client.app.state.device.pending() == []
+
+
+def test_device_freezes_run_and_checks_versions_before_claim(client, monkeypatch):
+    import asyncio
+    from interview_backend.services.common import bump
+    context = device_context(client)
+    async def immediate(identifier, timeout=10): return client.app.state.device.get(identifier)
+    monkeypatch.setattr(client.app.state.device, 'wait', immediate)
+    result = asyncio.run(client.app.state.tools.execute('device.export', {'recording_id': 'r1', 'format': 'txt'}, context))
+    identifier = result['data']['result']['command_id']
+    assert client.app.state.device.get(identifier)['arguments']['run_id'] == 'run1'
+    with client.app.state.database.transaction(True) as c:
+        c.execute("UPDATE recordings SET active_run=NULL WHERE id='r1'")
+    # 切换当前版本不改变消息冻结的版本。
+    assert client.app.state.device.get(identifier)['arguments']['run_id'] == 'run1'
+    with client.app.state.database.transaction(True) as c: bump(c, 'segment', 's1')
+    with pytest.raises(DomainError) as error: client.app.state.device.claim(identifier, 'owner')
+    assert error.value.code == 'stale_device_target'
+
+
+def test_device_locate_rejects_mixed_segment_and_run(client):
+    import asyncio
+    with pytest.raises(DomainError):
+        asyncio.run(client.app.state.tools.execute('device.locate', {'recording_id': 'r1', 'segment_id': 's3'}, device_context(client, '请回听当前面试')))
+    assert client.app.state.device.pending() == []

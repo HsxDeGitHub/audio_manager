@@ -436,6 +436,15 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(item.sources.first?.resourceType == "message" && item.sources.first?.resourceID == "msg1")
     }
 
+    @Test func deviceVersionChangeBlocksExecution() async throws {
+        BackendStubProtocol.respond = { request in
+            #expect(request.url?.path == "/api/v1/device/commands/frozen/validate")
+            return (409, Data(#"{"error":{"code":"stale_device_target","message":"设备目标内容已变化"}}"#.utf8))
+        }
+        let c = try client()
+        await #expect(throws: BackendClientError.self) { try await c.validateDeviceCommand("frozen") }
+    }
+
     @Test func deviceCommandsCarryActualResultsAndCancellation() async throws {
         let expectedToken = token
         BackendStubProtocol.respond = { request in

@@ -246,6 +246,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def device_command(command_id: str):
         return app.state.device.get(command_id)
 
+    @app.get('/api/v1/device/commands/{command_id}/validate')
+    def validate_device_command(command_id: str):
+        return app.state.device.validate(command_id)
+
     @app.post('/api/v1/device/commands/{command_id}/claim')
     def claim_device_command(command_id: str, body: dict):
         return app.state.device.claim(command_id, body.get('owner'))
