@@ -680,3 +680,22 @@ def test_cancel_instruction_cannot_execute_start_tool_even_with_old_frozen_grant
     context=ToolContext(request_id='cancel-scope',allowed_effects=frozenset({'device'}),frozen_context=frozen)
     with pytest.raises(DomainError): asyncio.run(client.app.state.tools.execute(tool,{'recording_id':'r1'},context))
     assert client.app.state.device.pending()==[]
+
+
+def test_document_pre_change_lines_remain_valid_through_preview_commit_and_history(client,config):
+    document=client.app.state.documents.import_text('合成行号','txt','第一行\n第二行','line-doc')
+    identifier=document['id']
+    class LineModel(FakeModel):
+        step=0
+        async def ainvoke(self,messages):
+            self.step+=1
+            if self.step==1:
+                return AIMessage(content='',tool_calls=[{'name':'documents__update','id':'lines','args':{'document_id':identifier,'expected_revision':1,'fields':{'content':'新版一行'}}}])
+            return AIMessage(content=json.dumps({'answer':'已引用旧版第二行。','claims':[{'kind':'original_statement','text':'第二行','sources':[{'resource_type':'document','resource_id':identifier,'revision':1,'line':2}]}]}))
+    context=client.app.state.evidence.freeze({'document_ids':[identifier]},'请修改材料为一行')
+    result=asyncio.run(AgentEngine(config,client.app.state.tools,client.app.state.evidence).execute('versioned-lines',context['instruction'],context,model=LineModel()))
+    ref=result['claims'][0]['sources'][0]
+    assert ref['historical'] and ref['line']==2
+    historical=client.get(f'/api/v1/sources/document/{identifier}?revision=1&line=2&historical=true').json()
+    assert historical['line_text']=='第二行'
+    assert client.get(f'/api/v1/sources/document/{identifier}?revision=2&line=2').status_code==422

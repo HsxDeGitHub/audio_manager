@@ -14,6 +14,25 @@ def location(c, kind, row):
             'segment_id':row['id'] if kind=='segment' else None,'start':row.get('start'),'end':row.get('end')}
 
 
+def snapshot(c,kind,identifier,revision,changes=()):
+    def find(values):
+        for item in values:
+            if (item['resource_type'],item['resource_id'])!=(kind,identifier):continue
+            for side in ['after','before']:
+                if item[side+'_revision']==revision:return item[side],item.get('source_location',{})
+        return None
+    for change in changes:
+        found=find(change.get('items',[]))
+        if found:return found
+    if version(c,kind,identifier)==revision:
+        try:return read_object(c,kind,identifier),{}
+        except (DomainError,ValueError,KeyError,TypeError):pass
+    for change in c.execute('SELECT items FROM changesets ORDER BY created_at DESC,id DESC'):
+        found=find(json.loads(change[0]))
+        if found:return found
+    raise DomainError('historical_source_unavailable','未保留该版本的来源快照，无法打开历史内容。',409)
+
+
 def resolve(c, kind, identifier, revision, historical=False, line=1, block_id=None):
     ref={'resource_type':kind,'resource_id':identifier,'revision':revision}
     row=None; origin={}
@@ -21,18 +40,7 @@ def resolve(c, kind, identifier, revision, historical=False, line=1, block_id=No
         if not source_valid(c,ref): raise DomainError('stale_source','来源已变化或移除，不能作为当前证据。',409)
         row=read_object(c,kind,identifier)
     else:
-        for change in c.execute('SELECT items FROM changesets ORDER BY created_at DESC,id DESC'):
-            for item in json.loads(change[0]):
-                if (item['resource_type'],item['resource_id']) != (kind,identifier): continue
-                for side in ['after','before']:
-                    if item[side+'_revision']==revision:
-                        row=item[side]; origin=item.get('source_location',{}); break
-                if row: break
-            if row: break
-        if row is None and version(c,kind,identifier)==revision:
-            try: row=read_object(c,kind,identifier)
-            except (DomainError,ValueError,KeyError,TypeError): pass
-        if row is None: raise DomainError('historical_source_unavailable','未保留该版本的来源快照，无法打开历史内容。',409)
+        row,origin=snapshot(c,kind,identifier,revision)
     text=row.get('content',row.get('edited') if row.get('edited') is not None else row.get('original',''))
     result={**ref,'text':text,'historical':historical,**location(c,kind,row),**origin}
     if historical: result['message']='历史来源，仅供回看，不代表当前有效证据。'

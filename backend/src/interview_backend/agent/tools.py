@@ -172,8 +172,9 @@ class EvidenceService:
                 if not self.valid(ref) and not any(change['state'] == 'planned' and any(item['resource_type'] == ref['resource_type'] and item['resource_id'] == ref['resource_id'] and item['after_revision'] == ref['revision'] for item in change['items']) for change in changes): ref['historical'] = True
                 if ref['resource_type'] == 'document':
                     with self.database.transaction() as c:
-                        preview = next((item['after'] for change in changes if change['state'] == 'planned' for item in change['items'] if item['resource_type'] == 'document' and item['resource_id'] == ref['resource_id']), None)
-                        lines = (preview or require(c, 'documents', ref['resource_id']))['content'].split('\n')
+                        from interview_backend.services.sources import snapshot
+                        row,_=snapshot(c,'document',ref['resource_id'],ref['revision'],changes)
+                        lines=row['content'].split('\n')
                     if type(ref.get('line', 1)) is not int or not 1 <= ref.get('line', 1) <= len(lines):
                         raise DomainError('invalid_line', '引用行超出材料范围。', 422)
                     ref.setdefault('line', 1)
