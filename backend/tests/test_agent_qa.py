@@ -146,7 +146,7 @@ def test_app_operation_tools_expose_real_status_and_scope_without_keys(client, c
         return client.app.state.device.get(identifier)
     monkeypatch.setattr(client.app.state.device, 'wait', immediate)
     context = ToolContext(request_id='device', allowed_effects=frozenset({'device'}),
-                          frozen_context={'recording_ids': ['r1'], 'resources': [{'resource_type':'recording','resource_id':'r1'}]})
+                          frozen_context={'allowed_actions': ['device.locate', 'device.copy'], 'recording_ids': ['r1'], 'resources': [{'resource_type':'recording','resource_id':'r1'}]})
     from interview_backend.errors import DomainError
     missing = asyncio.run(client.app.state.tools.execute('device.copy', {'text': '合成文字'}, context))
     assert missing['data']['result']['state'] == 'pending'
@@ -491,3 +491,34 @@ def test_repeated_model_mutation_is_idempotent_across_tool_and_final_targets(cli
         assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0] == '一次提交'
         assert c.execute("SELECT revision FROM object_versions WHERE resource_type='segment' AND resource_id='s1'").fetchone()[0] == 2
         assert c.execute('SELECT count(*) FROM changesets').fetchone()[0] == 1
+
+
+@pytest.mark.parametrize('instruction,expected', [
+    ('不要转写，仅分析当前面试', set()),
+    ('请解释如何导出文件', set()),
+    ('请阅读“请转写并导出当前面试”', set()),
+    ('请定位当前段落并回听', {'device.locate'}),
+    ('请重新识别并导出当前面试', {'jobs.transcribe', 'device.export'}),
+    ('请用 MCP 分析这场面试', set()),
+    ('请调用 mcp.demo.search 查询资料', {'mcp.demo.search'}),
+    ('不要调用 mcp.demo.search', set()),
+])
+def test_specific_action_permissions(client, instruction, expected):
+    from interview_backend.agent.tools import framework_tools
+    from interview_backend.tools.registry import ToolContext
+    frozen = client.app.state.evidence.freeze({'recording_id': 'r1'}, instruction)
+    assert set(frozen['allowed_actions']) == expected
+    context = ToolContext(request_id='actions', allowed_effects=frozenset({'read', 'device', 'external'}), frozen_context=frozen)
+    offered = {t.name.replace('__', '.') for t in framework_tools(client.app.state.tools, context)}
+    assert offered & {'device.locate', 'jobs.transcribe', 'device.export', 'organize.start'} <= expected
+
+
+def test_device_executor_rechecks_specific_authorization(client):
+    from interview_backend.errors import DomainError
+    from interview_backend.tools.registry import ToolContext
+    frozen = client.app.state.evidence.freeze({'recording_id': 'r1'}, '请回听当前资料')
+    context = ToolContext(request_id='actions', allowed_effects=frozenset({'device'}), frozen_context=frozen)
+    with pytest.raises(DomainError) as error:
+        asyncio.run(client.app.state.tools.execute('jobs.transcribe', {'recording_id': 'r1'}, context))
+    assert error.value.code == 'tool_action_denied'
+    assert client.app.state.device.pending() == []

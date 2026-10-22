@@ -86,6 +86,8 @@ class ToolRegistry:
             raise DomainError('tool_disabled', '指定工具已停用。', 409)
         if spec.effect not in context.allowed_effects:
             raise DomainError('tool_effect_denied', '当前指令上下文不允许此类操作。', 403)
+        if context.frozen_context is not None and spec.effect in {'device', 'external'} and tool_id not in context.frozen_context.get('allowed_actions', []):
+            raise DomainError('tool_action_denied', '本次消息未明确授权此项具体操作。', 403)
         if spec.effect == 'write' and not context.operation_id:
             raise DomainError('operation_id_required', '内容修改需要稳定的操作标识。', 422)
         try:

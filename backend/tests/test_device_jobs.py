@@ -58,7 +58,7 @@ def test_device_tool_reports_actual_result_and_pending_is_not_success(client, mo
     device = DeviceService(client.app.state.database)
     context = ToolContext(request_id='device-run', operation_id='device-run:tools',
                           allowed_effects=frozenset({'device'}),
-                          frozen_context={'recording_ids': ['r1'], 'resources': [{'resource_type': 'recording', 'resource_id': 'r1'}]})
+                          frozen_context={'allowed_actions': ['device.locate', 'device.copy'], 'recording_ids': ['r1'], 'resources': [{'resource_type': 'recording', 'resource_id': 'r1'}]})
 
     async def scenario():
         task = asyncio.create_task(client.app.state.tools.execute('device.locate',
