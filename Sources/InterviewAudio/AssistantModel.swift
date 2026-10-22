@@ -81,8 +81,8 @@ final class AssistantModel: ObservableObject {
             input = ""; quotedIDs = []; try await loadHistory(); follow(result.id, model: model)
         } catch { self.error = error.localizedDescription }
     }
-    func follow(_ id: String, model: AppModel) {
-        listener?.cancel(); activeRun = id; progress = "正在运行…"
+    func follow(_ id: String, model: AppModel, resuming: Bool = false) {
+        listener?.cancel(); activeRun = id; progress = resuming ? "正在恢复剩余步骤，已完成操作将复用回执…" : "正在运行…"
         listener = Task {
             defer { activeRun = nil; progress = "" }
             do {
@@ -104,7 +104,7 @@ final class AssistantModel: ObservableObject {
     }
     func resume(_ id: String, model: AppModel) async {
         guard let client else { return }
-        do { error = nil; let _: AssistantAcknowledgment = try await client.send("/api/v1/agent/runs/\(id)/resume", method: "POST"); follow(id, model: model) }
+        do { error = nil; let _: AssistantAcknowledgment = try await client.send("/api/v1/agent/runs/\(id)/resume", method: "POST"); follow(id, model: model, resuming: true) }
         catch { self.error = error.localizedDescription }
     }
     func revert(_ id: String, model: AppModel) async {

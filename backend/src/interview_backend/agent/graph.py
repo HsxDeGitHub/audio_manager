@@ -63,6 +63,8 @@ class AgentEngine:
             return value
 
     async def _answer(self, run_id, instruction, context, model, emit, change_plan=None):
+        from interview_backend.agent.work import WorkLog
+        work = WorkLog(self.evidence.database, run_id)
         run_id = context.get('root_run_id', run_id)
         from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
         from interview_backend.agent.tools import framework_tools
@@ -131,8 +133,9 @@ class AgentEngine:
                       'allow_write': context.get('allow_write', False), 'chunk': i+1, 'chunks': len(chunks)}
             try:
                 messages = [SystemMessage(content=SYSTEM), HumanMessage(content=encode(prompt))]
-                response = await bound.ainvoke(messages)
-                for _ in range(8):
+                model_key = f'chunk:{i}:model:0'
+                response = await work.model(model_key, bound, messages)
+                for turn in range(8):
                     if not response.tool_calls: break
                     messages.append(response)
                     for call in response.tool_calls:
@@ -144,7 +147,22 @@ class AgentEngine:
                         call_context = replace(read_context, operation_id=f'{run_id}:tool:{digest}', resource_scope=plan.allowed)
                         # 模型只看到同源 Schema；执行仍经过统一执行器，保留参数及业务错误。
                         tool_id = next(t.tool_id for t in self.registry._tools.values() if t.framework_name == call['name'])
-                        output = (await self.registry.execute(tool_id, call['args'], call_context))['data']
+                        step_key = f'chunk:{i}:tool:{turn}:{digest}'
+                        cached = work.get(step_key)
+                        effect = self.registry._tools[tool_id].effect
+                        if cached is not None and (effect != 'write' or self.evidence.committed(run_id)):
+                            output = cached
+                            if effect == 'device' and cached.get('result', {}).get('command_id'):
+                                command = self.evidence.database
+                                from interview_backend.services.device import DeviceService
+                                current = DeviceService(command).get(cached['result']['command_id'])
+                                output = {'result': {**cached['result'], 'state': current['state'], 'result': current['result']}}
+                        else:
+                            if effect == 'external' and work.get(step_key + ':started'):
+                                raise DomainError('external_result_unknown', '外部工具结果未知，不能自动重复执行。', 409)
+                            if effect == 'external': work.save(step_key + ':started', {'state': 'started'})
+                            output = (await self.registry.execute(tool_id, call['args'], call_context))['data']
+                            work.save(step_key, output)
                         if call['name'] == 'documents__import':
                             doc = output['result']
                             reference = {'resource_type': 'document', 'resource_id': doc['id'], 'revision': doc['revision']}
@@ -155,7 +173,8 @@ class AgentEngine:
                                 if change['id'] == call_context.operation_id: await emit('changeset', change)
                         messages.append(ToolMessage(content=encode(output), tool_call_id=call['id']))
                         if emit: await emit('tool_end', {'tool': call['name']})
-                    response = await bound.ainvoke(messages)
+                    model_key = f'chunk:{i}:model:{turn+1}'
+                    response = await work.model(model_key, bound, messages)
                 if response.tool_calls: raise ValueError()
                 content = response.content if isinstance(response.content, str) else ''.join(b.get('text', '') for b in response.content if isinstance(b, dict))
                 content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content.strip())
@@ -166,6 +185,7 @@ class AgentEngine:
             except DomainError:
                 raise
             except Exception:
+                work.discard(model_key)
                 raise DomainError('model_failed', '模型调用失败或结果结构不合法；已完成业务操作可从运行记录恢复。', 503) from None
             if result.get('clarification'):
                 return {'answer': result['clarification'], 'clarification': result['clarification'], 'claims': [], 'coverage': {'total': len(sources), 'covered': len(covered), 'excluded': context.get('excluded', [])}}
@@ -233,6 +253,7 @@ class AgentEngine:
             result['changeset'] = value['data']['result']
             self.evidence.validate_result(result, context, self.evidence.committed(run_id))
             if emit: await emit('changeset', result['changeset'])
+        work.save('answer', result)
         changes = self.evidence.committed(run_id)
         if changes:
             result['changesets'] = changes

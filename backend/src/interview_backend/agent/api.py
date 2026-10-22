@@ -122,7 +122,11 @@ class AgentAPI:
 
     def current_result(self, c, row):
         result = json.loads(row['result']) if row['result'] else None
-        return self.with_changes(result, row['id'])
+        result = self.with_changes(result, row['id'])
+        last = c.execute("SELECT payload FROM events WHERE run_id=? AND kind='coverage' ORDER BY seq DESC LIMIT 1", (row['id'],)).fetchone()
+        if last and not (result or {}).get('coverage'):
+            result = {**(result or {}), 'coverage': json.loads(last[0])}
+        return result
 
     def get(self, identifier):
         with self.database.transaction() as c:
@@ -145,15 +149,12 @@ class AgentAPI:
             if c.execute("SELECT 1 FROM agent_runs WHERE session_id=? AND id<>? AND state IN ('queued','running')", (run['session_id'], identifier)).fetchone():
                 raise DomainError('session_busy', '此会话仍有运行任务，请先取消或等待。', 409)
             changes = self.evidence.committed(identifier)
-            if changes:
-                result = self.with_changes({'answer': '已恢复此前提交的修改，未重复执行；其余未完成内容请发送新指令。', 'claims': []}, identifier)
-                c.execute("UPDATE agent_runs SET state='completed',result=? WHERE id=?", (encode(result), identifier))
-                self.append_event(c, identifier, 'completed', {'state': 'completed', 'result': result})
-            else:
-                if any(not self.evidence.valid(source) for source in run['context'].get('sources', [])):
-                    raise DomainError('stale_context', '源版本已变化，请发送基于当前资料的新指令。', 409)
-                c.execute("UPDATE agent_runs SET state='queued' WHERE id=?", (identifier,))
-        if changes: return self.get(identifier)
+            sources = list(run['context'].get('sources', []))
+            sources += [r for child in run['context'].get('report_plan', {}).get('contexts', {}).values() for r in child.get('resources', [])]
+            if any(not self.evidence.valid_after_changes(source, changes) for source in sources):
+                raise DomainError('stale_context', '源版本已发生外部变化，请发送基于当前资料的新指令。', 409)
+            c.execute("UPDATE agent_runs SET state='queued' WHERE id=?", (identifier,))
+            self.append_event(c, identifier, 'resuming', {'state': 'queued', 'message': '恢复剩余步骤，已完成操作将复用业务回执。'})
         self.tasks[identifier] = asyncio.create_task(self._execute(identifier))
         return {'id': identifier, 'state': 'queued'}
 

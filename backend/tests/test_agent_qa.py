@@ -321,6 +321,7 @@ def test_committed_tool_change_survives_lost_response_and_restart_state(client, 
         c.execute("UPDATE agent_runs SET state='interrupted',result=NULL WHERE id=?", (identifier,))
     assert len(client.get('/api/v1/agent/runs/' + identifier).json()['result']['changesets']) == 1
     resumed = client.post('/api/v1/agent/runs/' + identifier + '/resume').json()
+    resumed = wait_for_run(client, identifier)
     assert resumed['state'] == 'completed' and resumed['result']['changesets'][0]['count'] == 2
     assert 'event: completed' in client.get('/api/v1/agent/runs/' + identifier + '/events').text
 
@@ -576,3 +577,50 @@ def test_import_and_content_changes_share_atomic_commit(client, config, fail):
         assert len(client.get('/api/v1/documents').json()['items']) == 1
         client.app.state.changesets.revert(result['changeset']['id'], 'undo-import-batch')
         assert client.get('/api/v1/documents').json()['items'] == []
+
+
+@pytest.mark.parametrize('interruption', ['failure', 'cancel', 'restart'])
+def test_resume_completes_remaining_model_step_without_replaying_completed_device(client, monkeypatch, interruption):
+    import time
+    from interview_backend.agent.models import ModelSettings
+    from interview_backend.agent.api import AgentAPI
+    class Model(FakeModel):
+        step = 0
+        ready = False
+        async def ainvoke(self, messages):
+            self.step += 1
+            if self.step == 1:
+                return AIMessage(content='', tool_calls=[{'name':'device__locate','id':'first','args':{'recording_id':'r1','segment_id':'s1'}}])
+            if not self.ready:
+                if interruption == 'failure': raise RuntimeError('second step failed')
+                await asyncio.sleep(30)
+            return await super().ainvoke(messages)
+    model = Model()
+    class Settings:
+        def client(self): return model
+    monkeypatch.setattr(ModelSettings,'load',classmethod(lambda cls,path:Settings()))
+    device = client.app.state.device
+    async def complete(identifier, timeout=10):
+        device.claim(identifier,'synthetic'); return device.complete(identifier,'synthetic','completed',{'position':1})
+    monkeypatch.setattr(device,'wait',complete)
+    session = client.post('/api/v1/sessions',json={}).json()['id']
+    identifier = client.post('/api/v1/agent/runs',json={'session_id':session,'instruction':'请回听当前面试并分析回答','context':{'recording_id':'r1'}}).json()['id']
+    if interruption=='failure': assert wait_for_run(client,identifier)['state']=='failed'
+    else:
+        for _ in range(200):
+            if model.step >= 2: break
+            time.sleep(.005)
+        client.post('/api/v1/agent/runs/'+identifier+'/cancel')
+        wait_for_run(client,identifier)
+        if interruption=='restart':
+            old = client.app.state.agent
+            client.app.state.agent = AgentAPI(old.database, old.engine, old.evidence)
+            with old.database.transaction(True) as c: c.execute("UPDATE agent_runs SET state='interrupted',result=NULL WHERE id=?",(identifier,))
+    model.ready=True
+    assert client.post('/api/v1/agent/runs/'+identifier+'/resume').status_code==200
+    run=wait_for_run(client,identifier)
+    assert run['state']=='completed' and run['result']['answer']
+    assert model.step==3
+    with client.app.state.database.transaction() as c:
+        assert c.execute('SELECT count(*) FROM device_commands').fetchone()[0]==1
+    assert client.post('/api/v1/agent/runs/'+identifier+'/resume').status_code==409
