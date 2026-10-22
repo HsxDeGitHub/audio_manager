@@ -145,6 +145,13 @@ class EvidenceService:
     def valid_after_changes(self, reference, changes):
         if self.valid(reference): return True
         from interview_backend.services.changesets import read_object
+        for change in changes:
+            if change['state'] != 'planned': continue
+            for item in change['items']:
+                if (item['resource_type'], item['resource_id'], item['after_revision']) == (reference['resource_type'], reference['resource_id'], reference['revision']):
+                    with self.database.transaction() as c:
+                        if item['resource_type'] == 'document' and item['resource_id'] in change.get('new_document_ids', []) and not c.execute('SELECT 1 FROM documents WHERE id=?', (item['resource_id'],)).fetchone(): return True
+                        if version(c, item['resource_type'], item['resource_id']) == item['before_revision'] and read_object(c, item['resource_type'], item['resource_id']) == item['before']: return True
         key = (reference['resource_type'], reference['resource_id'])
         items = [item for change in changes if change['state'] == 'committed' for item in change['items']
                  if (item['resource_type'], item['resource_id']) == key]
@@ -173,7 +180,7 @@ class EvidenceService:
         frozen_keys = {(kind, identifier) for kind, identifier, _ in allowed}
         # 工具可能返回本次提交后的来源版本；只扩充引用版本，不扩大写入对象范围。
         allowed.update((item['resource_type'], item['resource_id'], item['after_revision'])
-                       for change in changes if change['state'] == 'committed' for item in change['items']
+                       for change in changes if change['state'] in {'committed', 'planned'} for item in change['items']
                        if (item['resource_type'], item['resource_id']) in frozen_keys)
         for claim in result.get('claims', []):
             if claim.get('kind') not in {'original_statement', 'user_statement', 'analysis', 'suggestion', 'insufficient_evidence'}:
@@ -190,10 +197,11 @@ class EvidenceService:
                     raise DomainError('identity_unconfirmed', '未确认的说话人不能作为用户经历来源。', 409)
                 if (ref['resource_type'], ref['resource_id'], ref['revision']) not in allowed or not self.valid_after_changes(ref, changes):
                     raise DomainError('stale_source', '引用来源已变化或超出范围，请重新运行。', 409)
-                if not self.valid(ref): ref['historical'] = True
+                if not self.valid(ref) and not any(change['state'] == 'planned' and any(item['resource_type'] == ref['resource_type'] and item['resource_id'] == ref['resource_id'] and item['after_revision'] == ref['revision'] for item in change['items']) for change in changes): ref['historical'] = True
                 if ref['resource_type'] == 'document':
                     with self.database.transaction() as c:
-                        lines = require(c, 'documents', ref['resource_id'])['content'].split('\n')
+                        preview = next((item['after'] for change in changes if change['state'] == 'planned' for item in change['items'] if item['resource_type'] == 'document' and item['resource_id'] == ref['resource_id']), None)
+                        lines = (preview or require(c, 'documents', ref['resource_id']))['content'].split('\n')
                     if type(ref.get('line', 1)) is not int or not 1 <= ref.get('line', 1) <= len(lines):
                         raise DomainError('invalid_line', '引用行超出材料范围。', 422)
                     ref.setdefault('line', 1)
@@ -236,7 +244,7 @@ def install_agent_tools(registry, changesets):
                                context.frozen_context.get('write_resources', context.frozen_context.get('resources', [])))
             allowed = frozen if allowed is None else frozen & allowed
         return {'result': changesets.submit({'operation_id': context.operation_id,
-                    'targets': [t.model_dump() for t in args.targets]}, allowed)}
+                    'targets': [t.model_dump() for t in args.targets], 'new_documents': list(context.prepared_documents)}, allowed, context.change_plan)}
     registry.register(ToolSpec(tool_id='changesets.apply', version='1.0', title='提交范围内修改',
         description='一次事务提交用户明确授权的全部目标，校验预期版本并记录差异和撤销。',
         input_model=ApplyArguments, output_model=ResultEnvelope, effect='write',
@@ -263,6 +271,8 @@ def install_agent_tools(registry, changesets):
     def import_document(args, context):
         if context.frozen_context is not None and not context.frozen_context.get('allow_document_import'):
             raise DomainError('write_not_authorized', '本次消息未授权导入材料。', 403)
+        if context.change_plan is not None:
+            return {'result': context.change_plan.import_document(args.title, args.format, args.content)}
         return {'result': documents.import_text(args.title, args.format, args.content, context.operation_id)}
     def update_document(args, context):
         target = ChangeTarget(resource_type='document', resource_id=args.document_id,
@@ -364,7 +374,7 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
             raise DomainError('invalid_fields', '没有需要修改的资料信息。', 422)
         return {'result': changesets.submit({'operation_id': context.operation_id, 'targets': [
             {'resource_type': 'recording', 'resource_id': args.recording_id,
-             'expected_revision': args.expected_revision, 'fields': fields}]}, context.resource_scope)}
+             'expected_revision': args.expected_revision, 'fields': fields}]}, context.resource_scope, context.change_plan)}
 
     def rename_speaker(args, context):
         if context.frozen_context is not None:
@@ -373,7 +383,7 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
                 raise DomainError('scope_denied', '说话人不在当前资料范围。', 403)
         return {'result': changesets.submit({'operation_id': context.operation_id, 'targets': [
             {'resource_type': 'speaker', 'resource_id': f'{args.run_id}:{args.speaker}',
-             'expected_revision': args.expected_revision, 'fields': {'name': args.name}}]}, context.resource_scope)}
+             'expected_revision': args.expected_revision, 'fields': {'name': args.name}}]}, context.resource_scope, context.change_plan)}
 
     async def run_device(kind, target, arguments, context):
         digest = hashlib.sha256(encode({'kind': kind, 'target': target, 'arguments': arguments}).encode()).hexdigest()[:16]

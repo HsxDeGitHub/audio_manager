@@ -17,9 +17,18 @@ class ChangeTarget(BaseModel):
     fields: dict = Field(min_length=1)
 
 
+class NewDocument(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    format: Literal['txt', 'md']
+    content: str = Field(min_length=1)
+
+
 class ChangeRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     operation_id: str = Field(min_length=1, max_length=200)
+    new_documents: list[NewDocument] = Field(default_factory=list)
     targets: list[ChangeTarget] = Field(min_length=1, max_length=10000)
 
 
@@ -103,15 +112,24 @@ class ChangeSetService:
     def __init__(self, database):
         self.database = database
 
-    def submit(self, request, allowed=None):
+    def submit(self, request, allowed=None, plan=None):
+        if plan is not None: return plan.stage(request['targets'], allowed)
         try:
             model = ChangeRequest.model_validate(request)
         except ValidationError:
             raise DomainError('invalid_request', '修改请求格式不正确。', 422) from None
         with self.database.transaction(True) as c:
-            return once(c, model.operation_id, model.model_dump(), lambda: self._apply(c, model, allowed))
+            return once(c, model.operation_id, model.model_dump(exclude={'new_documents'} if not model.new_documents else set()), lambda: self._apply(c, model, allowed))
 
     def _apply(self, c, request, allowed):
+        if any(not any(t.resource_type == 'document' and t.resource_id == d.id and t.fields.get('removed') is False for t in request.targets) for d in request.new_documents):
+            raise DomainError('invalid_request', '新材料必须包含对应的可撤销导入目标。', 422)
+        for document in request.new_documents:
+            import hashlib
+            if allowed is not None and ('document', document.id) not in allowed:
+                raise DomainError('scope_denied', '导入目标未经授权。', 403)
+            c.execute('INSERT INTO documents VALUES(?,?,?,?,?,?,1,1)', (document.id, document.title, document.format,
+                      document.content, document.content, hashlib.sha256(document.content.encode()).hexdigest()))
         seen = set(); items = []
         for target in request.targets:
             key = (target.resource_type, target.resource_id)
@@ -159,3 +177,48 @@ class ChangeSetService:
                 c.execute("UPDATE changesets SET state='reverted',reverted_by=? WHERE id=?", (operation_id, changeset_id))
                 return {'id': changeset_id, 'state': 'reverted', 'count': len(items)}
             return once(c, operation_id, {'revert': changeset_id}, execute)
+
+
+class ChangePlan:
+    """收集一条指令内的建议。预检使用短事务并回滚，绝不跨模型调用持锁。"""
+    def __init__(self, service, operation_id, allowed):
+        self.service, self.operation_id, self.allowed = service, operation_id, allowed
+        self.targets = {}
+        self.documents = {}
+        self.preview = None
+
+    def stage(self, targets, allowed=None):
+        candidate = {key: {**value, 'fields': dict(value['fields'])} for key, value in self.targets.items()}
+        try: values = [ChangeTarget.model_validate(t).model_dump() for t in targets]
+        except ValidationError: raise DomainError('invalid_tool_arguments', '工具参数不合法。', 422) from None
+        for target in values:
+            key = (target['resource_type'], target['resource_id'])
+            if (self.allowed is not None and key not in self.allowed) or (allowed is not None and key not in allowed):
+                raise DomainError('scope_denied', '修改超出用户指定范围。', 403)
+            prior = candidate.get(key)
+            if prior:
+                if prior['expected_revision'] != target['expected_revision'] or any(k in prior['fields'] and prior['fields'][k] != v for k, v in target['fields'].items()):
+                    raise DomainError('ambiguous_change', '同一对象的修改建议存在矛盾，整次修改未提交。', 409)
+                prior['fields'].update(target['fields'])
+            else: candidate[key] = target
+        request = ChangeRequest(operation_id=self.operation_id, targets=list(candidate.values()), new_documents=list(self.documents.values()))
+        with self.service.database.transaction(True) as c:
+            c.execute('SAVEPOINT preview_changes')
+            try: preview = self.service._apply(c, request, self.allowed)
+            finally:
+                c.execute('ROLLBACK TO preview_changes'); c.execute('RELEASE preview_changes')
+        self.targets = candidate
+        self.preview = {**preview, 'state': 'planned', 'new_document_ids': list(self.documents)}
+        return self.preview
+
+    def import_document(self, title, format, content):
+        import hashlib, uuid
+        digest = hashlib.sha256(content.encode()).hexdigest()
+        with self.service.database.transaction() as c:
+            row = c.execute('SELECT * FROM documents WHERE digest=? AND removed=0', (digest,)).fetchone()
+            if row: return {**dict(row), 'duplicate': True}
+        identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, self.operation_id + ':' + digest))
+        self.documents[identifier] = {'id': identifier, 'title': title, 'format': format, 'content': content}
+        if self.allowed is not None: self.allowed = self.allowed | {('document', identifier)}
+        self.stage([{'resource_type': 'document', 'resource_id': identifier, 'expected_revision': 1, 'fields': {'removed': False}}])
+        return {**self.documents[identifier], 'revision': 2, 'duplicate': False, 'state': 'planned'}

@@ -16,6 +16,8 @@ class ToolContext:
     operation_id: str | None = None
     resource_scope: frozenset[tuple[str, str]] | None = None
     frozen_context: dict | None = None
+    change_plan: object | None = None
+    prepared_documents: tuple = ()
 
 
 @dataclass(frozen=True)

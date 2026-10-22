@@ -23,7 +23,7 @@ SYSTEM = '''你是听阅应用助手。用户指令决定范围。资料、工�
 有歧义时输出 clarification 字符串且不输出 targets。明确要求修改时可输出 targets 数组：resource_type、resource_id、expected_revision、fields。
 目标和版本必须来自范围清单；不修改 original、音频时间、整理稿来源。没有明确修改指令时禁止输出 targets。
 修改只会在全部块分析完成后共同提交，不能宣称尚未提交的操作已经完成。
-工具已经提交的目标无需再放入 targets，也不要重复调用同一修改。
+写工具只登记 planned 修改建议；全部分析完成后统一提交。不要宣称 planned 已完成。
 用户明确要求定位、回听、导出、复制、选择文件、转写、取消或整理时，可调用对应的设备工具；
 待处理、运行中、取消、失败或结果未知都必须如实报告，不能写成已完成。
 用户要求列出全部问题时，除 answer 外输出 questions 数组；每项含 text 和 source（resource_type、
@@ -70,8 +70,11 @@ class AgentEngine:
         if context.get('allow_write'): effects.add('write')
         if context.get('allow_device'): effects.add('device')
         if context.get('allow_external'): effects.add('external')
+        from interview_backend.services.changesets import ChangePlan, ChangeSetService
+        plan = context.get('_change_plan') or ChangePlan(ChangeSetService(self.evidence.database), run_id + ':changes',
+                    frozenset((r['resource_type'], r['resource_id']) for r in context.get('write_resources', context['resources'])))
         read_context = ToolContext(request_id=run_id, allowed_effects=frozenset(effects),
-                                   operation_id=run_id + ':tools', frozen_context=context,
+                                   operation_id=run_id + ':tools', frozen_context=context, change_plan=plan,
                                    resource_scope=frozenset((r['resource_type'], r['resource_id'])
                                                             for r in context.get('write_resources', context['resources'])))
         tools = framework_tools(self.registry, read_context)
@@ -137,13 +140,15 @@ class AgentEngine:
                             raise DomainError('tool_not_allowed', '该工具在当前用户消息范围内不可用。', 403)
                         if emit: await emit('tool_start', {'tool': call['name']})
                         digest = hashlib.sha256(encode({'tool': call['name'], 'arguments': call['args']}).encode()).hexdigest()[:24]
-                        call_context = replace(read_context, operation_id=f'{run_id}:tool:{digest}')
+                        call_context = replace(read_context, operation_id=f'{run_id}:tool:{digest}', resource_scope=plan.allowed)
                         # 模型只看到同源 Schema；执行仍经过统一执行器，保留参数及业务错误。
                         tool_id = next(t.tool_id for t in self.registry._tools.values() if t.framework_name == call['name'])
                         output = (await self.registry.execute(tool_id, call['args'], call_context))['data']
                         if call['name'] == 'documents__import':
                             doc = output['result']
-                            context['resources'].append({'resource_type': 'document', 'resource_id': doc['id'], 'revision': doc['revision']})
+                            reference = {'resource_type': 'document', 'resource_id': doc['id'], 'revision': doc['revision']}
+                            context['resources'].append(reference)
+                            context.setdefault('write_resources', []).append(reference)
                         if emit:
                             for change in self.evidence.committed(run_id):
                                 if change['id'] == call_context.operation_id: await emit('changeset', change)
@@ -163,7 +168,7 @@ class AgentEngine:
                 raise DomainError('model_failed', '模型调用失败或结果结构不合法；已完成业务操作可从运行记录恢复。', 503) from None
             if result.get('clarification'):
                 return {'answer': result['clarification'], 'clarification': result['clarification'], 'claims': [], 'coverage': {'total': len(sources), 'covered': len(covered), 'excluded': context.get('excluded', [])}}
-            self.evidence.validate_result(result, context, self.evidence.committed(run_id))
+            self.evidence.validate_result(result, context, self.evidence.committed(run_id) + ([plan.preview] if plan.preview else []))
             if result.get('targets') and not context.get('allow_write'):
                 raise DomainError('write_not_authorized', '当前用户消息未授权内容修改，未执行模型提出的写入。', 403)
             targets += result.get('targets', [])
@@ -220,22 +225,12 @@ class AgentEngine:
                                  for q in result['questions'] if (re.sub(r'[\W_]+', '', q['text']), q['source']['resource_id']) in deterministic_keys]
         committed = self.evidence.committed(run_id)
         targets = [target for target in targets if not self.evidence.fulfilled(target, committed)]
-        if targets:
-            from interview_backend.tools.registry import ToolContext
-            allowed = read_context.resource_scope
-            # 不同块同一对象的字段合并；互相矛盾的修改拒绝整次请求。
-            merged = {}
-            for target in targets:
-                key = (target['resource_type'], target['resource_id'])
-                if key in merged:
-                    prior = merged[key]
-                    if prior['expected_revision'] != target['expected_revision'] or any(k in prior['fields'] and prior['fields'][k] != v for k,v in target['fields'].items()):
-                        raise DomainError('ambiguous_change', '分块修改建议存在歧义，未提交任何内容。', 409)
-                    prior['fields'].update(target['fields'])
-                else: merged[key] = target
-            call_context = ToolContext(request_id=run_id, operation_id=run_id + ':changes', allowed_effects=frozenset({'write'}), resource_scope=allowed)
-            value = await self.registry.execute('changesets.apply', {'targets': list(merged.values())}, call_context)
+        if targets: plan.stage(targets)
+        if plan.targets and not context.get('defer_changes'):
+            call_context = ToolContext(request_id=run_id, operation_id=plan.operation_id, allowed_effects=frozenset({'write'}), resource_scope=plan.allowed, prepared_documents=tuple(plan.documents.values()))
+            value = await self.registry.execute('changesets.apply', {'targets': list(plan.targets.values())}, call_context)
             result['changeset'] = value['data']['result']
+            self.evidence.validate_result(result, context, self.evidence.committed(run_id))
             if emit: await emit('changeset', result['changeset'])
         changes = self.evidence.committed(run_id)
         if changes:

@@ -281,14 +281,14 @@ def test_tool_changes_survive_generation_failure_and_resume_without_replay(clien
                                                        'context': {'recording_id': 'r1'}}).json()['id']
     run = wait_for_run(client, identifier)
     assert run['state'] == ('failed' if fail else 'completed')
-    assert len(run['result']['changesets']) == 2
-    assert all(change['items'] and change['count'] == 1 for change in run['result']['changesets'])
     if fail:
         assert run['result']['error']['code'] == 'model_failed'
-        before = model.step
-        resumed = client.post('/api/v1/agent/runs/' + identifier + '/resume').json()
-        assert resumed['state'] == 'completed'
-        assert len(resumed['result']['changesets']) == 2 and model.step == before
+        assert not run['result'].get('changesets')
+        with client.app.state.database.transaction() as c:
+            assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0] is None
+        return
+    assert len(run['result']['changesets']) == 1
+    assert run['result']['changesets'][0]['count'] == 2
     for change in reversed(run['result']['changesets']):
         assert client.post('/api/v1/changesets/' + change['id'] + '/revert', json={'operation_id': 'undo-' + change['id']}).status_code == 200
     history = client.get('/api/v1/sessions/' + session).json()
@@ -305,7 +305,8 @@ def test_committed_tool_change_survives_lost_response_and_restart_state(client, 
     registry = client.app.state.tools
     original = registry._tools['changesets.apply']
     def lose_response(args, context):
-        original.handler(args, context)
+        result = original.handler(args, context)
+        if context.change_plan is not None: return result
         raise DomainError('synthetic_lost_response', '合成响应丢失', 503)
     registry._tools['changesets.apply'] = replace(original, handler=lose_response)
     class Settings:
@@ -320,7 +321,7 @@ def test_committed_tool_change_survives_lost_response_and_restart_state(client, 
         c.execute("UPDATE agent_runs SET state='interrupted',result=NULL WHERE id=?", (identifier,))
     assert len(client.get('/api/v1/agent/runs/' + identifier).json()['result']['changesets']) == 1
     resumed = client.post('/api/v1/agent/runs/' + identifier + '/resume').json()
-    assert resumed['state'] == 'completed' and resumed['result']['changesets'][0]['count'] == 1
+    assert resumed['state'] == 'completed' and resumed['result']['changesets'][0]['count'] == 2
     assert 'event: completed' in client.get('/api/v1/agent/runs/' + identifier + '/events').text
 
 
@@ -448,7 +449,7 @@ def test_model_can_cite_its_committed_new_revision_but_not_concurrent_edits(clie
                     {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '本次提交的新正文'}}]}}])
             if external_edit:
                 client.app.state.changesets.submit({'operation_id': 'concurrent-other-run', 'targets': [
-                    {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 2, 'fields': {'text': '并发新正文'}}]})
+                    {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '并发新正文'}}]})
             return AIMessage(content=json.dumps({'answer': '已提交修正。', 'claims': [
                 {'text': '本次提交的新正文', 'kind': 'original_statement', 'sources': [
                     {'resource_type': 'segment', 'resource_id': 's1', 'revision': 3 if external_edit else 2}]}]}))
@@ -483,7 +484,11 @@ def test_repeated_model_mutation_is_idempotent_across_tool_and_final_targets(cli
     if conflicting_final:
         with pytest.raises(DomainError) as failure:
             asyncio.run(engine.execute('repeat-write', context['instruction'], context, model=RepeatingWriter()))
-        assert failure.value.code == 'version_conflict'
+        assert failure.value.code == 'ambiguous_change'
+        with client.app.state.database.transaction() as c:
+            assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0] is None
+            assert c.execute('SELECT count(*) FROM changesets').fetchone()[0] == 0
+        return
     else:
         result = asyncio.run(engine.execute('repeat-write', context['instruction'], context, model=RepeatingWriter()))
         assert len(result['changesets']) == 1 and result['changeset']['count'] == 1
@@ -522,3 +527,52 @@ def test_device_executor_rechecks_specific_authorization(client):
         asyncio.run(client.app.state.tools.execute('jobs.transcribe', {'recording_id': 'r1'}, context))
     assert error.value.code == 'tool_action_denied'
     assert client.app.state.device.pending() == []
+
+
+@pytest.mark.parametrize('second', [
+    {'resource_type': 'segment', 'resource_id': 's2', 'expected_revision': 99, 'fields': {'text': '冲突'}},
+    {'resource_type': 'segment', 'resource_id': 's2', 'expected_revision': 1, 'fields': {'original': '非法'}},
+])
+def test_multiple_tool_proposals_never_partially_commit(client, config, second):
+    from interview_backend.errors import DomainError
+    class BatchModel(FakeModel):
+        step = 0
+        async def ainvoke(self, messages):
+            self.step += 1
+            if self.step <= 2:
+                target = {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '第一项'}} if self.step == 1 else second
+                return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': str(self.step), 'args': {'targets': [target]}}])
+            return await super().ainvoke(messages)
+    frozen = client.app.state.evidence.freeze({'recording_id': 'r1'}, '请批量修正当前资料')
+    with pytest.raises(DomainError):
+        asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('atomic-tools', frozen['instruction'], frozen, model=BatchModel()))
+    with client.app.state.database.transaction() as c:
+        assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0] is None
+        assert c.execute('SELECT count(*) FROM changesets').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_import_and_content_changes_share_atomic_commit(client, config, fail):
+    from interview_backend.errors import DomainError
+    class ImportAndEdit(FakeModel):
+        step = 0
+        async def ainvoke(self, messages):
+            self.step += 1
+            if self.step == 1:
+                return AIMessage(content='', tool_calls=[{'name': 'documents__import', 'id': 'import', 'args': {'title': '新材料', 'format': 'txt', 'content': '合成内容'}}])
+            if self.step == 2:
+                assert client.get('/api/v1/documents').json()['items'] == []
+                return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'edit', 'args': {'targets': [
+                    {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 99 if fail else 1, 'fields': {'text': '改动'}}]}}])
+            return await super().ainvoke(messages)
+    frozen = client.app.state.evidence.freeze({'recording_id': 'r1'}, '请导入材料并修正当前资料')
+    engine = AgentEngine(config, client.app.state.tools, client.app.state.evidence)
+    if fail:
+        with pytest.raises(DomainError): asyncio.run(engine.execute('import-batch', frozen['instruction'], frozen, model=ImportAndEdit()))
+        assert client.get('/api/v1/documents').json()['items'] == []
+    else:
+        result = asyncio.run(engine.execute('import-batch', frozen['instruction'], frozen, model=ImportAndEdit()))
+        assert result['changeset']['count'] == 2
+        assert len(client.get('/api/v1/documents').json()['items']) == 1
+        client.app.state.changesets.revert(result['changeset']['id'], 'undo-import-batch')
+        assert client.get('/api/v1/documents').json()['items'] == []
