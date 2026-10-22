@@ -246,6 +246,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def stop_job(job_id: str, body: dict):
         return app.state.jobs.stop(job_id, body['state'])
 
+    @app.post('/api/v1/device/reconnect')
+    def reconnect_device(body: dict):return app.state.device.reconnect(body.get('owner'))
+
+    @app.post('/api/v1/device/commands/{command_id}/reconcile')
+    def reconcile_device(command_id: str, body: dict):
+        return app.state.device.complete(command_id,body.get('owner'),body.get('state'),body.get('result'),reconcile=True)
+
+    @app.get('/api/v1/device/tasks/{kind}/{identifier}')
+    def device_task(kind: str, identifier: str):
+        from interview_backend.services.device_tasks import task
+        with app.state.database.transaction() as c:return task(c,kind,identifier)
+
     @app.get('/api/v1/device/commands')
     def pending_device_commands():
         return {'items': app.state.device.pending()}

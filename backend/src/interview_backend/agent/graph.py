@@ -129,7 +129,7 @@ class AgentEngine:
                         key = (reference['resource_type'], reference['resource_id'], reference['revision'])
                         if key not in known:
                             context['resources'].append(reference); known.add(key)
-            prompt = {'current_valid_memories': memory, 'instruction': instruction, 'scope': context['resources'], 'untrusted_evidence': chunk,
+            prompt = {'device_tasks':context.get('cancel_tasks',[]), 'current_valid_memories': memory, 'instruction': instruction, 'scope': context['resources'], 'untrusted_evidence': chunk,
                       'allow_write': context.get('allow_write', False), 'chunk': i+1, 'chunks': len(chunks)}
             try:
                 messages = [SystemMessage(content=SYSTEM), HumanMessage(content=encode(prompt))]

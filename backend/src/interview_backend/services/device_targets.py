@@ -17,6 +17,9 @@ def snapshot(c, recording_id, run_id, draft_id=None):
 
 def prepare(c, kind, arguments, context=None):
     args = dict(arguments)
+    if kind=='cancel':
+        from interview_backend.services.device_tasks import prepare_cancel
+        return prepare_cancel(c,args,context)
     if kind not in {'locate', 'export', 'transcribe', 'cancel', 'organize'}: return args
     recording_id, run_id = args.get('recording_id'), args.get('run_id')
     draft_id, segment_id = args.get('draft_id'), args.get('segment_id')
@@ -55,6 +58,11 @@ def validate(c, args):
     frozen = args.get('frozen_target')
     if not frozen: return
     require(c, 'recordings', frozen['recording_id'])
+    if frozen.get('task'):
+        from interview_backend.services.device_tasks import task
+        chosen=frozen['task']; current=task(c,chosen['task_type'],chosen['id'])
+        if current['recording_id']!=frozen['recording_id']: raise DomainError('stale_device_target','取消任务的归属已变化。',409)
+        return
     if frozen.get('run_id') and require(c, 'runs', frozen['run_id'])['recording_id'] != frozen['recording_id']:
         raise DomainError('stale_device_target', '设备目标归属已变化。', 409)
     from interview_backend.services.changesets import read_object

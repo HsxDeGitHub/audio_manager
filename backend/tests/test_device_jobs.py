@@ -96,7 +96,7 @@ def test_restart_never_reports_running_device_command_as_completed(client):
     device.claim(command['id'], 'synthetic-device')
     client.app.state.jobs.recover()
     value = device.get(command['id'])
-    assert value['state'] == 'unknown' and value['owner'] is None
+    assert value['state'] == 'unknown' and value['owner'] == 'synthetic-device'
 
 
 def test_cancelled_file_choice_is_not_success(client):
@@ -217,3 +217,54 @@ def test_native_device_operation_retries_reuse_command_and_validate_request(clie
     body['operation_id']='different-device-operation'
     assert client.post('/api/v1/tools/device.copy/invoke',json=body).status_code==200
     assert len(client.app.state.device.pending())==2
+
+
+def test_cancel_pins_specific_task_and_tolerates_its_progress(client,monkeypatch):
+    import asyncio,json
+    from interview_backend.services.common import bump
+    device=client.app.state.device
+    with client.app.state.database.transaction(True) as c:
+        c.execute("INSERT INTO ai_drafts VALUES('running-draft','run1',2,?)",(json.dumps({'state':'running','chunks':[]}),))
+    ctx=device_context(client,'请取消 AI 整理任务')
+    with client.app.state.database.transaction(True) as c:bump(c,'draft','running-draft')
+    async def immediate(identifier,timeout=10):return device.get(identifier)
+    monkeypatch.setattr(device,'wait',immediate)
+    result=asyncio.run(client.app.state.tools.execute('jobs.cancel',{'recording_id':'r1'},ctx))
+    command=device.get(result['data']['result']['command_id'])
+    assert command['arguments']['task_id']=='running-draft' and command['arguments']['task_type']=='organize'
+    assert device.claim(command['id'],'owner')['state']=='running'
+
+
+def test_cancel_without_active_task_does_not_claim_success(client):
+    import asyncio
+    with pytest.raises(DomainError) as error:
+        asyncio.run(client.app.state.tools.execute('jobs.cancel',{'recording_id':'r1'},device_context(client,'请取消任务')))
+    assert error.value.code=='no_active_task'
+
+
+def test_result_reconciliation_after_restart_does_not_reexecute(client):
+    device=client.app.state.device
+    device.enqueue('clipboard','',{'text':'合成'},command_id='result-before-disconnect')
+    device.claim('result-before-disconnect','stable-owner')
+    client.app.state.jobs.recover()
+    value=client.post('/api/v1/device/commands/result-before-disconnect/reconcile',json={'owner':'stable-owner','state':'completed','result':{'characters':2}})
+    assert value.status_code==200 and value.json()['state']=='completed'
+    assert client.post('/api/v1/device/commands/result-before-disconnect/reconcile',json={'owner':'stable-owner','state':'completed','result':{'characters':2}}).status_code==200
+    assert device.pending()==[]
+    assert client.post('/api/v1/device/commands/result-before-disconnect/reconcile',json={'owner':'stable-owner','state':'unknown','result':{'message':'客户端中断'}}).json()['state']=='completed'
+
+
+def test_new_device_marks_unowned_running_commands_unknown(client):
+    device=client.app.state.device
+    device.enqueue('clipboard','',{'text':'合成'},command_id='owner-lost');device.claim('owner-lost','old-owner')
+    response=client.post('/api/v1/device/reconnect',json={'owner':'new-owner'})
+    assert response.status_code==200
+    assert device.get('owner-lost')['state']=='unknown' and device.pending()==[]
+
+
+def test_ambiguous_cancel_requires_task_choice(client):
+    import json
+    client.app.state.jobs.start({'jobID':'worker','recordingID':'r1','runID':'next'},state='queued')
+    with client.app.state.database.transaction(True) as c:c.execute("INSERT INTO ai_drafts VALUES('active-ai','run1',2,?)",(json.dumps({'state':'running'}),))
+    assert client.app.state.evidence.freeze({'recording_id':'r1'},'请取消任务')['clarification']
+    assert not client.app.state.evidence.freeze({'recording_id':'r1'},'请取消全部任务').get('clarification')

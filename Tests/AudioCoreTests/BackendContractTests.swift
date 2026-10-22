@@ -437,6 +437,65 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(item.sources.first?.resourceType == "message" && item.sources.first?.resourceID == "msg1")
     }
 
+    @Test @MainActor func cancelPinsTheActualOrganizationTask() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(dataDirectoryOverride: root)
+        let task = Task<Void, Never> { _ = try? await Task.sleep(nanoseconds: 10_000_000_000) }
+        defer { task.cancel() }
+        app.aiTask = task; app.aiActiveDraftID = "draft-task"; app.aiActiveRecordingID = "r1"
+        let result = try await app.cancelDeviceTask(recordingID: "r1", taskID: "draft-task", taskType: "organize")
+        #expect(task.isCancelled && result["state"] as? String == "cancelling")
+        let replacement = Task<Void, Never> { _ = try? await Task.sleep(nanoseconds: 10_000_000_000) }
+        defer { replacement.cancel() }
+        app.aiTask = replacement; app.aiActiveDraftID = "replacement"
+        await #expect(throws: (any Error).self) { try await app.cancelDeviceTask(recordingID: "r1", taskID: "draft-task", taskType: "organize") }
+        #expect(!replacement.isCancelled)
+        #expect(!app.cancelAudioTask(recordingID: "r1", taskID: "absent"))
+    }
+
+    @Test @MainActor func deviceReceiptsSurviveBothKindsOfLostAcknowledgment() async throws {
+        let c = try client()
+        for committedBeforeLoss in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let url = root.appendingPathComponent("receipts.json")
+            let journal = try DeviceReceiptJournal(url: url)
+            try journal.begin("command")
+            try journal.finish("command", status: "completed", result: ["characters": 2])
+            var attempts = 0, saved: Data?
+            BackendStubProtocol.respond = { request in
+                let body = try #require(bodyData(request)); attempts += 1
+                #expect(request.url!.path.hasSuffix("/reconcile"))
+                if attempts == 1 {
+                    if committedBeforeLoss { saved = body }
+                    throw URLError(.networkConnectionLost)
+                }
+                if let saved { #expect(body == saved) }
+                saved = body
+                return (200, Data(#"{"id":"command","state":"completed"}"#.utf8))
+            }
+            #expect(!(await journal.flush(c)) && journal.pendingCount == 1)
+            let reopened = try DeviceReceiptJournal(url: url)
+            #expect(reopened.owner == journal.owner && reopened.pendingCount == 1)
+            #expect(await reopened.flush(c))
+            #expect(reopened.pendingCount == 0 && attempts == 2)
+            #expect(try DeviceReceiptJournal(url: url).pendingCount == 0)
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("interrupted.json")
+        try DeviceReceiptJournal(url: url).begin("interrupted")
+        let reopened = try DeviceReceiptJournal(url: url)
+        BackendStubProtocol.respond = { request in
+            let body = try #require(bodyData(request))
+            let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            #expect(json["state"] as? String == "unknown")
+            return (200, Data(#"{"id":"interrupted","state":"unknown"}"#.utf8))
+        }
+        #expect(await reopened.flush(c))
+    }
+
     @Test @MainActor func transportLossPreservesHistoryAndDisablesBusinessWrites() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

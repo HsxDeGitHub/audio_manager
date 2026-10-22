@@ -72,10 +72,12 @@ extension BackendJSONValue {
 final class DeviceBridge {
     private let client: BackendClient
     private weak var app: AppModel?
-    private let owner = UUID().uuidString
+    private let journal: DeviceReceiptJournal
+    private var owner: String { journal.owner }
+    private var connected = false
     private var polling: Task<Void, Never>?
 
-    init(app: AppModel, client: BackendClient) { self.app = app; self.client = client }
+    init(app: AppModel, client: BackendClient, journal: DeviceReceiptJournal) { self.app = app; self.client = client; self.journal = journal }
 
     func start() {
         stop()
@@ -90,6 +92,13 @@ final class DeviceBridge {
     func stop() { polling?.cancel(); polling = nil }
 
     private func poll() async {
+        if !connected {
+            do {
+                let _: DeviceAcknowledgment = try await client.send("/api/v1/device/reconnect", method: "POST", body: JSONSerialization.data(withJSONObject: ["owner": owner]))
+                connected = true
+            } catch { return }
+        }
+        guard await journal.flush(client) else { app?.notice = "设备结果等待确认：\(journal.lastError ?? "请重试连接")"; return }
         guard let page: DeviceCommandPage = try? await client.send("/api/v1/device/commands") else { return }
         for command in page.items where command.state == "pending" {
             await handle(command)
@@ -102,6 +111,11 @@ final class DeviceBridge {
             claimed = try await client.send("/api/v1/device/commands/\(command.id)/claim", method: "POST",
                                             body: try JSONSerialization.data(withJSONObject: ["owner": owner]))
         } catch { return }
+        do { try journal.begin(claimed.id) }
+        catch {
+            try? journal.finish(claimed.id, status: "failed", result: ["message": "无法保存设备执行记录，操作未开始。"])
+            _ = await journal.flush(client); return
+        }
         let execution = Task { await execute(claimed) }
         let watcher = Task {
             while !Task.isCancelled {
@@ -114,12 +128,9 @@ final class DeviceBridge {
         }
         let (state, result) = await withTaskCancellationHandler(operation: { await execution.value }, onCancel: { execution.cancel() })
         watcher.cancel()
-        var body: [String: Any] = ["owner": owner, "state": state]
-        if let result { body["result"] = result }
-        do {
-            let _: DeviceAcknowledgment = try await client.send("/api/v1/device/commands/\(command.id)/result", method: "POST",
-                                                                body: try JSONSerialization.data(withJSONObject: body))
-        } catch { /* 保留后端状态；下轮查询不会重复领取已结束命令。 */ }
+        do { try journal.finish(command.id, status: state, result: result) }
+        catch { app?.alert = "设备结果保存失败，将保留回执等待重试。" }
+        _ = await journal.flush(client)
     }
 
     private func execute(_ command: DeviceCommand) async -> (String, [String: Any]?) {
@@ -171,9 +182,10 @@ final class DeviceBridge {
                 return ("completed", receipt)
 
             case "cancel":
-                guard let recordingID = command.arguments["recording_id"]?.stringValue else { return ("failed", ["message": "缺少资料标识。"]) }
-                app.cancel(recordingID)
-                return ("completed", ["state": "cancelling", "recording_id": recordingID])
+                guard let recordingID = command.arguments["recording_id"]?.stringValue,
+                      let taskID = command.arguments["task_id"]?.stringValue,
+                      let taskType = command.arguments["task_type"]?.stringValue else { throw DeviceBridgeError.failed("缺少固定任务标识。") }
+                return ("completed", try await app.cancelDeviceTask(recordingID: recordingID, taskID: taskID, taskType: taskType))
 
             case "organize":
                 guard let recordingID = command.arguments["recording_id"]?.stringValue,
@@ -307,5 +319,24 @@ enum DeviceExecutionResult {
             throw AudioError.message("处理任务未启动，请检查资源、配置或当前任务状态。")
         }
         return ["state": state, "task_id": taskID, "status_path": statusPath, "message": "任务已登记，尚未完成；请通过任务标识查看进度。"]
+    }
+}
+
+
+extension AppModel {
+    func cancelDeviceTask(recordingID: String, taskID: String, taskType: String) async throws -> [String: Any] {
+        if taskType == "organize", aiActiveRecordingID == recordingID, aiActiveDraftID == taskID, aiTask != nil {
+            cancelAI()
+            return ["state": "cancelling", "task_id": taskID, "task_type": taskType]
+        }
+        if taskType == "audio", cancelAudioTask(recordingID: recordingID, taskID: taskID) {
+            return ["state": "cancelling", "task_id": taskID, "task_type": taskType]
+        }
+        guard let backendClient else { throw BackendClientError.unavailable }
+        struct Status: Decodable { let id: String; let recording_id: String; let state: String }
+        let status: Status = try await backendClient.send("/api/v1/device/tasks/\(taskType)/\(taskID)")
+        guard status.recording_id == recordingID else { throw BackendClientError.conflict }
+        guard !["running", "queued"].contains(status.state) else { throw AudioError.message("该任务不由当前设备持有，未取消其他任务。") }
+        return ["state": "already_finished", "task_id": taskID, "task_type": taskType, "task_state": status.state]
     }
 }

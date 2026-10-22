@@ -13,7 +13,7 @@ class JobService:
             c.execute("UPDATE jobs SET state='interrupted' WHERE state IN ('queued','running')")
             c.execute("UPDATE recordings SET state='interrupted',error='上次任务未完成，可重试。' WHERE state IN ('queued','preprocessing','transcribing','diarizing')")
             c.execute("UPDATE agent_runs SET state='interrupted' WHERE state IN ('queued','running')")
-            c.execute("UPDATE device_commands SET state='unknown',owner=NULL WHERE state='running'")
+            c.execute("UPDATE device_commands SET state='unknown',result=? WHERE state='running'",(encode({'reason':'service_restart','message':'服务重启，等待原设备协调实际结果。'}),))
             c.execute("UPDATE device_commands SET state='cancelled',result=? WHERE state='pending'", (encode({'reason':'restart','message':'上次命令尚未领取，需明确继续任务。'}),))
 
     def get(self, identifier):

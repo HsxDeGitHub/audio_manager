@@ -60,7 +60,11 @@ def validate_arguments(kind, arguments):
                 isinstance(item, str) and 1 <= len(item) <= 16 and item.isalnum() for item in extensions):
             raise DomainError('invalid_device_arguments', '文件类型筛选不正确。', 422)
         return {'purpose': _text(value.get('purpose', '选择文件'), 'purpose', 200), 'extensions': extensions}
-    if kind in {'transcribe', 'cancel'}:
+    if kind=='cancel':
+        return {'recording_id':_text(value.get('recording_id'),'recording_id'),
+                'task_id':_optional_text(value.get('task_id'),'task_id'),
+                'task_type':_optional_text(value.get('task_type'),'task_type')}
+    if kind == 'transcribe':
         return {'recording_id': _text(value.get('recording_id'), 'recording_id')}
     if kind == 'organize':
         if value.get('mode', 'dialogue') not in {'dialogue', 'topics', 'summary'}:
@@ -187,7 +191,7 @@ class DeviceService:
             validate(c, json.loads(command['arguments']))
             return {'id': identifier, 'state': command['state']}
 
-    def complete(self, identifier, owner, state, result=None):
+    def complete(self, identifier, owner, state, result=None, reconcile=False):
         if state not in TERMINAL:
             raise DomainError('invalid_device_state', '设备结果状态不正确。', 422)
         if result is not None and not isinstance(result, dict):
@@ -196,6 +200,11 @@ class DeviceService:
             command = require(c, 'device_commands', identifier)
             if command['owner'] != owner:
                 raise DomainError('wrong_device_owner', '设备命令不属于此客户端。', 409)
+            if reconcile and state=='unknown' and command['state'] in TERMINAL: return _decode(command)
+            if reconcile and command['state']=='unknown':
+                if state=='unknown': return _decode(command)
+                c.execute('UPDATE device_commands SET state=?,result=?,updated_at=? WHERE id=?',(state,encode(result) if result is not None else None,time.time(),identifier))
+                return _decode(require(c,'device_commands',identifier))
             if command['state'] in TERMINAL:
                 # 询问者重试回报时返回已保存结果；不同结果不能覆盖。
                 if command['state'] == state and (json.loads(command['result']) if command['result'] else None) == result:
@@ -206,6 +215,13 @@ class DeviceService:
             c.execute('UPDATE device_commands SET state=?,result=?,updated_at=? WHERE id=?',
                       (state, encode(result) if result is not None else None, time.time(), identifier))
             return _decode(require(c, 'device_commands', identifier))
+
+    def reconnect(self, owner):
+        _text(owner,'owner',200)
+        with self.database.transaction(True) as c:
+            changed=c.execute("UPDATE device_commands SET state='unknown',result=?,updated_at=? WHERE state='running' AND owner<>?",
+                              (encode({'reason':'owner_replaced','message':'原设备连接丢失，结果未知，不自动重放。'}),time.time(),owner)).rowcount
+            return {'id':owner,'state':'connected','unknown':changed}
 
     def cancel_pending(self, identifier):
         with self.database.transaction(True) as c:

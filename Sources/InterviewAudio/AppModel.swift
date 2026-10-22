@@ -89,6 +89,7 @@ final class AppModel: ObservableObject {
     private(set) var store: BackendLibraryStore?
     private(set) var backendClient: BackendClient?
     private var deviceBridge: DeviceBridge?
+    private var deviceReceiptJournal: DeviceReceiptJournal?
     let backendProcess = BackendProcess()
     let assistant = AssistantModel()
     @Published var backendState = "正在连接本地服务…"
@@ -181,7 +182,8 @@ final class AppModel: ObservableObject {
             deviceBridge?.stop()
             deviceBridge = nil
             if let backendClient {
-                let bridge = DeviceBridge(app: self, client: backendClient)
+                if deviceReceiptJournal == nil { deviceReceiptJournal = try DeviceReceiptJournal(url: dataDirectory.appendingPathComponent("Backend/Device/receipts.json")) }
+                let bridge = DeviceBridge(app: self, client: backendClient, journal: deviceReceiptJournal!)
                 bridge.start(); deviceBridge = bridge
             }
             backendUnavailable = false; backendState = "本地服务已连接"; reload()
@@ -413,6 +415,10 @@ final class AppModel: ObservableObject {
         try? FileManager.default.removeItem(at: requestURL); try? FileManager.default.removeItem(at: logURL)
         worker = nil; request = nil; activeJobID = nil; activeRecordingID = nil; progress = nil; phaseMessage = ""
         startNext()
+    }
+    func cancelAudioTask(recordingID: String, taskID: String) -> Bool {
+        guard (activeRecordingID == recordingID && activeJobID == taskID) || queue.contains(where: { $0.recordingID == recordingID && $0.request.jobID == taskID }) else { return false }
+        cancel(recordingID); return true
     }
     func cancel(_ id: String) {
         for queued in queue where queued.recordingID == id { try? store?.stopWorker(queued.request.jobID, state: "cancelled") }

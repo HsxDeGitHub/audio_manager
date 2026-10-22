@@ -32,10 +32,12 @@ class EvidenceService:
             raise DomainError('invalid_scope', '资料范围不正确。', 422)
         with self.database.transaction() as c:
             recordings = [dict(r) for r in c.execute('SELECT * FROM recordings ORDER BY created_at,id')] if context.scope == 'all' else [require(c, 'recordings', context.recording_id)] if context.recording_id else []
-            resources = []; excluded = []; sources = []; device_targets = []
+            resources = []; excluded = []; sources = []; device_targets = []; cancel_tasks = []
             if context.scope == 'current' and not recordings and not context.document_ids and not importing:
                 return {**context.model_dump(), 'resources': [], 'sources': [], 'excluded': [], 'allow_write': False, 'clarification': '请指定当前资料，或切换为全部资料。'}
             for recording in recordings:
+                from interview_backend.services.device_tasks import active_tasks
+                cancel_tasks += active_tasks(c,recording['id'])
                 resources.append(self.ref(c, 'recording', recording['id']))
                 run_id = context.run_id if context.scope == 'current' and context.run_id else recording['active_run']
                 if not run_id:
@@ -80,12 +82,19 @@ class EvidenceService:
                 return {**context.model_dump(), 'resources': resources, 'sources': sources, 'excluded': excluded, 'allow_write': False, 'clarification': '请引用要处理的段落，避免误改其他内容。'}
             # 只有用户消息中的执行动词可允许写工具，资料正文永远不参与权限判断。
             actions = action_permissions(instruction)
+            from interview_backend.agent.permissions import command_text
+            command=command_text(instruction)
+            if '整理' in command and not re.search('转写|识别',command):cancel_tasks=[t for t in cancel_tasks if t['task_type']=='organize']
+            elif re.search('转写|识别',command) and '整理' not in command:cancel_tasks=[t for t in cancel_tasks if t['task_type']=='audio']
             device = any(a.startswith(('device.', 'jobs.', 'organize.')) for a in actions)
             external = any(a.startswith('mcp.') for a in actions)
-            return {**context.model_dump(), 'resources': resources, 'write_resources': list(resources), 'sources': sources, 'excluded': excluded, 'allow_write': mutation,
+            frozen = {**context.model_dump(), 'resources': resources, 'write_resources': list(resources), 'sources': sources, 'excluded': excluded, 'allow_write': mutation,
                     'allow_device': device, 'allow_external': external, 'allowed_actions': actions,
                     'allow_document_import': importing,
-                    'device_targets': device_targets, 'instruction': instruction, 'recording_ids': [r['id'] for r in recordings]}
+                    'cancel_tasks':cancel_tasks, 'device_targets': device_targets, 'instruction': instruction, 'recording_ids': [r['id'] for r in recordings]}
+            if 'jobs.cancel' in actions and len(cancel_tasks)>1 and not re.search(r'全部|所有|都|一起|及|和|分别',command):
+                frozen['clarification']='存在多个活动任务，请指定要取消的转写或整理任务，或明确要求取消全部。'
+            return frozen
 
     @staticmethod
     def ref(c, kind, identifier):
@@ -214,7 +223,7 @@ def install_agent_tools(registry, changesets):
     def read(args, context):
         if context.frozen_context is None:
             raise DomainError('scope_required', '需要先确定资料范围。', 409)
-        return {'result': {'sources': context.frozen_context['sources'], 'excluded': context.frozen_context.get('excluded', [])}}
+        return {'result': {'sources': context.frozen_context['sources'], 'excluded': context.frozen_context.get('excluded', []), 'tasks':context.frozen_context.get('cancel_tasks',[])}}
     registry.register(ToolSpec(tool_id='evidence.read', version='1.0', title='读取固定范围证据',
         description='读取当前消息固定范围内的完整证据、版本和无法纳入项。', input_model=EmptyArguments, output_model=ResultEnvelope, handler=read))
 
@@ -303,6 +312,11 @@ class DeviceChooseFileArguments(BaseModel):
 class RecordingActionArguments(BaseModel):
     model_config = ConfigDict(extra='forbid')
     recording_id: str = Field(min_length=1)
+
+
+class CancelTaskArguments(RecordingActionArguments):
+    task_type: Literal['audio','organize'] | None = None
+    task_id: str | None = None
 
 
 class OrganizeArguments(BaseModel):
@@ -417,6 +431,6 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
     device_tool('jobs.transcribe', '开始或重试转写', '把资料加入应用现有转写队列；完成情况以任务事件为准。',
         RecordingActionArguments, 'transcribe', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)
     device_tool('jobs.cancel', '取消后台任务', '取消应用正在处理的该资料任务，保留已完成部分。',
-        RecordingActionArguments, 'cancel', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)
+        CancelTaskArguments, 'cancel', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)
     device_tool('organize.start', '开始 AI 整理', '使用应用现有整理流程生成独立整理稿；分块完成进度会持续保存。',
         OrganizeArguments, 'organize', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)
