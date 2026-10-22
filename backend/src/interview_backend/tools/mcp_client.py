@@ -5,6 +5,7 @@ from datetime import timedelta
 import json
 import os
 import re
+import sys
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model, model_validator
@@ -211,7 +212,12 @@ class MCPClientManager:
         from mcp.client.streamable_http import streamablehttp_client
         if config.transport == 'stdio':
             environment = {**os.environ, **config.environment}
-            params = StdioServerParameters(command=config.command, args=config.args, env=environment)
+            command, arguments = config.command, config.args
+            if os.name == 'posix':
+                command = sys.executable
+                arguments = ['-m', 'interview_backend.tools.mcp_supervisor', '--parent-pid', str(os.getpid()),
+                             '--', config.command, *config.args]
+            params = StdioServerParameters(command=command, args=arguments, env=environment)
             async with stdio_client(params) as (read, write):
                 async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=30)) as session:
                     await session.initialize(); yield session
