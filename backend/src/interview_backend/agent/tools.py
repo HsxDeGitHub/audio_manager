@@ -28,7 +28,7 @@ def write_permissions(instruction):
     discussion = re.search(r'(?:怎么|如何|怎样|能否|是否|可否|能不能|可不可以).{0,12}(?:' + verbs + ')', command)
     if negative or readonly or discussion: return False, False
     importing = bool(re.search(r'(?:帮我|请|把|将|直接).{0,40}(?:导入|添加材料)|^(?:导入|添加材料)', command))
-    mutation = importing or bool(re.search(r'(?:帮我|请|把|将|直接).{0,40}(?:' + verbs + ')|^(?:' + verbs + ')', command))
+    mutation = importing or bool(re.search(r'^(?:本周|这周)(?:只|仅)(?:' + verbs + ')|(?:帮我|请|把|将|直接).{0,40}(?:' + verbs + ')|^(?:' + verbs + ')', command))
     return mutation, importing
 
 

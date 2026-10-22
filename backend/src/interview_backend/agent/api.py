@@ -50,6 +50,8 @@ class AgentAPI:
 
     async def start(self, body):
         context = self.evidence.freeze(body.context, body.instruction)
+        if hasattr(self.engine, 'reports') and __import__('re').search(r'本周|这周|周报', body.instruction):
+            context['report_plan'] = self.engine.reports.freeze(context, body.instruction)
         context['instruction'] = body.instruction
         context['message_id'] = body.message_id
         context['session_id'] = body.session_id

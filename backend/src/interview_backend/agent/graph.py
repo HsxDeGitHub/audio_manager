@@ -35,17 +35,17 @@ class AgentEngine:
     def __init__(self, settings, registry, evidence):
         self.settings, self.registry, self.evidence = settings, registry, evidence
 
-    async def execute(self, run_id, instruction, context, model=None, emit=None):
+    async def execute(self, run_id, instruction, context, model=None, emit=None, change_plan=None):
         from langgraph.graph import StateGraph, START, END
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
         if context.get('clarification'):
             return {'answer': context['clarification'], 'clarification': context['clarification'], 'claims': [], 'coverage': {'total': 0, 'covered': 0, 'excluded': context.get('excluded', [])}}
         if hasattr(self, 'reports') and not context.get('report_subtask') and re.search(r'本周|这周|周报', instruction):
-            return await self.reports.render(run_id, instruction, self, emit=emit)
+            return await self.reports.render(run_id, instruction, self, emit=emit, context=context, model=model)
         if model is None:
             model = ModelSettings.load(self.settings.data_dir).client()
         async def answer(state):
-            value = await self._answer(run_id, state['instruction'], state['context'], model, emit)
+            value = await self._answer(run_id, state['instruction'], state['context'], model, emit, change_plan)
             return {'result': value}
         graph = StateGraph(AgentState)
         graph.add_node('answer', answer); graph.add_edge(START, 'answer'); graph.add_edge('answer', END)
@@ -62,7 +62,8 @@ class AgentEngine:
                     value['answer'] += '\n\n检索状态：' + status['message'] + ' 全量任务仍按范围完整读取。'
             return value
 
-    async def _answer(self, run_id, instruction, context, model, emit):
+    async def _answer(self, run_id, instruction, context, model, emit, change_plan=None):
+        run_id = context.get('root_run_id', run_id)
         from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
         from interview_backend.agent.tools import framework_tools
         from interview_backend.tools.registry import ToolContext
@@ -71,7 +72,7 @@ class AgentEngine:
         if context.get('allow_device'): effects.add('device')
         if context.get('allow_external'): effects.add('external')
         from interview_backend.services.changesets import ChangePlan, ChangeSetService
-        plan = context.get('_change_plan') or ChangePlan(ChangeSetService(self.evidence.database), run_id + ':changes',
+        plan = change_plan or ChangePlan(ChangeSetService(self.evidence.database), run_id + ':changes',
                     frozenset((r['resource_type'], r['resource_id']) for r in context.get('write_resources', context['resources'])))
         read_context = ToolContext(request_id=run_id, allowed_effects=frozenset(effects),
                                    operation_id=run_id + ':tools', frozen_context=context, change_plan=plan,
