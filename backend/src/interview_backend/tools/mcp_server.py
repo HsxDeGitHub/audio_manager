@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import uuid
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
@@ -72,11 +73,15 @@ def build_server(api, name='interview-audio-local'):
         if entry is None:
             return types.CallToolResult(content=[types.TextContent(type='text', text='工具不存在或已停用。')], isError=True)
         try:
-            operation_id = None
+            operation_id = 'mcp:' + uuid.uuid4().hex
             try:
-                operation_id = f'mcp:{server.request_context.request_id}'
-            except LookupError:
-                operation_id = None
+                meta=server.request_context.meta
+                explicit=meta.model_dump().get('operation_id') if meta is not None else None
+                if explicit is not None:
+                    if not isinstance(explicit,str) or not 1<=len(explicit)<=200:
+                        raise LocalAPIError('invalid_operation_id','业务操作标识不合法。')
+                    operation_id=explicit
+            except LookupError: pass
             return await asyncio.to_thread(api.invoke, entry['id'], arguments, operation_id)
         except LocalAPIError as error:
             return types.CallToolResult(content=[types.TextContent(type='text', text=json.dumps(

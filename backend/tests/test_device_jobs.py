@@ -81,7 +81,8 @@ def test_device_tool_reports_actual_result_and_pending_is_not_success(client, mo
     monkeypatch.setattr(client.app.state.device, 'wait', immediate)
 
     async def no_device():
-        return await client.app.state.tools.execute('device.locate', {'recording_id': 'r1'}, context)
+        from dataclasses import replace
+        return await client.app.state.tools.execute('device.locate', {'recording_id': 'r1'}, replace(context, operation_id='pending-locate'))
     pending_result = asyncio.run(no_device())
     assert pending_result['data']['result']['state'] == 'pending'
     assert '不能视为完成' in pending_result['data']['result']['message']
@@ -201,3 +202,18 @@ def test_worker_queue_and_start_have_queryable_real_states(client):
     assert client.get('/api/v1/jobs/queued-worker').json()['state']=='running'
     client.app.state.jobs.stop('queued-worker','failed')
     assert client.get('/api/v1/jobs/queued-worker').json()['state']=='failed'
+
+
+def test_native_device_operation_retries_reuse_command_and_validate_request(client,monkeypatch):
+    async def immediate(identifier,timeout=10):return client.app.state.device.get(identifier)
+    monkeypatch.setattr(client.app.state.device,'wait',immediate)
+    body={'arguments':{'text':'合成'},'operation_id':'native-stable-device'}
+    first=client.post('/api/v1/tools/device.copy/invoke',json=body).json()['data']['result']
+    second=client.post('/api/v1/tools/device.copy/invoke',json=body).json()['data']['result']
+    assert first['command_id']==second['command_id']
+    assert len(client.app.state.device.pending())==1
+    body['arguments']['text']='不同'
+    assert client.post('/api/v1/tools/device.copy/invoke',json=body).status_code==409
+    body['operation_id']='different-device-operation'
+    assert client.post('/api/v1/tools/device.copy/invoke',json=body).status_code==200
+    assert len(client.app.state.device.pending())==2

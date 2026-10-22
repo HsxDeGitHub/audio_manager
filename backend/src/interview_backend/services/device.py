@@ -1,10 +1,11 @@
 """设备命令账本：后端只登记命令，真实结果由客户端回报，不用“已发送”冒充完成。"""
+import hashlib
 import json
 import time
 import uuid
 import asyncio
 from interview_backend.errors import DomainError
-from interview_backend.services.common import encode, require
+from interview_backend.services.common import encode, require, once
 
 KINDS = {'locate', 'clipboard', 'export', 'choose_file', 'transcribe', 'cancel', 'organize'}
 TERMINAL = {'completed', 'cancelled', 'failed', 'unknown'}
@@ -106,7 +107,16 @@ class DeviceService:
             validate(c, json.loads(row['arguments']))
             c.execute("UPDATE device_commands SET state='pending',result=NULL,updated_at=? WHERE id=?", (time.time(),row['id']))
 
-    def enqueue(self, kind, target, arguments, run_id=None, command_id=None):
+    def operation(self, operation_id, request):
+        if not operation_id: return None
+        with self.database.transaction() as c:
+            prior=c.execute('SELECT digest,result FROM operations WHERE id=?',(operation_id,)).fetchone()
+            if prior is None: return None
+            digest=hashlib.sha256(encode({'device_request':request}).encode()).hexdigest()
+            if prior['digest']!=digest: raise DomainError('operation_mismatch','同一操作标识不能用于不同请求。',409)
+            return _decode(require(c,'device_commands',json.loads(prior['result'])['command_id']))
+
+    def enqueue(self, kind, target, arguments, run_id=None, command_id=None, operation_id=None, request=None):
         raw = arguments
         arguments = validate_arguments(kind, arguments)
         if raw.get('frozen_target'):
@@ -121,16 +131,17 @@ class DeviceService:
             raise DomainError('invalid_device_command', '运行标识不正确。', 422)
         with self.database.transaction(True) as c:
             self.check_run(c, run_id)
-            prior = c.execute('SELECT * FROM device_commands WHERE id=?', (identifier,)).fetchone()
-            if prior:
-                if prior['kind'] != kind or prior['target'] != target or prior['run_id'] != run_id \
-                        or json.loads(prior['arguments']) != arguments:
-                    raise DomainError('command_mismatch', '同一命令标识不能用于不同设备操作。', 409)
-                return _decode(prior)
-            now = time.time()
-            c.execute('INSERT INTO device_commands VALUES(?,?,?,?,?,?,NULL,NULL,?)',
-                      (identifier, run_id, kind, target, encode(arguments), 'pending', now))
-            return _decode(require(c, 'device_commands', identifier))
+            def insert():
+                prior=c.execute('SELECT * FROM device_commands WHERE id=?',(identifier,)).fetchone()
+                if prior:
+                    if prior['kind']!=kind or prior['target']!=target or prior['run_id']!=run_id or json.loads(prior['arguments'])!=arguments:
+                        raise DomainError('command_mismatch','同一命令标识不能用于不同设备操作。',409)
+                else:
+                    c.execute('INSERT INTO device_commands VALUES(?,?,?,?,?,?,NULL,NULL,?)',
+                              (identifier,run_id,kind,target,encode(arguments),'pending',time.time()))
+                return {'command_id':identifier}
+            result=once(c,operation_id,{'device_request':request},insert) if operation_id else insert()
+            return _decode(require(c,'device_commands',result['command_id']))
 
     def pending(self):
         with self.database.transaction() as c:

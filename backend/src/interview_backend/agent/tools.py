@@ -347,10 +347,10 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
             {'resource_type': 'speaker', 'resource_id': f'{args.run_id}:{args.speaker}',
              'expected_revision': args.expected_revision, 'fields': {'name': args.name}}]}, context.resource_scope, context.change_plan)}
 
-    async def run_device(kind, target, arguments, context):
+    async def run_device(kind, target, arguments, context, request):
         digest = hashlib.sha256(encode({'kind': kind, 'target': target, 'arguments': arguments}).encode()).hexdigest()[:16]
-        command_id = f'{context.request_id}:{kind}:{digest}'
-        command = device.enqueue(kind, target, arguments, run_id=context.request_id, command_id=command_id)
+        command_id = 'device:' + hashlib.sha256((context.operation_id or context.request_id+':'+digest).encode()).hexdigest()
+        command = device.operation(context.operation_id,request) or device.enqueue(kind, target, arguments, run_id=context.request_id, command_id=command_id, operation_id=context.operation_id, request=request)
         value = await device.wait(command['id'], timeout=10)
         state = value['state']
         message = {
@@ -392,13 +392,16 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
     def device_tool(tool_id, title, description, input_model, kind, argument_builder, target_builder=None, timeout=20):
         async def handler(args, context):
             arguments = argument_builder(args)
+            request={'kind':kind,'arguments':arguments}
+            prior=device.operation(context.operation_id,request)
+            if prior: return await run_device(kind,prior['target'],prior['arguments'],context,request)
             from interview_backend.services.device_targets import prepare
             with device.database.transaction() as c:
                 arguments = prepare(c, kind, arguments, context.frozen_context)
             target = arguments.get('recording_id') or (target_builder(args) if target_builder else '')
             if target:
                 scope(context, target)
-            return await run_device(kind, target, arguments, context)
+            return await run_device(kind, target, arguments, context, request)
         registry.register(ToolSpec(tool_id=tool_id, version='1.0', title=title, description=description,
             input_model=input_model, output_model=ResultEnvelope, effect='device', handler=handler,
             timeout_seconds=timeout))

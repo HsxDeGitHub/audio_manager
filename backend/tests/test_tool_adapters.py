@@ -196,3 +196,45 @@ def test_external_tool_name_conflict_is_rejected_without_overwriting_local_tools
         # 同名本地工具仍按自身规则执行，没有被外部结果替换。
         assert await client.app.state.tools.execute('mcp.synthetic.echo', {}, context) is not None
     asyncio.run(scenario())
+
+
+def test_mcp_operation_identity_is_explicit_or_unique_across_sessions(client,monkeypatch):
+    captured=[]
+    class API(NativeAPI):
+        def invoke(self,tool_id,arguments,operation_id=None):
+            captured.append(operation_id)
+            return {'operation_id':operation_id}
+    async def scenario():
+        server=build_server(API(client.app))
+        for _ in range(2):
+            async with create_connected_server_and_client_session(server) as session:
+                await session.call_tool('library__get_recording',{'recording_id':'r1'})
+                await session.call_tool('library__get_recording',{'recording_id':'r1'},meta={'operation_id':'explicit-stable'})
+        assert captured[0]!=captured[2]
+        assert captured[1]==captured[3]=='explicit-stable'
+    asyncio.run(scenario())
+
+
+def test_same_device_operation_is_shared_by_native_framework_and_mcp(client,monkeypatch):
+    import json
+    async def immediate(identifier,timeout=10):return client.app.state.device.get(identifier)
+    monkeypatch.setattr(client.app.state.device,'wait',immediate)
+    class API(NativeAPI):
+        def invoke(self,tool_id,arguments,operation_id=None):
+            response=client.post('/api/v1/tools/'+tool_id+'/invoke',json={'arguments':arguments,'operation_id':operation_id})
+            if response.status_code!=200:
+                from interview_backend.tools.mcp_server import LocalAPIError
+                raise LocalAPIError('failed','合成调用失败')
+            return response.json()
+    async def scenario():
+        native=API(client.app).invoke('device.copy',{'text':'合成三入口'},'shared-device')
+        ctx=ToolContext(request_id='framework-device',operation_id='shared-device',allowed_effects=frozenset({'device'}))
+        tools={t.name:t for t in framework_tools(client.app.state.tools,ctx)}
+        framed=await tools['device__copy'].ainvoke({'text':'合成三入口'})
+        async with create_connected_server_and_client_session(build_server(API(client.app))) as session:
+            result=await session.call_tool('device__copy',{'text':'合成三入口'},meta={'operation_id':'shared-device'})
+            assert not result.isError
+            assert result.structuredContent['data']==native['data']
+        assert framed==native['data']
+        assert len(client.app.state.device.pending())==1
+    asyncio.run(scenario())
