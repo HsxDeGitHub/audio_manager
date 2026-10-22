@@ -17,7 +17,7 @@ def alive(pid):
     except ProcessLookupError: return False
 
 
-@pytest.mark.parametrize('termination', ['parent', 'supervisor'])
+@pytest.mark.parametrize('termination', ['parent', 'supervisor', 'supervisor_kill'])
 def test_supervisor_reaps_stubborn_tool_tree_without_killing_parent(tmp_path, termination):
     worker = tmp_path / 'worker.py'
     worker.write_text('''import json,os,signal,subprocess,sys,time
@@ -44,10 +44,10 @@ time.sleep(60)
         tree = json.loads((tmp_path/'tree.json').read_text())
         assert all(alive(pid) for pid in [supervisor, *tree.values()])
         start = time.monotonic()
-        os.kill(parent.pid if termination == 'parent' else supervisor, signal.SIGTERM)
+        os.kill(parent.pid if termination == 'parent' else supervisor, signal.SIGKILL if termination == 'supervisor_kill' else signal.SIGTERM)
         while time.monotonic() - start < 4 and any(alive(pid) for pid in [supervisor, *tree.values()]): time.sleep(.05)
         assert not any(alive(pid) for pid in [supervisor, *tree.values()])
-        if termination == 'supervisor': assert parent.poll() is None
+        if termination != 'parent': assert parent.poll() is None
     finally:
         if parent.poll() is None: parent.terminate()
         parent.wait(timeout=3)
