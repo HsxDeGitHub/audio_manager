@@ -138,6 +138,8 @@ class AgentAPI:
             run = require(c, 'agent_runs', identifier)
             if run['state'] in {'queued','running','awaiting_input'}:
                 c.execute("UPDATE agent_runs SET state='cancelled' WHERE id=?", (identifier,))
+                from interview_backend.services.device import DeviceService
+                DeviceService.cancel_run(c, identifier)
         if identifier in self.tasks: self.tasks[identifier].cancel()
         return self.get(identifier)
 
@@ -153,6 +155,8 @@ class AgentAPI:
             sources += [r for child in run['context'].get('report_plan', {}).get('contexts', {}).values() for r in child.get('resources', [])]
             if any(not self.evidence.valid_after_changes(source, changes) for source in sources):
                 raise DomainError('stale_context', '源版本已发生外部变化，请发送基于当前资料的新指令。', 409)
+            from interview_backend.services.device import DeviceService
+            DeviceService.resume_run(c, identifier)
             c.execute("UPDATE agent_runs SET state='queued' WHERE id=?", (identifier,))
             self.append_event(c, identifier, 'resuming', {'state': 'queued', 'message': '恢复剩余步骤，已完成操作将复用业务回执。'})
         self.tasks[identifier] = asyncio.create_task(self._execute(identifier))

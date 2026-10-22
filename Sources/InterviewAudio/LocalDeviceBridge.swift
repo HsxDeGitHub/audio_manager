@@ -26,7 +26,8 @@ struct DeviceCommand: Decodable, Identifiable {
     let arguments: [String: BackendJSONValue]
     let state: String
     let owner: String?
-    private enum CodingKeys: String, CodingKey { case id, kind, target, arguments, state, owner, runID = "run_id" }
+    let result: [String: BackendJSONValue]?
+    private enum CodingKeys: String, CodingKey { case id, kind, target, arguments, state, owner, result, runID = "run_id" }
 }
 
 private struct DeviceCommandPage: Decodable { let items: [DeviceCommand] }
@@ -97,7 +98,18 @@ final class DeviceBridge {
             claimed = try await client.send("/api/v1/device/commands/\(command.id)/claim", method: "POST",
                                             body: try JSONSerialization.data(withJSONObject: ["owner": owner]))
         } catch { return }
-        let (state, result) = await execute(claimed)
+        let execution = Task { await execute(claimed) }
+        let watcher = Task {
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 300_000_000)
+                    let current: DeviceCommand = try await client.send("/api/v1/device/commands/\(claimed.id)")
+                    if current.result?["cancel_requested"]?.boolValue == true { execution.cancel(); return }
+                } catch { return }
+            }
+        }
+        let (state, result) = await withTaskCancellationHandler(operation: { await execution.value }, onCancel: { execution.cancel() })
+        watcher.cancel()
         var body: [String: Any] = ["owner": owner, "state": state]
         if let result { body["result"] = result }
         do {
@@ -109,6 +121,7 @@ final class DeviceBridge {
     private func execute(_ command: DeviceCommand) async -> (String, [String: Any]?) {
         guard let app else { return ("failed", ["message": "应用界面不可用。"]) }
         do {
+            try Task.checkCancellation()
             try await client.validateDeviceCommand(command.id)
             switch command.kind {
             case "locate":
@@ -170,6 +183,8 @@ final class DeviceBridge {
             default:
                 return ("failed", ["message": "不支持的设备命令。"])
             }
+        } catch is CancellationError {
+            return ("cancelled", ["message": "运行已取消，设备操作已停止。"])
         } catch DeviceBridgeError.cancelled {
             return ("cancelled", ["message": "用户取消了操作。"])
         } catch DeviceBridgeError.failed(let message) {
@@ -180,24 +195,29 @@ final class DeviceBridge {
     }
 
     private func chooseOpenFile(purpose: String, extensions: [String]) async -> URL? {
-        await withCheckedContinuation { continuation in
-            let panel = NSOpenPanel()
-            panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
-            panel.message = purpose
-            let types = extensions.compactMap { UTType(filenameExtension: $0) }
-            if !types.isEmpty { panel.allowedContentTypes = types }
-            panel.begin { response in continuation.resume(returning: response == .OK ? panel.url : nil) }
-        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+        panel.message = purpose
+        let types = extensions.compactMap { UTType(filenameExtension: $0) }
+        if !types.isEmpty { panel.allowedContentTypes = types }
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled { continuation.resume(returning: nil); return }
+                panel.begin { response in continuation.resume(returning: response == .OK ? panel.url : nil) }
+            }
+        }, onCancel: { Task { @MainActor in panel.cancel(nil) } })
     }
 
     private func chooseSaveFile(name: String, extension ext: String) async -> URL? {
-        await withCheckedContinuation { continuation in
-            let panel = NSSavePanel()
-            panel.nameFieldStringValue = name
-            panel.isExtensionHidden = false
-            if let type = UTType(filenameExtension: ext) { panel.allowedContentTypes = [type] }
-            panel.begin { response in continuation.resume(returning: response == .OK ? panel.url : nil) }
-        }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = name; panel.isExtensionHidden = false
+        if let type = UTType(filenameExtension: ext) { panel.allowedContentTypes = [type] }
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled { continuation.resume(returning: nil); return }
+                panel.begin { response in continuation.resume(returning: response == .OK ? panel.url : nil) }
+            }
+        }, onCancel: { Task { @MainActor in panel.cancel(nil) } })
     }
 
     private func allSegments(runID: String) async throws -> [BackendSegment] {
@@ -243,7 +263,9 @@ final class DeviceBridge {
             guard let url = await chooseSaveFile(name: suggested ?? "\(parsed.recordingTitle)-\(parsed.mode.title).\(ext)", extension: ext) else {
                 throw DeviceBridgeError.cancelled
             }
+            try Task.checkCancellation()
             try await client.validateDeviceCommand(command.id)
+            try Task.checkCancellation()
             try text.write(to: url, atomically: true, encoding: .utf8)
             return ("completed", ["path": url.path, "name": url.lastPathComponent])
         }
@@ -263,7 +285,9 @@ final class DeviceBridge {
         guard let url = await chooseSaveFile(name: suggested ?? recording.title, extension: ext) else {
             throw DeviceBridgeError.cancelled
         }
+        try Task.checkCancellation()
         try await client.validateDeviceCommand(command.id)
+        try Task.checkCancellation()
         try text.write(to: url, atomically: true, encoding: .utf8)
         return ("completed", ["path": url.path, "name": url.lastPathComponent])
     }

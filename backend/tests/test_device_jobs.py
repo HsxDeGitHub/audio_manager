@@ -148,3 +148,46 @@ def test_device_locate_rejects_mixed_segment_and_run(client):
     with pytest.raises(DomainError):
         asyncio.run(client.app.state.tools.execute('device.locate', {'recording_id': 'r1', 'segment_id': 's3'}, device_context(client, '请回听当前面试')))
     assert client.app.state.device.pending() == []
+
+
+def queued_agent(client):
+    session=client.post('/api/v1/sessions',json={}).json()['id']
+    with client.app.state.database.transaction(True) as c:
+        c.execute("INSERT INTO agent_runs VALUES('cancel-parent',?,'cancel-msg','running','{}',NULL,1)",(session,))
+    return 'cancel-parent'
+
+
+def test_cancel_run_prevents_late_device_claim_and_restart_replay(client):
+    parent=queued_agent(client)
+    command=client.app.state.device.enqueue('clipboard','',{'text':'合成'},run_id=parent,command_id='late')
+    client.post('/api/v1/agent/runs/'+parent+'/cancel')
+    assert client.app.state.device.get(command['id'])['state']=='cancelled'
+    assert client.post('/api/v1/device/commands/late/claim',json={'owner':'late-device'}).status_code==409
+    client.app.state.jobs.recover()
+    assert client.app.state.device.pending()==[]
+
+
+def test_restart_pending_device_requires_explicit_resume_and_completed_never_requeues(client):
+    parent=queued_agent(client); device=client.app.state.device
+    device.enqueue('clipboard','',{'text':'待执行'},run_id=parent,command_id='pending-before-restart')
+    device.enqueue('clipboard','',{'text':'已完成'},run_id=parent,command_id='already-done')
+    device.claim('already-done','owner'); device.complete('already-done','owner','completed',{'characters':3})
+    client.app.state.jobs.recover()
+    assert device.pending()==[]
+    assert device.get('already-done')['state']=='completed'
+    with client.app.state.database.transaction(True) as c:
+        device.resume_run(c,parent)
+        c.execute("UPDATE agent_runs SET state='queued' WHERE id=?",(parent,))
+    assert [r['id'] for r in device.pending()]==['pending-before-restart']
+    assert device.get('already-done')['state']=='completed'
+
+
+def test_cancel_claim_race_blocks_new_commands_and_keeps_running_result_truthful(client):
+    parent=queued_agent(client); device=client.app.state.device
+    device.enqueue('clipboard','',{'text':'已领取'},run_id=parent,command_id='claimed')
+    device.claim('claimed','owner')
+    client.post('/api/v1/agent/runs/'+parent+'/cancel')
+    assert device.get('claimed')['result']['cancel_requested']
+    with pytest.raises(DomainError): device.enqueue('clipboard','',{'text':'太晚'},run_id=parent,command_id='after-cancel')
+    # 领取先发生，真实副作用已完成，必须保留实际结果。
+    assert device.complete('claimed','owner','completed',{'characters':3})['state']=='completed'

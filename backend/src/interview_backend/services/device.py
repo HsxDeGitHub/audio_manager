@@ -81,6 +81,31 @@ class DeviceService:
     def __init__(self, database):
         self.database = database
 
+    @staticmethod
+    def check_run(c, run_id):
+        if not run_id: return
+        run = c.execute('SELECT state FROM agent_runs WHERE id=?', (run_id,)).fetchone()
+        if run and run[0] not in {'queued', 'running', 'completed'}:
+            raise DomainError('run_not_active', '助手运行已结束或中断，设备命令不可执行。', 409)
+
+    @staticmethod
+    def cancel_run(c, run_id):
+        now = time.time()
+        c.execute("UPDATE device_commands SET state='cancelled',result=?,updated_at=? WHERE run_id=? AND state='pending'",
+                  (encode({'reason':'run_cancelled', 'message':'运行取消，尚未领取的命令不再执行。'}),now,run_id))
+        c.execute("UPDATE device_commands SET result=?,updated_at=? WHERE run_id=? AND state='running'",
+                  (encode({'cancel_requested':True,'message':'已请求客户端取消，等待实际结果。'}),now,run_id))
+
+    @staticmethod
+    def resume_run(c, run_id):
+        from interview_backend.services.device_targets import validate
+        rows = c.execute("SELECT * FROM device_commands WHERE run_id=? AND state='cancelled' AND owner IS NULL", (run_id,)).fetchall()
+        for row in rows:
+            result = json.loads(row['result']) if row['result'] else {}
+            if result.get('reason') not in {'run_cancelled','restart'}: continue
+            validate(c, json.loads(row['arguments']))
+            c.execute("UPDATE device_commands SET state='pending',result=NULL,updated_at=? WHERE id=?", (time.time(),row['id']))
+
     def enqueue(self, kind, target, arguments, run_id=None, command_id=None):
         raw = arguments
         arguments = validate_arguments(kind, arguments)
@@ -95,6 +120,7 @@ class DeviceService:
         if run_id is not None and (not isinstance(run_id, str) or len(run_id) > 200):
             raise DomainError('invalid_device_command', '运行标识不正确。', 422)
         with self.database.transaction(True) as c:
+            self.check_run(c, run_id)
             prior = c.execute('SELECT * FROM device_commands WHERE id=?', (identifier,)).fetchone()
             if prior:
                 if prior['kind'] != kind or prior['target'] != target or prior['run_id'] != run_id \
@@ -127,6 +153,7 @@ class DeviceService:
             raise DomainError('invalid_device_owner', '设备标识不正确。', 422)
         with self.database.transaction(True) as c:
             command = require(c, 'device_commands', identifier)
+            self.check_run(c, command['run_id'])
             if command['state'] == 'running' and command['owner'] == owner:
                 return _decode(command)
             if command['state'] != 'pending':
@@ -143,6 +170,9 @@ class DeviceService:
             command = require(c, 'device_commands', identifier)
             if command['state'] not in {'pending', 'running'}:
                 raise DomainError('command_not_running', '设备命令已结束。', 409)
+            self.check_run(c, command['run_id'])
+            if command['result'] and json.loads(command['result']).get('cancel_requested'):
+                raise DomainError('command_cancelled', '运行已取消，设备命令不得继续。', 409)
             validate(c, json.loads(command['arguments']))
             return {'id': identifier, 'state': command['state']}
 

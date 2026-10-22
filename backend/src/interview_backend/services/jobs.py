@@ -14,6 +14,7 @@ class JobService:
             c.execute("UPDATE recordings SET state='interrupted',error='上次任务未完成，可重试。' WHERE state IN ('queued','preprocessing','transcribing','diarizing')")
             c.execute("UPDATE agent_runs SET state='interrupted' WHERE state IN ('queued','running')")
             c.execute("UPDATE device_commands SET state='unknown',owner=NULL WHERE state='running'")
+            c.execute("UPDATE device_commands SET state='cancelled',result=? WHERE state='pending'", (encode({'reason':'restart','message':'上次命令尚未领取，需明确继续任务。'}),))
 
     def start(self, request):
         with self.database.transaction(True) as c:
