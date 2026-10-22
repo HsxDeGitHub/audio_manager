@@ -157,7 +157,11 @@ class AgentAPI:
         run = self.get(identifier)
         if run['state'] not in {'interrupted', 'failed', 'cancelled'}:
             raise DomainError('not_resumable', '当前运行状态不可继续。', 409)
+        from interview_backend.agent.work import WorkLog
+        WorkLog(self.database,identifier).finalization()
         with self.database.transaction(True) as c:
+            if require(c,'agent_runs',identifier)['state'] not in {'interrupted','failed','cancelled'}:
+                raise DomainError('not_resumable','当前运行已在恢复或已结束。',409)
             if c.execute("SELECT 1 FROM agent_runs WHERE session_id=? AND id<>? AND state IN ('queued','running')", (run['session_id'], identifier)).fetchone():
                 raise DomainError('session_busy', '此会话仍有运行任务，请先取消或等待。', 409)
             changes = self.evidence.committed(identifier)

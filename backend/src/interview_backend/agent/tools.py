@@ -340,6 +340,13 @@ class DeviceResult(BaseModel):
     message: str
 
 
+def command_result(command):
+    messages={'completed':'应用已回报实际执行结果。','cancelled':'操作已取消。','failed':'应用回报操作失败。',
+              'unknown':'结果未知，不自动重放。','running':'应用已领取命令但尚未回报，不能视为完成。',
+              'pending':'命令已登记，应用尚未领取；不能视为完成。'}
+    return {'command_id':command['id'],'state':command['state'],'result':command['result'],'message':messages.get(command['state'],'设备结果未知。')}
+
+
 def install_app_tools(registry, changesets, device, settings, repository, retrieval):
     from interview_backend.agent.models import ModelSettings
 
@@ -373,17 +380,7 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
         command_id = 'device:' + hashlib.sha256((context.operation_id or context.request_id+':'+digest).encode()).hexdigest()
         command = device.operation(context.operation_id,request) or device.enqueue(kind, target, arguments, run_id=context.request_id, command_id=command_id, operation_id=context.operation_id, request=request)
         value = await device.wait(command['id'], timeout=10)
-        state = value['state']
-        message = {
-            'completed': '应用已回报实际执行结果。',
-            'cancelled': '用户取消了该操作，没有继续执行。',
-            'failed': '应用回报操作失败。',
-            'unknown': '操作结果未知，不能视为成功；请核对应用中的实际状态。',
-            'running': '应用已领取命令但尚未回报，不能视为完成。',
-            'pending': '命令已登记，应用尚未领取；不能视为完成。',
-        }.get(state, '设备命令状态未知。')
-        return {'result': {'command_id': command['id'], 'state': state,
-                           'result': value['result'], 'message': message}}
+        return {'result':command_result(value)}
 
     def models_status(args, context):
         status = {'configured': False, 'semantic': retrieval.semantic.status()}

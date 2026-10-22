@@ -40,7 +40,7 @@ class AgentEngine:
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
         from interview_backend.agent.work import WorkLog
         from interview_backend.agent.finalization import resume
-        finalization=WorkLog(self.evidence.database,run_id).get('finalization')
+        finalization=WorkLog(self.evidence.database,run_id).finalization()
         if finalization is not None: return await resume(self,run_id,finalization,emit)
         if context.get('clarification'):
             return {'answer': context['clarification'], 'clarification': context['clarification'], 'claims': [], 'coverage': {'total': 0, 'covered': 0, 'excluded': context.get('excluded', [])}}
@@ -68,7 +68,7 @@ class AgentEngine:
 
     async def _answer(self, run_id, instruction, context, model, emit, change_plan=None):
         from interview_backend.agent.work import WorkLog
-        work = WorkLog(self.evidence.database, run_id)
+        work = WorkLog(self.evidence.database, run_id, context.get('root_run_id',run_id))
         run_id = context.get('root_run_id', run_id)
         from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
         from interview_backend.agent.tools import framework_tools
@@ -86,6 +86,7 @@ class AgentEngine:
                                                             for r in context.get('write_resources', context['resources'])))
         tools = framework_tools(self.registry, read_context)
         bound = model.bind_tools(tools) if tools else model
+        configuration={'model':getattr(model,'model_name',type(model).__qualname__),'tools':[(t.name,t.args_schema.model_json_schema()) for t in tools]}
         sources = context.get('sources', [])
         full = context.get('allow_write') or bool(re.search(r'全部|所有|本周|周报',instruction))
         if hasattr(self,'retrieval') and not full and sources:
@@ -105,6 +106,8 @@ class AgentEngine:
         if not sources and not context.get('allow_document_import') and not context.get('allow_device'):
             reasons = '\n'.join(item['reason'] for item in context.get('excluded', []) if item.get('reason'))
             return {'answer': '当前范围没有可用正文，证据不足。' + ('\n' + reasons if reasons else ''), 'claims': [], 'coverage': {'total': 0, 'covered': 0, 'excluded': context.get('excluded', [])}}
+        if any(not self.evidence.valid_after_changes(s,self.evidence.committed(run_id)) for s in sources):
+            raise DomainError('stale_source','来源已变化，未发送过期内容。',409)
         chunks = []; current = []; length = 0
         for source in sources:
             text = source['text']
@@ -133,16 +136,18 @@ class AgentEngine:
                         key = (reference['resource_type'], reference['resource_id'], reference['revision'])
                         if key not in known:
                             context['resources'].append(reference); known.add(key)
-            prompt = {'device_tasks':context.get('cancel_tasks',[]), 'current_valid_memories': memory, 'instruction': instruction, 'scope': context['resources'], 'untrusted_evidence': chunk,
+            current_scope=[r for r in context['resources'] if self.evidence.valid_after_changes(r,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []))]
+            dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources]+[{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in memory]
+            prompt = {'device_tasks':context.get('cancel_tasks',[]), 'current_valid_memories': memory, 'instruction': instruction, 'scope': current_scope, 'untrusted_evidence': chunk,
                       'allow_write': context.get('allow_write', False), 'chunk': i+1, 'chunks': len(chunks)}
             try:
                 messages = [SystemMessage(content=SYSTEM), HumanMessage(content=encode(prompt))]
                 model_key = f'chunk:{i}:model:0'
-                response = await work.model(model_key, bound, messages)
+                response = await work.model(model_key,bound,messages,configuration,dependencies)
                 for turn in range(8):
                     if not response.tool_calls: break
                     messages.append(response)
-                    for call in response.tool_calls:
+                    for call_index,call in enumerate(response.tool_calls):
                         spec = next((t for t in tools if t.name == call['name']), None)
                         if spec is None:
                             raise DomainError('tool_not_allowed', '该工具在当前用户消息范围内不可用。', 403)
@@ -152,21 +157,28 @@ class AgentEngine:
                         # 模型只看到同源 Schema；执行仍经过统一执行器，保留参数及业务错误。
                         tool_id = next(t.tool_id for t in self.registry._tools.values() if t.framework_name == call['name'])
                         step_key = f'chunk:{i}:tool:{turn}:{digest}'
-                        cached = work.get(step_key)
                         effect = self.registry._tools[tool_id].effect
-                        if cached is not None and cached.get('result',{}).get('state')!='planned' and (effect != 'write' or self.evidence.committed(run_id)):
-                            output = cached
-                            if effect == 'device' and cached.get('result', {}).get('command_id'):
-                                command = self.evidence.database
+                        business=effect in {'device','external'}
+                        cached=work.effect(digest) if business else None
+                        slot=f'chunk:{i}:slot:{turn}:{call_index}'
+                        if business and cached is not None:
+                            work.reserve(slot,tool_id,digest)
+                            output=cached['output']
+                            if effect=='device' and output.get('result',{}).get('command_id'):
                                 from interview_backend.services.device import DeviceService
-                                current = DeviceService(command).get(cached['result']['command_id'])
-                                output = {'result': {**cached['result'], 'state': current['state'], 'result': current['result']}}
+                                from interview_backend.agent.tools import command_result
+                                output={'result':command_result(DeviceService(self.evidence.database).get(output['result']['command_id']))}
+                            elif not work.valid(cached.get('dependencies',[])):
+                                output={'result':{'state':'completed','operation_id':call_context.operation_id,'message':'操作已完成；旧输出的证据依赖已失效，未重新注入，也未重复执行。'}}
                         else:
-                            if effect == 'external' and work.get(step_key + ':started'):
-                                raise DomainError('external_result_unknown', '外部工具结果未知，不能自动重复执行。', 409)
-                            if effect == 'external': work.save(step_key + ':started', {'state': 'started'})
-                            output = (await self.registry.execute(tool_id, call['args'], call_context))['data']
-                            work.save(step_key, output)
+                            deferred=effect=='device' and context.get('allow_write') and tool_id in {'device.export','device.copy','organize.start','jobs.transcribe'}
+                            if business and not deferred: work.reserve(slot,tool_id,digest)
+                            if effect=='external' and work.started(digest):raise DomainError('external_result_unknown','外部工具结果未知，不能自动重复执行。',409)
+                            if effect=='external':work.save('external_started:'+digest,{'state':'started'})
+                            output=(await self.registry.execute(tool_id,call['args'],call_context))['data']
+                            if business and output.get('result',{}).get('state')!='planned':
+                                work.save('effect:'+digest,{'output':output,'dependencies':dependencies})
+                            work.save(step_key,output)
                         if call['name'] == 'documents__import':
                             doc = output['result']
                             reference = {'resource_type': 'document', 'resource_id': doc['id'], 'revision': doc['revision']}
@@ -178,7 +190,7 @@ class AgentEngine:
                         messages.append(ToolMessage(content=encode(output), tool_call_id=call['id']))
                         if emit: await emit('tool_end', {'tool': call['name']})
                     model_key = f'chunk:{i}:model:{turn+1}'
-                    response = await work.model(model_key, bound, messages)
+                    response = await work.model(model_key,bound,messages,configuration,dependencies)
                 if response.tool_calls: raise ValueError()
                 content = response.content if isinstance(response.content, str) else ''.join(b.get('text', '') for b in response.content if isinstance(b, dict))
                 content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content.strip())
