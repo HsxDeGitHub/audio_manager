@@ -206,6 +206,7 @@ class AgentEngine:
                     if not isinstance(source, dict):
                         continue
                     reference = {key: source.get(key) for key in ('resource_type', 'resource_id', 'revision')}
+                    reference.update({key:source[key] for key in ('line','block_id') if key in source})
                     if any(reference[key] is None for key in reference) or (reference['resource_type'], reference['resource_id'], reference['revision']) not in allowed:
                         continue
                     if not self.evidence.valid(reference):

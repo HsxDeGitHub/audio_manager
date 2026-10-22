@@ -154,7 +154,12 @@ class EvidenceService:
         allowed.update((item['resource_type'], item['resource_id'], item['after_revision'])
                        for change in changes if change['state'] in {'committed', 'planned'} for item in change['items']
                        if (item['resource_type'], item['resource_id']) in frozen_keys)
-        for claim in result.get('claims', []):
+        references=list(result.get('claims', []))
+        for question in result.get('questions') or []:
+            if not isinstance(question,dict) or not isinstance(question.get('source'),dict):
+                raise DomainError('invalid_question','问题缺少有效来源。',409)
+            references.append({'kind':'original_statement','text':question.get('text',''),'sources':[question['source']]})
+        for claim in references:
             if claim.get('kind') not in {'original_statement', 'user_statement', 'analysis', 'suggestion', 'insufficient_evidence'}:
                 raise DomainError('invalid_claim', '模型未区分原话、判断和建议。', 409)
             if claim['kind'] in {'original_statement', 'user_statement'} and not claim.get('sources'):
