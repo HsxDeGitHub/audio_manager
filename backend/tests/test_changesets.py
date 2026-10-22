@@ -83,3 +83,18 @@ def test_manual_content_history_is_persistent_recoverable_and_conflict_checked(c
     request['targets'][0]['fields'] = {'title':'后来'} if kind=='recording' else {'blocks':{'block1':{'text':'后来'}}} if kind=='draft' else {'content':'后来'}
     service.submit(request)
     with pytest.raises(DomainError): service.revert('again','undo-conflict')
+
+
+def test_recording_undo_preserves_playback_and_processing_state(client):
+    from interview_backend.services.library import LibraryService,LibraryCommand
+    db=client.app.state.database;service=ChangeSetService(db);library=LibraryService(db)
+    service.submit({'operation_id':'content-rename','targets':[{'resource_type':'recording','resource_id':'r1','expected_revision':1,'fields':{'title':'新名称','company':'合成公司'}}]})
+    row=next(r for r in library.execute(LibraryCommand(action='recordings'))['value'] if r['id']=='r1')
+    row.update(playPosition=20,state='transcribing',error='合成进度',duration=70)
+    library.execute(LibraryCommand(action='save',operation_id='runtime-progress',arguments={'recording':row}))
+    ChangeSetService(db).revert('content-rename','undo-content')
+    with db.transaction() as c:
+        value=dict(c.execute("SELECT * FROM recordings WHERE id='r1'").fetchone())
+    assert value['title']=='合成面试甲' and value['company'] is None
+    assert value['play_position']==20 and value['state']=='transcribing' and value['duration']==70
+    assert value['error']=='合成进度'

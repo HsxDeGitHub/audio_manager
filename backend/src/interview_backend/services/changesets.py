@@ -108,6 +108,20 @@ def patch(kind, old, fields):
     return value
 
 
+RUNTIME_FIELDS={'recording':{'play_position','state','error','duration'}}
+
+
+def content_snapshot(kind,row):
+    ignored=RUNTIME_FIELDS.get(kind,set())|{'revision'}
+    return {k:v for k,v in row.items() if k not in ignored}
+
+
+def restore_content(kind,current,before,after):
+    # 恢复本次内容差异，保留此后更新的运行字段和当前版本账本。
+    fields={k:v for k,v in content_snapshot(kind,before).items() if after.get(k)!=v}
+    return {**current,**fields}
+
+
 class ChangeSetService:
     def __init__(self, database):
         self.database = database
@@ -176,11 +190,11 @@ class ChangeSetService:
                 items = json.loads(changeset['items'])
                 for item in items:
                     key = (item['resource_type'], item['resource_id'])
-                    if version(c, *key) != item['after_revision'] or read_object(c, *key) != item['after']:
+                    if version(c, *key) != item['after_revision'] or content_snapshot(key[0],read_object(c,*key)) != content_snapshot(key[0],item['after']):
                         raise DomainError('revert_conflict', '对象存在后续修改，整次撤销未执行。', 409)
                 for item in items:
                     key = (item['resource_type'], item['resource_id'])
-                    write_object(c, *key, item['before']); bump(c, *key)
+                    write_object(c,*key,restore_content(key[0],read_object(c,*key),item['before'],item['after'])); bump(c,*key)
                 c.execute("UPDATE changesets SET state='reverted',reverted_by=? WHERE id=?", (operation_id, changeset_id))
                 return {'id': changeset_id, 'state': 'reverted', 'count': len(items)}
             return once(c, operation_id, {'revert': changeset_id}, execute)

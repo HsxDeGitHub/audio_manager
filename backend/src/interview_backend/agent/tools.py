@@ -129,7 +129,8 @@ class EvidenceService:
         if not any(item['before_revision'] == reference['revision'] for item in items): return False
         latest = max(items, key=lambda item: item['after_revision'])
         with self.database.transaction() as c:
-            return version(c, *key) == latest['after_revision'] and read_object(c, *key) == latest['after']
+            from interview_backend.services.changesets import content_snapshot
+            return version(c,*key)==latest['after_revision'] and content_snapshot(key[0],read_object(c,*key))==content_snapshot(key[0],latest['after'])
 
     def fulfilled(self, target, changes):
         """模型重复申报已提交目标时复用事实；不同建议或并发修改仍走版本冲突。"""
