@@ -31,7 +31,8 @@ def bump(c, kind, resource_id):
     c.execute('INSERT INTO index_queue VALUES(?,?,?,?) ON CONFLICT(resource_type,resource_id) DO UPDATE SET revision=excluded.revision,state=excluded.state', (kind, resource_id, revision, 'pending'))
     for row in c.execute("SELECT id,sources FROM memories WHERE state='active'").fetchall():
         if any(s.get('resource_type') == kind and s.get('resource_id') == resource_id for s in json.loads(row['sources'])):
-            c.execute("UPDATE memories SET state='needs_review',revision=revision+1 WHERE id=?", (row['id'],))
+            c.execute("UPDATE memories SET state='needs_review' WHERE id=?", (row['id'],))
+            bump(c, 'memory', row['id'])
     return revision
 
 

@@ -131,3 +131,38 @@ def test_analysis_is_reused_only_for_the_recording_scope(client, config):
     asyncio.run(engine.execute('analysis-same-recording', '分析表现', context, model=InspectModel(1)))
     other = evidence.freeze({'recording_id': 'r2'}, '分析表现')
     asyncio.run(engine.execute('analysis-other-recording', '分析表现', other, model=InspectModel(0)))
+
+
+@pytest.mark.parametrize('fields', [{'state':'deleted'}, {'state':'disabled'}, {'content':'用户纠正'}])
+def test_invalidated_memory_versions_and_latest_user_changes_stay_consistent(client, fields):
+    from interview_backend.services.memory import MemoryService
+    from interview_backend.services.common import bump, version
+    from interview_backend.errors import DomainError
+    db = client.app.state.database
+    service = MemoryService(db, client.app.state.evidence)
+    item = service.add({'category':'analysis','content':'旧分析','topic':'失效','scope':'global',
+                        'sources':[{'resource_type':'segment','resource_id':'s1','revision':1}]},'add-versioned-memory')
+    with db.transaction(True) as c: bump(c,'segment','s1')
+    latest = MemoryService(db, client.app.state.evidence).list()['items'][0]
+    assert latest['state']=='needs_review'
+    with db.transaction() as c:
+        assert version(c,'memory',item['id']) == latest['revision']
+        assert c.execute("SELECT revision FROM index_queue WHERE resource_type='memory' AND resource_id=?",(item['id'],)).fetchone()[0] == latest['revision']
+    with pytest.raises(DomainError) as error: service.update(item['id'],{'state':'active'},item['revision'],'stale-memory')
+    assert error.value.code=='version_conflict'
+    assert service.update(item['id'],fields,latest['revision'],'latest-memory')['count']==1
+
+
+def test_upgrade_repairs_preexisting_memory_version_drift(client):
+    from interview_backend.database import upgrade_database
+    from interview_backend.services.common import version
+    db = client.app.state.database
+    with db.transaction(True) as c:
+        c.execute("INSERT INTO memories VALUES('drift','analysis','保留内容','global','[]','版本','needs_review',NULL,5)")
+        c.execute("INSERT INTO object_versions VALUES('memory','drift',1)")
+        c.execute("UPDATE alembic_version SET version_num='0002_application'")
+    upgrade_database(db.path)
+    with db.transaction() as c:
+        assert version(c,'memory','drift')==5
+        assert c.execute("SELECT revision FROM index_queue WHERE resource_type='memory' AND resource_id='drift'").fetchone()[0]==5
+        assert c.execute("SELECT content FROM memories WHERE id='drift'").fetchone()[0]=='保留内容'
