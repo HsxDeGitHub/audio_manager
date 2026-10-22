@@ -258,6 +258,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def finish_device_command(command_id: str, body: dict):
         return app.state.device.complete(command_id, body.get('owner'), body.get('state'), body.get('result'))
 
+    @app.get('/api/v1/changesets')
+    def list_changes(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200)):
+        return app.state.changesets.list(offset, limit)
+
     @app.post('/api/v1/changesets')
     def submit_changes(body: ChangeRequest):
         return app.state.changesets.submit(body.model_dump())

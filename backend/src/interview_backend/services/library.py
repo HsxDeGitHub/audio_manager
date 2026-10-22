@@ -75,7 +75,7 @@ class LibraryService:
                         kind, identifier = key.split(':', 1)
                         if version(c, kind, identifier) != expected:
                             raise DomainError('version_conflict', '内容已发生后续修改，请刷新后重试。', 409)
-                    return self._execute(c, command.action, command.arguments)
+                    return self._execute(c, command.action, command.arguments, command.operation_id)
                 value = once(c, command.operation_id, {'action': command.action, 'arguments': command.arguments,
                              'expected_versions': command.expected_versions}, apply) if command.action in self.writes else apply()
                 versions = {r['resource_type'] + ':' + r['resource_id']: r['revision'] for r in c.execute('SELECT * FROM object_versions')}
@@ -83,7 +83,7 @@ class LibraryService:
         except (KeyError, TypeError, ValueError, OverflowError):
             raise DomainError('invalid_request', '请求参数不合法。', 422) from None
 
-    def _execute(self, c, action, a):
+    def _execute(self, c, action, a, operation_id=None):
         run = a.get('runID')
         if action in {'runs'}:
             require(c, 'recordings', a['recordingID'])
@@ -125,10 +125,13 @@ class LibraryService:
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,path=excluded.path,bookmark=excluded.bookmark,
                 fingerprint=excluded.fingerprint,duration=excluded.duration,state=excluded.state,error=excluded.error,
                 speaker_count=excluded.speaker_count,play_position=excluded.play_position,active_run=excluded.active_run''',
-                (r['id'], r['title'], r['path'], base64.b64decode(r['bookmark'], validate=True) if r.get('bookmark') is not None else None, r['fingerprint'],
+                (r['id'], old['title'] if old else r['title'], r['path'], base64.b64decode(r['bookmark'], validate=True) if r.get('bookmark') is not None else None, r['fingerprint'],
                  r['duration'], r['createdAt'], r['state'], r.get('error'), r.get('speakerCount'), r['playPosition'], active))
-            if old is None or any(old[k] != r.get(v) for k, v in [('title','title'), ('path','path'), ('active_run','activeRun'), ('speaker_count','speakerCount')]):
+            if old is None or any(old[k] != r.get(v) for k, v in [('path','path'), ('active_run','activeRun'), ('speaker_count','speakerCount')]):
                 bump(c, 'recording', r['id'])
+            if old and old['title'] != r['title']:
+                from interview_backend.services.changesets import ChangeSetService, ChangeRequest
+                return ChangeSetService(self.database)._apply(c, ChangeRequest(operation_id=operation_id, targets=[{'resource_type':'recording', 'resource_id':r['id'], 'expected_revision':version(c,'recording',r['id']), 'fields':{'title':r['title']}}]), None)
             return None
         if action == 'remove':
             require(c, 'recordings', a['id'])

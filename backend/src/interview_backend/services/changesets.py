@@ -160,6 +160,12 @@ class ChangeSetService:
         c.execute('INSERT INTO changesets VALUES(?,?,?,?,NULL)', (request.operation_id, 'committed', encode(items), time.time()))
         return {'id': request.operation_id, 'state': 'committed', 'count': len(items), 'items': items}
 
+    def list(self, offset=0, limit=50):
+        with self.database.transaction() as c:
+            rows = c.execute('SELECT * FROM changesets ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?', (limit, offset)).fetchall()
+            return {'items': [{'id': r['id'], 'state': r['state'], 'items': json.loads(r['items']), 'count': len(json.loads(r['items']))} for r in rows],
+                    'total': c.execute('SELECT count(*) FROM changesets').fetchone()[0], 'offset': offset, 'limit': limit}
+
     def revert(self, changeset_id, operation_id):
         with self.database.transaction(True) as c:
             def execute():

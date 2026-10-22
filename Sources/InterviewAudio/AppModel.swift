@@ -53,6 +53,8 @@ final class AppModel: ObservableObject {
     @Published var showAbout = false
     @Published var showAISettings = false
     @Published var showAICompose = false
+    let changeHistory = ChangeHistoryModel()
+    @Published var showChangeHistory = false
     @Published var showMemories = false
     @Published var showDocuments = false
     @Published var documentSourceID: String?
@@ -153,6 +155,7 @@ final class AppModel: ObservableObject {
             let connection = try await backendProcess.start(dataDirectory: dataDirectory)
             store = BackendLibraryStore(connection: connection)
             backendClient = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 30)
+            changeHistory.client = backendClient
             await assistant.attach(connection)
             deviceBridge?.stop()
             deviceBridge = nil
@@ -194,10 +197,10 @@ final class AppModel: ObservableObject {
     }
     func updateRecordingMetadata(_ id: String, fields: [String: Any], revision: Int) async throws {
         guard let backendClient else { throw BackendClientError.unavailable }
-        struct Receipt: Decodable { let id: String; let state: String; let count: Int }
         let body = try JSONSerialization.data(withJSONObject: ["operation_id": UUID().uuidString,
                                                                "expected_revision": revision, "fields": fields])
-        let _: Receipt = try await backendClient.send("/api/v1/recordings/\(id)", method: "PATCH", body: body)
+        let receipt: AssistantChange = try await backendClient.send("/api/v1/recordings/\(id)", method: "PATCH", body: body)
+        changeHistory.record(receipt); notice = "资料信息已保存，可在修改记录中查看与撤销。"
         reload()
     }
     private func loadTranscript() {
@@ -464,7 +467,9 @@ final class AppModel: ObservableObject {
     func renameRecording(_ id: String, name: String) {
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, var recording = recordings.first(where: { $0.id == id }) else { return }
-        recording.title = title; save(recording)
+        recording.title = title
+        do { guard let store else { throw BackendClientError.unavailable }; try store.save(recording); reload(); notice = "名称已保存，可在修改记录中查看与撤销。" }
+        catch { alert = error.localizedDescription }
     }
     func copyText(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
     func setReaderFontSize(_ size: Double) { readerFontSize = min(22, max(14, size)); savePreferences() }

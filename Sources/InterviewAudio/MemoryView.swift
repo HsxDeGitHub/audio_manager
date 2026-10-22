@@ -31,8 +31,9 @@ final class MemoryModel: ObservableObject {
     @Published var busy = false
     @Published var error: String?
     private let client: BackendClient
+    private let history: ChangeHistoryModel?
 
-    init(client: BackendClient) { self.client = client }
+    init(client: BackendClient, history: ChangeHistoryModel? = nil) { self.client = client; self.history = history }
 
     func load() async {
         loading = true; defer { loading = false }
@@ -46,12 +47,12 @@ final class MemoryModel: ObservableObject {
     func update(_ item: MemoryItem, fields: [String: Any]) async {
         busy = true; defer { busy = false }
         do {
-            struct Receipt: Decodable { let id: String; let state: String; let count: Int }
             let body = try JSONSerialization.data(withJSONObject: ["operation_id": UUID().uuidString,
                                                                    "expected_revision": item.revision, "fields": fields])
-            let _: Receipt = try await client.send("/api/v1/memories/\(item.id)", method: "PATCH", body: body)
+            let receipt: AssistantChange = try await client.send("/api/v1/memories/\(item.id)", method: "PATCH", body: body)
+            history?.record(receipt)
             await load()
-        } catch { self.error = error.localizedDescription; await load() }
+        } catch { let message = error.localizedDescription; await load(); self.error = message }
     }
 }
 
@@ -60,11 +61,12 @@ struct MemoryView: View {
     @StateObject private var model: MemoryModel
     @UIState private var editing: MemoryItem?
     @UIState private var deleting: MemoryItem?
+    @UIState private var showHistory = false
     @Environment(\.dismiss) private var dismiss
 
     init(app: AppModel, client: BackendClient) {
         self.app = app
-        _model = StateObject(wrappedValue: MemoryModel(client: client))
+        _model = StateObject(wrappedValue: MemoryModel(client: client, history: app.changeHistory))
     }
 
     var body: some View {
@@ -77,6 +79,7 @@ struct MemoryView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("修改记录与撤销") { showHistory = true }
                 Button("刷新") { Task { await model.load() } }.disabled(model.busy)
             }
             Divider()
@@ -102,6 +105,7 @@ struct MemoryView: View {
         }
         .padding(24).frame(minWidth: 640, minHeight: 480)
         .task { await model.load() }
+        .sheet(isPresented: $showHistory) { ChangeHistoryView(model: app.changeHistory, onChange: { Task { await model.load() }; app.reload() }) }
         .sheet(item: $editing) { item in
             MemoryEditor(item: item) { text in
                 Task { await model.update(item, fields: ["content": text]) }

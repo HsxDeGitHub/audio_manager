@@ -48,6 +48,7 @@ struct LibraryView: View {
         }
         .tint(accent)
         .background(Color(nsColor: .windowBackgroundColor))
+        .sheet(isPresented: $model.showChangeHistory) { ChangeHistoryView(model: model.changeHistory, onChange: { model.reload() }) }
         .sheet(isPresented: $model.showAbout) { AboutView() }
         .sheet(isPresented: $model.showSettings) { ModelSettingsView(model: model, installer: model.installer) }
         .sheet(isPresented: $model.showAISettings) { AISettingsView(model: model) }
@@ -188,6 +189,7 @@ struct LibraryView: View {
                 if let selected = model.selected {
                     Button("编辑「\(selected.title)」资料信息…") { metadataRecording = selected }.font(.caption)
                 }
+                Button("修改记录与撤销…") { model.showChangeHistory = true }.font(.caption)
                 Button("长期记忆…") { model.showMemories = true }.font(.caption)
                 HStack {
                     Label(model.ready ? "模型已就绪 · 可离线识别" : "模型准备中 / 尚未就绪", systemImage: model.ready ? "checkmark.shield" : "cpu").font(.caption).foregroundStyle(.secondary)

@@ -47,3 +47,39 @@ def test_concurrent_edit_only_one_expected_revision_can_commit(client):
         except DomainError as error: return error.status_code
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert sorted(pool.map(attempt,[1,2])) == [200,409]
+
+
+@pytest.mark.parametrize('kind', ['recording', 'draft', 'document', 'memory'])
+def test_manual_content_history_is_persistent_recoverable_and_conflict_checked(client, kind):
+    import json
+    from interview_backend.services.memory import MemoryService
+    from interview_backend.services.documents import DocumentService
+    from interview_backend.services.common import version
+    db = client.app.state.database
+    identifier = 'r1' if kind == 'recording' else 'draft1'
+    fields = {'title':'手工名称'} if kind == 'recording' else {'blocks':{'block1':{'text':'手工稿件'}}}
+    if kind == 'draft':
+        with db.transaction(True) as c: c.execute("UPDATE ai_drafts SET payload=? WHERE id='draft1'", (json.dumps({'chunks':[{'blocks':[{'id':'block1','text':'原稿','sourceIDs':['s1']}]}]}),))
+    if kind == 'document':
+        identifier = DocumentService(db).import_text('材料','txt','旧内容','import-history')['id']; fields = {'removed':True}
+    if kind == 'memory':
+        identifier = MemoryService(db, client.app.state.evidence).add({'category':'analysis','content':'旧分析','topic':'历史','scope':'global','sources':[{'resource_type':'segment','resource_id':'s1','revision':1}]},'memory-history')['id']; fields = {'state':'disabled'}
+    with db.transaction() as c: revision = version(c,kind,identifier)
+    request = {'operation_id':'manual','targets':[{'resource_type':kind,'resource_id':identifier,'expected_revision':revision,'fields':fields}]}
+    first = client.post('/api/v1/changesets',json=request).json()
+    service = ChangeSetService(db)
+    receipt = next(r for r in service.list()['items'] if r['id']=='manual')
+    assert receipt['count'] == 1 and receipt['items'] == first['items']
+    if kind == 'draft': assert json.loads(receipt['items'][0]['after']['payload'])['chunks'][0]['blocks'][0]['sourceIDs'] == ['s1']
+    service.revert('manual','undo-manual')
+    with db.transaction() as c:
+        from interview_backend.services.changesets import read_object
+        restored = read_object(c,kind,identifier)
+        assert all(restored[k]==v for k,v in receipt['items'][0]['before'].items() if k!='revision')
+        revision = version(c,kind,identifier)
+    request['operation_id']='again'; request['targets'][0]['expected_revision']=revision
+    service.submit(request)
+    request['operation_id']='later'; request['targets'][0]['expected_revision']=revision+1
+    request['targets'][0]['fields'] = {'title':'后来'} if kind=='recording' else {'blocks':{'block1':{'text':'后来'}}} if kind=='draft' else {'content':'后来'}
+    service.submit(request)
+    with pytest.raises(DomainError): service.revert('again','undo-conflict')

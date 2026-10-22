@@ -84,6 +84,12 @@ final class BackendLibraryStore {
     func readingCache(runID: String) throws -> [String: [String: String]] { try decode("readingCache", ["runID": runID]) }
     func saveReadingCache(runID: String, key: String, rendered: [String: String]) throws { _ = try json("saveReadingCache", ["runID": runID, "key": key, "rendered": rendered]) }
     func aiDrafts(runID: String) throws -> [AIDraft] { try decode("aiDrafts", ["runID": runID]) }
+    func editAIDraftBlock(draftID: String, blockID: String, title: String, text: String) throws -> AssistantChange {
+        let data = try request("/api/v1/changesets", method: "POST", body: ["operation_id": UUID().uuidString,
+            "targets": [["resource_type": "draft", "resource_id": draftID, "expected_revision": versions["draft:\(draftID)"] ?? 1,
+                         "fields": ["blocks": [blockID: ["title": title, "text": text]]]]]])
+        return try JSONDecoder().decode(AssistantChange.self, from: data)
+    }
     func saveAIDraft(_ draft: AIDraft) throws { _ = try json("saveAIDraft", ["draft": object(draft)]) }
     func search(_ term: String, recordingID: String? = nil, punctuate: Bool = true, paragraphBreaks: Bool = true, density: ReadingDensity = .balanced, smartPunctuation: Bool = false) throws -> [SearchHit] {
         guard !term.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }

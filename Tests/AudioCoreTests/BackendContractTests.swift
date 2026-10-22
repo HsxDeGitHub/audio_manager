@@ -436,6 +436,25 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(item.sources.first?.resourceType == "message" && item.sources.first?.resourceID == "msg1")
     }
 
+    @Test @MainActor func manualChangesRemainVisibleAndUndoAfterReload() async throws {
+        var reverted = false
+        BackendStubProtocol.respond = { request in
+            if request.url!.path.hasSuffix("/revert") {
+                reverted = true
+                return (200, Data(#"{"id":"manual","state":"reverted","count":1}"#.utf8))
+            }
+            return (200, Data("{\"items\":[{\"id\":\"manual\",\"state\":\"\(reverted ? "reverted" : "committed")\",\"count\":1,\"items\":[{\"before\":{\"title\":\"旧名称\"},\"after\":{\"title\":\"新名称\"}}]}],\"total\":1}".utf8))
+        }
+        let history = ChangeHistoryModel(); history.client = try client()
+        await history.load()
+        #expect(history.items.first?.count == 1)
+        let item = try #require(history.items.first?.items?.first)
+        #expect(ChangeDifference.describe(item).contains("旧名称"))
+        #expect(ChangeDifference.describe(item).contains("新名称"))
+        #expect(await history.revert("manual"))
+        #expect(history.items.first?.state == "reverted")
+    }
+
     @Test func deviceVersionChangeBlocksExecution() async throws {
         BackendStubProtocol.respond = { request in
             #expect(request.url?.path == "/api/v1/device/commands/frozen/validate")

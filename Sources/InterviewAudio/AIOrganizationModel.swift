@@ -97,15 +97,11 @@ extension AppModel {
         if var draft = aiWorkingDraft { draft.state = .interrupted; try? persistAI(draft) }
     }
     func saveAIBlock(draftID: String, blockID: String, title: String, text: String) {
-        guard var draft = aiDrafts.first(where: { $0.id == draftID }), draft.id != aiActiveDraftID else { return }
-        for i in draft.chunks.indices {
-            if let j = draft.chunks[i].blocks?.firstIndex(where: { $0.id == blockID }) {
-                draft.chunks[i].blocks?[j].title = title
-                draft.chunks[i].blocks?[j].text = text
-                do { try persistAI(draft); notice = "整理稿已保存" } catch { alert = error.localizedDescription }
-                return
-            }
-        }
+        guard let draft = aiDrafts.first(where: { $0.id == draftID }), draft.id != aiActiveDraftID, let store else { return }
+        do {
+            let receipt = try store.editAIDraftBlock(draftID: draftID, blockID: blockID, title: title, text: text)
+            changeHistory.record(receipt); loadAIDrafts(); notice = "整理稿已保存，可在修改记录中查看与撤销。"
+        } catch { alert = error.localizedDescription }
     }
     func openAISource(_ source: AISource, play: Bool) {
         readerShowsAI = false; reviewFilter = .all

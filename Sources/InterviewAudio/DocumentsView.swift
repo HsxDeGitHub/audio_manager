@@ -9,7 +9,8 @@ final class DocumentsModel: ObservableObject {
     @Published var error: String?
     @Published var notice: String?
     private let client: BackendClient
-    init(client: BackendClient) { self.client = client }
+    private let history: ChangeHistoryModel?
+    init(client: BackendClient, history: ChangeHistoryModel? = nil) { self.client = client; self.history = history }
     func load() async {
         do { items = try await client.documents() }
         catch { self.error = error.localizedDescription }
@@ -30,7 +31,8 @@ final class DocumentsModel: ObservableObject {
     func update(_ item: BackendDocument, fields: [String: Any]) async {
         busy = true; error = nil; defer { busy = false }
         do {
-            _ = try await client.updateDocument(id: item.id, revision: item.revision, fields: fields, operationID: UUID().uuidString)
+            let receipt = try await client.updateDocument(id: item.id, revision: item.revision, fields: fields, operationID: UUID().uuidString)
+            history?.record(receipt)
             notice = fields["removed"] as? Bool == true ? "已移除材料，旧引用不再作为当前证据。" : "材料已保存，旧引用已失效。"
             await load()
         } catch { self.error = error.localizedDescription; await load() }
@@ -43,10 +45,11 @@ struct DocumentsView: View {
     @UIState private var selectedID: String?
     @UIState private var editing: BackendDocument?
     @UIState private var removing: BackendDocument?
+    @UIState private var showHistory = false
     @Environment(\.dismiss) private var dismiss
     init(app: AppModel, client: BackendClient) {
         self.app = app
-        _model = StateObject(wrappedValue: DocumentsModel(client: client))
+        _model = StateObject(wrappedValue: DocumentsModel(client: client, history: app.changeHistory))
     }
     private var selected: BackendDocument? { model.items.first { $0.id == selectedID } }
     var body: some View {
@@ -55,6 +58,7 @@ struct DocumentsView: View {
                 Text("个人材料").font(.title2.weight(.semibold))
                 Spacer()
                 Button("导入 TXT / Markdown…") { importFile() }.disabled(model.busy)
+                Button("修改记录与撤销") { showHistory = true }
                 Button("刷新") { Task { await model.load() } }.disabled(model.busy)
             }
             Text("材料保存在本机，与助手共用版本校验和内容去重；引用可定位到具体行。")
@@ -98,6 +102,7 @@ struct DocumentsView: View {
         }.padding(20).frame(minWidth: 740, minHeight: 500)
         .task { await model.load(); selectedID = app.documentSourceID ?? model.items.first?.id }
         .onChange(of: app.documentSourceID) { _, id in selectedID = id }
+        .sheet(isPresented: $showHistory) { ChangeHistoryView(model: app.changeHistory, onChange: { Task { await model.load() }; app.reload() }) }
         .sheet(item: $editing) { item in
             DocumentEditor(item: item) { title, content in Task { await model.update(item, fields: ["title": title, "content": content]) } }
         }

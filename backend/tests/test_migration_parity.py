@@ -66,3 +66,16 @@ def test_cache_draft_and_removal_cascade_without_deleting_source(client):
 @pytest.mark.parametrize('action,args', [('editTexts', {'edits': {'s1': 42}}), ('renameSpeaker', {'runID': 'run1', 'speaker': -1, 'name': '错误'}), ('unsupported', {})])
 def test_invalid_operations_are_rejected(client, action, args):
     assert invoke(client, action, args).status_code == 422
+
+
+def test_manual_rename_is_recoverable_after_service_recreation(client):
+    from interview_backend.services.changesets import ChangeSetService
+    row = invoke(client, 'recordings').json()['value'][1]
+    row['title'] = '手工新名称'
+    result = invoke(client, 'save', {'recording': row}, 'manual-rename')
+    assert result.status_code == 200
+    history = client.get('/api/v1/changesets').json()['items']
+    assert history[0]['count'] == 1 and history[0]['items'][0]['before']['title'] == '合成面试甲'
+    restarted = ChangeSetService(client.app.state.database)
+    restarted.revert(history[0]['id'], 'undo-manual-name')
+    assert client.get('/api/v1/recordings/r1').json()['title'] == '合成面试甲'
