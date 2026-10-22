@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from interview_backend.errors import DomainError
 from interview_backend.services.common import encode, require
+from interview_backend.agent.streaming import output_snapshot
 
 
 class NewSession(BaseModel):
@@ -46,10 +47,42 @@ class AgentAPI:
         with self.database.transaction() as c:
             require(c, 'sessions', session_id)
             return {'items': [{**dict(r), 'context': json.loads(r['context'])} for r in c.execute('SELECT * FROM messages WHERE session_id=? ORDER BY created_at,id', (session_id,))],
-                    'runs': [{**dict(r), 'context': json.loads(r['context']), 'result': self.current_result(c,r)} for r in c.execute('SELECT * FROM agent_runs WHERE session_id=? ORDER BY created_at,id', (session_id,))]}
+                    'runs': [{**dict(r), 'context': json.loads(r['context']), 'result': self.current_result(c,r), 'output':output_snapshot(c,r['id'])} for r in c.execute('SELECT * FROM agent_runs WHERE session_id=? ORDER BY created_at,id', (session_id,))]}
+
+    def conversation(self, session_id):
+        rounds=[]; remaining=16000; omitted=False
+        with self.database.transaction() as c:
+            rows=c.execute("SELECT m.content,r.result FROM agent_runs r JOIN messages m ON m.id=r.message_id WHERE r.session_id=? AND r.state IN ('completed','awaiting_input') ORDER BY r.created_at DESC,r.id DESC LIMIT 7",(session_id,)).fetchall()
+        for row in rows[:6]:
+            result=json.loads(row['result']) if row['result'] else {}
+            question=row['content']; answer=result.get('answer','')
+            if not answer:continue
+            if len(question)+len(answer)>remaining:
+                omitted=True
+                if rounds:break
+                # 超长最近轮次保留带标记的首尾；不把节选伪装为完整历史。
+                budget=remaining//2-16
+                def excerpt(value):
+                    return value if len(value)<=budget else value[:budget//2]+'\n[较早内容已省略]\n'+value[-budget//2:]
+                question,answer=excerpt(question),excerpt(answer)
+            remaining-=len(question)+len(answer)
+            rounds.insert(0,[{'role':'user','content':question},{'role':'assistant','content':answer}])
+        return [message for pair in rounds for message in pair], omitted or len(rows)>6
 
     async def start(self, body):
+        # 响应丢失后的幂等重试不能先重新冻结已由该运行修改的版本。
+        with self.database.transaction() as c:
+            require(c,'sessions',body.session_id)
+            prior=c.execute('SELECT * FROM messages WHERE id=?',(body.message_id,)).fetchone()
+            if prior:
+                original=json.loads(prior['context'])
+                if prior['session_id']!=body.session_id or prior['content']!=body.instruction or ('request_context' in original and original['request_context']!=body.context):
+                    raise DomainError('message_conflict','消息标识已用于不同指令或范围。',409)
+                run=c.execute('SELECT id,state FROM agent_runs WHERE message_id=?',(body.message_id,)).fetchone()
+                return {'id':run['id'],'state':run['state']}
         context = self.evidence.freeze(body.context, body.instruction)
+        context['request_context']=body.context
+        context['conversation_history'],context['history_omitted']=self.conversation(body.session_id)
         if hasattr(self.engine, 'reports') and __import__('re').search(r'本周|这周|周报', body.instruction):
             context['report_plan'] = self.engine.reports.freeze(context, body.instruction)
         context['instruction'] = body.instruction
@@ -69,6 +102,7 @@ class AgentAPI:
             c.execute("UPDATE agent_runs SET state='completed' WHERE session_id=? AND state='awaiting_input'", (body.session_id,))
             c.execute('INSERT INTO messages VALUES(?,?,?,?,?,?)', (body.message_id, body.session_id, 'user', body.instruction, encode(context), time.time()))
             c.execute('INSERT INTO agent_runs VALUES(?,?,?,?,?,?,?)', (identifier, body.session_id, body.message_id, 'queued', encode(context), None, time.time()))
+            c.execute("UPDATE sessions SET title=? WHERE id=? AND title='新对话'", (' '.join(body.instruction.split())[:24],body.session_id))
         self.tasks[identifier] = asyncio.create_task(self._execute(identifier))
         return {'id': identifier, 'state': 'queued'}
 
@@ -89,7 +123,12 @@ class AgentAPI:
                 c.execute("UPDATE agent_runs SET state='running' WHERE id=?", (identifier,))
             context = json.loads(run['context'])
             await self.emit(identifier, 'started', {'state': 'running'})
-            result = await self.engine.execute(identifier, context['instruction'], context, emit=lambda k,p: self.emit(identifier,k,p))
+            attempt=str(uuid.uuid4())
+            await self.emit(identifier,'answer_reset',{'attempt_id':attempt})
+            async def emit(kind,payload):
+                if kind in {'answer_start','answer_delta'}:payload={**payload,'attempt_id':attempt}
+                await self.emit(identifier,kind,payload)
+            result = await self.engine.execute(identifier, context['instruction'], context, emit=emit)
             if hasattr(self.engine, 'automatic_memory') and not result.get('clarification'):
                 try: result['memories'] = await self.engine.automatic_memory.extract(context, result=result)
                 except Exception: await self.emit(identifier, 'memory_pending', {'message':'自动记忆尚未完成，当前回答已保留。'})
@@ -153,7 +192,7 @@ class AgentAPI:
     def get(self, identifier):
         with self.database.transaction() as c:
             row = require(c, 'agent_runs', identifier)
-            return {**row, 'context': json.loads(row['context']), 'result': self.current_result(c,row)}
+            return {**row, 'context': json.loads(row['context']), 'result': self.current_result(c,row), 'output':output_snapshot(c,identifier)}
 
     async def cancel(self, identifier):
         with self.database.transaction(True) as c:

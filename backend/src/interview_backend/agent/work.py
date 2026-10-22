@@ -56,16 +56,23 @@ class WorkLog:
             digest=hashlib.sha256(encode({'tool':call['name'],'arguments':call['args']}).encode()).hexdigest()[:24]
             if self.effect(digest) is not None or self.started(digest):self.reserve(key.replace(':model:',':slot:')+':'+str(index),call['name'],digest)
 
-    async def model(self,key,bound,messages,configuration=None,dependencies=()):
+    async def model(self,key,bound,messages,configuration=None,dependencies=(),emit=None):
         from langchain_core.messages import AIMessage
         signature=hashlib.sha256(encode({'messages':[m.model_dump(mode='json') for m in messages],'configuration':configuration}).encode()).hexdigest()
         cached=self.get(key)
         if cached is not None:
             response=cached.get('response',cached)
             self.preserve_legacy_effects(key,response)
-            if cached.get('input_hash')==signature and self.valid(cached.get('dependencies',[])):return AIMessage.model_validate(response)
+            if cached.get('input_hash')==signature and self.valid(cached.get('dependencies',[])):
+                value=AIMessage.model_validate(response)
+                if emit and not value.tool_calls:
+                    from interview_backend.agent.streaming import answer_prefix, text_content
+                    await emit('answer_start',{'block_id':self.run_id+':'+key})
+                    await emit('answer_delta',{'block_id':self.run_id+':'+key,'text':answer_prefix(text_content(value))})
+                return value
         if not self.valid(dependencies):raise DomainError('stale_source','模型步骤的证据依赖已变化，未发送过期内容。',409)
-        response=await bound.ainvoke(messages)
+        from interview_backend.agent.streaming import invoke
+        response=await invoke(bound,messages,emit,self.run_id+':'+key)
         self.save(key,{'input_hash':signature,'dependencies':list(dependencies),'response':response.model_dump(mode='json')})
         return response
 

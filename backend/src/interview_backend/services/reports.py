@@ -47,7 +47,8 @@ class ReportService:
         for recording in plan['targets']:
             if not recording['active_run'] or recording['state'] != 'completed':
                 failed.append({'id': recording['id'], 'title': recording['title'], 'reason': '转写或处理未完成'}); continue
-            child = {**frozen['contexts'][recording['id']], 'root_run_id': run_id}
+            child = {**frozen['contexts'][recording['id']], 'root_run_id': run_id,
+                     'conversation_history':parent.get('conversation_history',[]), 'history_omitted':parent.get('history_omitted',False)}
             try:
                 if any(not self.evidence.valid_after_changes(r, self.evidence.committed(run_id)) for r in child['resources']):
                     raise DomainError('stale_context', '周目标内容已变化，请基于当前资料重新执行。', 409)
