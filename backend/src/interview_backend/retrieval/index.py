@@ -4,6 +4,7 @@ from interview_backend.retrieval.lexical import tokens, query
 from interview_backend.retrieval.semantic import SemanticIndex
 from interview_backend.services.common import version, encode
 from interview_backend.services.draft_sources import draft_current
+from interview_backend.services.source_validity import source_valid
 
 
 class RetrievalIndex:
@@ -25,7 +26,7 @@ class RetrievalIndex:
             text = '\n\n'.join(b.get('text','') for chunk in payload.get('chunks',[]) for b in chunk.get('blocks') or [])
             if text: values.append(('draft',row['id'],version(c,'draft',row['id']),text))
         for row in c.execute("SELECT * FROM memories WHERE state='active'"):
-            # 引用状态仍由 MemoryService 在注入前逐项复核。
+            if not source_valid(c, {'resource_type':'memory','resource_id':row['id'],'revision':row['revision']}): continue
             values.append(('memory',row['id'],row['revision'],row['content']))
         return values
     def sync(self):
@@ -82,6 +83,8 @@ class RetrievalIndex:
         results = []
         for row in sorted(rows,key=lambda r:-ranks.get(r['id'],0)):
             if row['id'] not in ranks or (allowed is not None and (row['resource_type'],row['resource_id']) not in allowed): continue
+            with self.database.transaction() as c:
+                if not source_valid(c, row): continue
             row.pop('vector'); row['score'] = ranks[row['id']]; results.append(row)
             if len(results)>=limit: break
         return results

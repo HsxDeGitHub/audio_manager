@@ -140,3 +140,37 @@ def test_explicit_preparation_reports_progress_failure_and_keyword_fallback(clie
     client.app.state.documents.import_text('回退材料', 'txt', '关键词回退仍能查找 Redis', 'fallback')
     response = client.get('/api/v1/retrieval/search?q=Redis').json()
     assert response['items'] and response['semantic']['keyword_fallback']
+
+
+@pytest.mark.parametrize('kind,identifier,fields', [
+    ('segment','s1',{'text':'原文发生变化'}), ('speaker','run1:0',{'name':'新名称'}),
+])
+def test_indirect_draft_memory_dependency_exits_injection_search_and_references(client, config, kind, identifier, fields):
+    import json
+    from interview_backend.services.memory import MemoryService
+    from interview_backend.services.draft_sources import source_fingerprint
+    db=client.app.state.database; evidence=client.app.state.evidence
+    with db.transaction(True) as c:
+        c.execute("UPDATE ai_drafts SET payload=? WHERE id='draft1'",(json.dumps({'sourceHash':source_fingerprint(c,'run1'),'chunks':[{'blocks':[{'id':'b','text':'依赖稿件记忆','sourceIDs':['s1']}]}]}),))
+    service=MemoryService(db,evidence)
+    first=service.add({'category':'analysis','content':'派生独有记忆','topic':'依赖','scope':'global','sources':[{'resource_type':'draft','resource_id':'draft1','revision':1}]},'derived-memory')
+    second=service.add({'category':'analysis','content':'间接独有记忆','topic':'间接','scope':'global','sources':[{'resource_type':'memory','resource_id':first['id'],'revision':1}]},'indirect-memory')
+    index=RetrievalIndex(db,config.backend_dir)
+    assert any(r['resource_type']=='memory' for r in index.search('独有记忆'))
+    client.app.state.changesets.submit({'operation_id':'dependency-change','targets':[{'resource_type':kind,'resource_id':identifier,'expected_revision':1,'fields':fields}]})
+    for item in [first,second]: assert not evidence.valid({'resource_type':'memory','resource_id':item['id'],'revision':1})
+    assert service.active()==[]
+    assert not any(r['resource_type']=='memory' for r in index.search('独有记忆'))
+
+
+def test_legacy_active_memory_with_stale_draft_and_cycles_is_rejected_consistently(client,config):
+    import json
+    from interview_backend.services.memory import MemoryService
+    db=client.app.state.database; evidence=client.app.state.evidence
+    with db.transaction(True) as c:
+        c.execute("INSERT INTO memories VALUES('legacy','analysis','失效独有记忆','global',?,'旧版','active',NULL,1)",(json.dumps([{'resource_type':'draft','resource_id':'draft1','revision':1}]),))
+        c.execute("INSERT INTO memories VALUES('cycle','analysis','循环独有记忆','global',?,'循环','active',NULL,1)",(json.dumps([{'resource_type':'memory','resource_id':'cycle','revision':1}]),))
+    for identifier in ['legacy','cycle']:
+        assert not evidence.valid({'resource_type':'memory','resource_id':identifier,'revision':1})
+    assert MemoryService(db,evidence).active()==[]
+    assert not any(r['resource_type']=='memory' for r in RetrievalIndex(db,config.backend_dir).search('独有记忆'))

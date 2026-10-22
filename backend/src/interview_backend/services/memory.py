@@ -89,7 +89,7 @@ class MemoryService:
 
     def active(self, scopes=('global',)):
         items = self.list()['items']
-        return [r for r in items if r['state'] == 'active' and r['scope'] in scopes and all(self.evidence.valid(s) for s in r['sources'])]
+        return [r for r in items if r['state'] == 'active' and r['scope'] in scopes and self.evidence.valid({'resource_type':'memory','resource_id':r['id'],'revision':r['revision']})]
 
     def update(self, identifier, fields, expected_revision, operation_id):
         from interview_backend.services.changesets import ChangeSetService

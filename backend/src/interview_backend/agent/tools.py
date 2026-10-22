@@ -124,14 +124,8 @@ class EvidenceService:
         return {'resource_type': kind, 'resource_id': identifier, 'revision': version(c, kind, identifier)}
 
     def valid(self, reference):
-        from interview_backend.services.changesets import read_object
-        with self.database.transaction() as c:
-            try:
-                obj = read_object(c, reference['resource_type'], reference['resource_id'])
-                if reference['resource_type'] == 'draft' and not draft_current(c, obj): return False
-                return version(c, reference['resource_type'], reference['resource_id']) == reference['revision'] and not obj.get('removed') and (reference['resource_type'] != 'memory' or obj.get('state') == 'active')
-            except (DomainError, KeyError, ValueError):
-                return False
+        from interview_backend.services.source_validity import source_valid
+        with self.database.transaction() as c: return source_valid(c, reference)
 
     def committed(self, run_id):
         """业务账本是提交事实；不依赖模型响应或另一个数据库的检查点。"""
