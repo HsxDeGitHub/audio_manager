@@ -16,15 +16,22 @@ class JobService:
             c.execute("UPDATE device_commands SET state='unknown',owner=NULL WHERE state='running'")
             c.execute("UPDATE device_commands SET state='cancelled',result=? WHERE state='pending'", (encode({'reason':'restart','message':'上次命令尚未领取，需明确继续任务。'}),))
 
-    def start(self, request):
+    def get(self, identifier):
+        with self.database.transaction() as c:
+            row = require(c, 'jobs', identifier)
+            return {**row, 'payload':json.loads(row['payload']), 'result':json.loads(row['result']) if row['result'] else None}
+
+    def start(self, request, state='running'):
         with self.database.transaction(True) as c:
             require(c, 'recordings', request['recordingID'])
-            return once(c, request['jobID'] + ':start', request, lambda: self._start(c, request))
+            once(c, request['jobID'] + ':start', request, lambda: self._start(c, request, state))
+            if state == 'running': c.execute("UPDATE jobs SET state='running' WHERE id=? AND state='queued'",(request['jobID'],))
+            return {'state':require(c,'jobs',request['jobID'])['state'], 'job_id':request['jobID']}
 
-    def _start(self, c, request):
+    def _start(self, c, request, state='running'):
         c.execute('INSERT INTO jobs(id,kind,target,state,payload) VALUES(?,?,?,?,?)',
-                  (request['jobID'], 'audio', request['recordingID'], 'running', encode(request)))
-        return {'state': 'running', 'job_id': request['jobID']}
+                  (request['jobID'], 'audio', request['recordingID'], state, encode(request)))
+        return {'state': state, 'job_id': request['jobID']}
 
     def event(self, request, event):
         with self.database.transaction(True) as c:

@@ -436,6 +436,23 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(item.sources.first?.resourceType == "message" && item.sources.first?.resourceID == "msg1")
     }
 
+    @Test @MainActor func unavailableAudioAndRejectedStartsCannotReportSuccess() async throws {
+        let player = PlayerController()
+        await #expect(throws: (any Error).self) { try await player.seekVerified(10, play: true) }
+        #expect(!player.playing)
+        #expect(throws: (any Error).self) { try DeviceExecutionResult.started(taskID: nil, state: "started", statusPath: "") }
+        let receipt = try DeviceExecutionResult.started(taskID: "job", state: "queued", statusPath: "/api/v1/jobs/job")
+        #expect(receipt["task_id"] as? String == "job" && receipt["state"] as? String == "queued")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(dataDirectoryOverride: root)
+        #expect(app.enqueue("absent") == nil)
+        var recording = Recording(title: "合成", path: "/synthetic/unavailable.wav", fingerprint: "synthetic", duration: 5)
+        recording.activeRun = "synthetic-run"; app.recordings = [recording]; app.selectedID = recording.id
+        #expect(app.startAI(mode: .dialogue, instructions: "合成") == nil)
+        #expect(app.aiActiveDraftID == nil)
+    }
+
     @Test @MainActor func manualChangesRemainVisibleAndUndoAfterReload() async throws {
         var reverted = false
         BackendStubProtocol.respond = { request in

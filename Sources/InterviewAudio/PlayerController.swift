@@ -89,5 +89,29 @@ final class PlayerController: ObservableObject {
         else { player.pause(); playing = false }
         onPosition?(target)
     }
+    struct PlaybackReceipt { let position: Double; let playing: Bool }
+    func seekVerified(_ seconds: Double, play: Bool) async throws -> PlaybackReceipt {
+        guard available, let player else { throw AudioError.message("原音频不可用，未开始回听。") }
+        let token = generation, target = min(duration, max(0, seconds))
+        defer { if Task.isCancelled { player.pause(); playing = false } }
+        stopLoop()
+        let finished = await withCheckedContinuation { continuation in
+            player.seek(to: CMTime(seconds: target, preferredTimescale: 1000), toleranceBefore: .zero, toleranceAfter: .zero) { continuation.resume(returning: $0) }
+        }
+        try Task.checkCancellation()
+        guard finished, token == generation, abs(player.currentTime().seconds - target) < 0.25 else { throw AudioError.message("音频定位失败，请重试。") }
+        if play {
+            player.playImmediately(atRate: speed)
+            for _ in 0..<20 {
+                try Task.checkCancellation()
+                if player.timeControlStatus == .playing { break }
+                if player.status == .failed { break }
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard token == generation, player.timeControlStatus == .playing else { player.pause(); playing = false; throw AudioError.message("音频尚未实际播放，请检查音频状态。") }
+        } else { player.pause() }
+        position = player.currentTime().seconds; playing = play; onPosition?(position)
+        return PlaybackReceipt(position: position, playing: playing)
+    }
     func setSpeed(_ value: Float) { speed = value; if playing { player?.rate = value } }
 }

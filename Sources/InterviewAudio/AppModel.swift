@@ -4,7 +4,7 @@ import AVFoundation
 import UniformTypeIdentifiers
 import AudioCore
 
-private struct QueuedJob { var recordingID: String; var speakersOnly: Bool }
+private struct QueuedJob { let request: WorkerRequest; var recordingID: String { request.recordingID }; var speakersOnly: Bool { request.speakersOnly } }
 
 @MainActor
 final class AppModel: ObservableObject {
@@ -108,9 +108,9 @@ final class AppModel: ObservableObject {
     var currentSegmentID: String? { player.available ? segments.first { $0.start <= player.position && player.position < $0.end }?.id : nil }
     func utteranceID(for segmentID: String?) -> String? { segmentID.flatMap { segmentToUtterance[$0] } }
 
-    init() {
+    init(dataDirectoryOverride: URL? = nil) {
         let override = ProcessInfo.processInfo.environment["INTERVIEW_AUDIO_DATA_DIR"]
-        dataDirectory = override.map { URL(fileURLWithPath: $0, isDirectory: true) }
+        dataDirectory = dataDirectoryOverride ?? override.map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("InterviewAudio", isDirectory: true)
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let resources = Bundle.main.resourceURL ?? cwd
@@ -291,24 +291,29 @@ final class AppModel: ObservableObject {
         if !failures.isEmpty { alert = failures.joined(separator: "\n") }
         if !ready, imported > 0 { showSettings = true }
     }
-    func enqueue(_ id: String, speakersOnly: Bool = false) {
-        guard ready else { showSettings = true; return }
-        guard activeRecordingID != id, !queue.contains(where: { $0.recordingID == id }), var recording = recordings.first(where: { $0.id == id }) else { return }
-        if speakersOnly && recording.activeRun == nil { return }
-        queue.append(QueuedJob(recordingID: id, speakersOnly: speakersOnly))
-        recording.state = .queued; recording.error = nil; save(recording)
-        startNext()
+    @discardableResult func enqueue(_ id: String, speakersOnly: Bool = false) -> String? {
+        guard ready else { showSettings = true; alert = "处理资源尚未就绪。"; return nil }
+        guard let store, activeRecordingID != id, !queue.contains(where: { $0.recordingID == id }), var recording = recordings.first(where: { $0.id == id }) else { return nil }
+        guard !speakersOnly || recording.activeRun != nil else { return nil }
+        guard FileManager.default.fileExists(atPath: resolve(recording).path) else { alert = "原音频不可用。"; return nil }
+        let request = WorkerRequest(recordingID: recording.id, runID: speakersOnly ? recording.activeRun! : UUID().uuidString,
+                                    source: resolve(recording).path, fingerprint: recording.fingerprint,
+                                    toolsDirectory: toolsDirectory.path, modelsDirectory: modelsDirectory.path,
+                                    temporaryDirectory: dataDirectory.appendingPathComponent("Temporary").path,
+                                    speakerCount: recording.speakerCount, speakersOnly: speakersOnly)
+        do {
+            try store.queueWorker(request)
+            recording.state = .queued; recording.error = nil; try store.save(recording); reload()
+        } catch { try? store.stopWorker(request.jobID, state: "failed"); alert = error.localizedDescription; return nil }
+        queue.append(QueuedJob(request: request)); startNext()
+        return activeJobID == request.jobID || queue.contains(where: { $0.request.jobID == request.jobID }) ? request.jobID : nil
     }
     func enqueuePending() { for recording in recordings where recording.state == .idle { enqueue(recording.id) } }
     private func startNext() {
         guard worker == nil, !queue.isEmpty, ready else { return }
         let job = queue.removeFirst()
         guard let recording = recordings.first(where: { $0.id == job.recordingID }) else { startNext(); return }
-        let request = WorkerRequest(recordingID: recording.id, runID: job.speakersOnly ? recording.activeRun! : UUID().uuidString,
-                                    source: resolve(recording).path, fingerprint: recording.fingerprint,
-                                    toolsDirectory: toolsDirectory.path, modelsDirectory: modelsDirectory.path,
-                                    temporaryDirectory: dataDirectory.appendingPathComponent("Temporary").path,
-                                    speakerCount: recording.speakerCount, speakersOnly: job.speakersOnly)
+        let request = job.request
         self.request = request; activeJobID = request.jobID; activeRecordingID = recording.id
         cancelledJob = false; progress = nil; phaseMessage = "准备处理"
         do {
@@ -344,6 +349,7 @@ final class AppModel: ObservableObject {
                 DispatchQueue.main.async { self?.finish(status: child.terminationStatus, requestURL: requestURL, logURL: logURL) }
             }
         } catch {
+            try? store?.stopWorker(request.jobID, state: "failed")
             worker = nil; activeJobID = nil; activeRecordingID = nil
             var updated = recording; updated.state = .failed; updated.error = error.localizedDescription; save(updated)
             startNext()
@@ -375,6 +381,7 @@ final class AppModel: ObservableObject {
         startNext()
     }
     func cancel(_ id: String) {
+        for queued in queue where queued.recordingID == id { try? store?.stopWorker(queued.request.jobID, state: "cancelled") }
         queue.removeAll { $0.recordingID == id }
         if activeRecordingID == id { if let job = activeJobID { try? store?.stopWorker(job, state: "cancelled") }; cancelledJob = true; worker?.terminate(); phaseMessage = "正在取消并清理临时文件…" }
         if var recording = recordings.first(where: { $0.id == id }) { recording.state = .cancelled; recording.error = nil; save(recording) }

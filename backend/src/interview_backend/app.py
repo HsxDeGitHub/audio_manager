@@ -226,6 +226,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def library_execute(command: LibraryCommand):
         return app.state.library.execute(command)
 
+    @app.post('/api/v1/jobs/queue')
+    def queue_job(request: dict):
+        return app.state.jobs.start(request, state='queued')
+
+    @app.get('/api/v1/jobs/{job_id}')
+    def get_job(job_id: str):
+        return app.state.jobs.get(job_id)
+
     @app.post('/api/v1/jobs/start')
     def start_job(request: dict):
         return app.state.jobs.start(request)

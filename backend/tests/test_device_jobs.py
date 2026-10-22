@@ -191,3 +191,13 @@ def test_cancel_claim_race_blocks_new_commands_and_keeps_running_result_truthful
     with pytest.raises(DomainError): device.enqueue('clipboard','',{'text':'太晚'},run_id=parent,command_id='after-cancel')
     # 领取先发生，真实副作用已完成，必须保留实际结果。
     assert device.complete('claimed','owner','completed',{'characters':3})['state']=='completed'
+
+
+def test_worker_queue_and_start_have_queryable_real_states(client):
+    request={'jobID':'queued-worker','recordingID':'r1','runID':'queued-run','source':'/synthetic/a.wav'}
+    assert client.post('/api/v1/jobs/queue',json=request).json()['state']=='queued'
+    assert client.get('/api/v1/jobs/queued-worker').json()['state']=='queued'
+    assert client.post('/api/v1/jobs/start',json=request).json()['state']=='running'
+    assert client.get('/api/v1/jobs/queued-worker').json()['state']=='running'
+    client.app.state.jobs.stop('queued-worker','failed')
+    assert client.get('/api/v1/jobs/queued-worker').json()['state']=='failed'

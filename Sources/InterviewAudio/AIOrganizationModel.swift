@@ -30,8 +30,8 @@ extension AppModel {
     func saveAISettings(_ settings: AISettings) throws {
         try settings.validate(); try settings.save(to: aiConfigurationURL); aiSettings = settings
     }
-    func startAI(mode: AIOrganizationMode, instructions: String) {
-        guard aiActiveDraftID == nil, let recording = selected, let run = recording.activeRun else { return }
+    @discardableResult func startAI(mode: AIOrganizationMode, instructions: String) -> String? {
+        guard aiActiveDraftID == nil, let recording = selected, let run = recording.activeRun else { return nil }
         do {
             // Read the harness-style configuration again so external file edits also take effect.
             let settings = try AISettings.load(from: aiConfigurationURL); try settings.validate(); aiSettings = settings
@@ -39,8 +39,8 @@ extension AppModel {
                                     settings: settings, mode: mode, instructions: instructions,
                                     sources: AISource.snapshot(segments: segments, names: names))
             try persistAI(draft); selectedAIDraftID = draft.id; readerShowsAI = true; showAICompose = false
-            runAI(draft, settings: settings)
-        } catch { alert = "无法开始整理：\(error.localizedDescription)" }
+            runAI(draft, settings: settings); return draft.id
+        } catch { alert = "无法开始整理：\(error.localizedDescription)"; return nil }
     }
     func resumeAI(_ draft: AIDraft) {
         guard aiActiveDraftID == nil, draft.state != .completed else { return }

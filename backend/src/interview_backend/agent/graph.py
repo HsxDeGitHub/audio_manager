@@ -98,7 +98,7 @@ class AgentEngine:
                             if neighbor.get('run_id')==match.get('run_id') and neighbor not in selected: selected.append(neighbor)
             if selected: sources = selected
         
-        if not sources and not context.get('allow_document_import'):
+        if not sources and not context.get('allow_document_import') and not context.get('allow_device'):
             reasons = '\n'.join(item['reason'] for item in context.get('excluded', []) if item.get('reason'))
             return {'answer': '当前范围没有可用正文，证据不足。' + ('\n' + reasons if reasons else ''), 'claims': [], 'coverage': {'total': 0, 'covered': 0, 'excluded': context.get('excluded', [])}}
         chunks = []; current = []; length = 0

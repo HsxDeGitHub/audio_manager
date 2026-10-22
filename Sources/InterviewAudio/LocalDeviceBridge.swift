@@ -4,6 +4,10 @@ import UniformTypeIdentifiers
 import AudioCore
 
 extension BackendLibraryStore {
+    func queueWorker(_ request: WorkerRequest) throws {
+        let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as! [String: Any]
+        _ = try self.request("/api/v1/jobs/queue", method: "POST", body: body)
+    }
     func startWorker(_ request: WorkerRequest) throws {
         let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as! [String: Any]
         _ = try self.request("/api/v1/jobs/start", method: "POST", body: body)
@@ -129,19 +133,20 @@ final class DeviceBridge {
                     return ("failed", ["message": "缺少资料标识。"])
                 }
                 await app.select(recordingID)
-                if let runID = command.arguments["run_id"]?.stringValue, app.selected?.activeRun != runID { app.switchRun(runID) }
-                if let segmentID = command.arguments["segment_id"]?.stringValue {
-                    app.readerShowsAI = false; app.reviewFilter = .all
-                    app.focusSegmentID = segmentID; app.focusRequestID = UUID()
-                }
+                guard app.selectedID == recordingID, let runID = command.arguments["run_id"]?.stringValue,
+                      app.runs.contains(where: { $0.id == runID }) else { throw DeviceBridgeError.failed("资料或转写版本不存在。") }
+                if app.selected?.activeRun != runID { app.switchRun(runID) }
+                guard app.selected?.activeRun == runID else { throw DeviceBridgeError.failed("转写版本切换失败。") }
                 var position = command.arguments["start"]?.doubleValue
-                if position == nil, let segmentID = command.arguments["segment_id"]?.stringValue,
-                   let segment = app.segments.first(where: { $0.id == segmentID }) { position = segment.start }
-                if let position { app.player.seek(max(0, position - app.preRoll), play: command.arguments["play"]?.boolValue ?? true) }
-                else if command.arguments["play"]?.boolValue == true { app.player.seek(app.player.position, play: true) }
-                return ("completed", ["recording_id": recordingID,
-                                      "segment_id": command.arguments["segment_id"]?.stringValue ?? "",
-                                      "position": position ?? app.player.position])
+                if let segmentID = command.arguments["segment_id"]?.stringValue {
+                    guard let segment = app.segments.first(where: { $0.id == segmentID }) else { throw DeviceBridgeError.failed("片段已不存在。") }
+                    app.readerShowsAI = false; app.reviewFilter = .all; app.focusSegmentID = segmentID; app.focusRequestID = UUID()
+                    if position == nil { position = segment.start }
+                }
+                let play = command.arguments["play"]?.boolValue ?? true
+                if !play && !app.player.available { return ("completed", ["located": true, "played": false, "message": "文字已定位，原音频不可用。"]) }
+                let actual = try await app.player.seekVerified(max(0, (position ?? app.player.position) - app.preRoll), play: play)
+                return ("completed", ["located": true, "played": actual.playing, "position": actual.position, "recording_id": recordingID])
 
             case "clipboard":
                 guard let text = command.arguments["text"]?.stringValue else { return ("failed", ["message": "缺少复制文字。"]) }
@@ -160,9 +165,10 @@ final class DeviceBridge {
 
             case "transcribe":
                 guard let recordingID = command.arguments["recording_id"]?.stringValue else { return ("failed", ["message": "缺少资料标识。"]) }
-                app.enqueue(recordingID)
-                return ("completed", ["state": "started", "recording_id": recordingID,
-                                      "message": "已加入后台转写队列，完成情况以任务事件为准。"])
+                let taskID = app.enqueue(recordingID)
+                let receipt = try DeviceExecutionResult.started(taskID: taskID, state: app.activeRecordingID == recordingID ? "started" : "queued",
+                    statusPath: taskID.map { "/api/v1/jobs/\($0)" } ?? "")
+                return ("completed", receipt)
 
             case "cancel":
                 guard let recordingID = command.arguments["recording_id"]?.stringValue else { return ("failed", ["message": "缺少资料标识。"]) }
@@ -176,10 +182,11 @@ final class DeviceBridge {
                 if app.aiActiveDraftID != nil { return ("failed", ["message": "已有整理任务在进行。"]) }
                 await app.select(recordingID)
                 if let runID = command.arguments["run_id"]?.stringValue, app.selected?.activeRun != runID { app.switchRun(runID) }
+                guard let runID = command.arguments["run_id"]?.stringValue, app.selected?.activeRun == runID else { throw DeviceBridgeError.failed("转写版本未成功选择。") }
                 let instructions = command.arguments["instructions"]?.stringValue ?? ""
-                app.startAI(mode: mode, instructions: instructions)
-                return ("completed", ["state": "started", "recording_id": recordingID,
-                                      "message": "已开始整理，已完成的分块会持续保存。"])
+                guard app.selectedID == recordingID else { throw DeviceBridgeError.failed("资料选择已变化。") }
+                let taskID = app.startAI(mode: mode, instructions: instructions)
+                return ("completed", try DeviceExecutionResult.started(taskID: taskID, state: "started", statusPath: "/api/v1/transcripts/\(command.arguments["run_id"]?.stringValue ?? "")/drafts"))
             default:
                 return ("failed", ["message": "不支持的设备命令。"])
             }
@@ -290,5 +297,15 @@ final class DeviceBridge {
         try Task.checkCancellation()
         try text.write(to: url, atomically: true, encoding: .utf8)
         return ("completed", ["path": url.path, "name": url.lastPathComponent])
+    }
+}
+
+
+enum DeviceExecutionResult {
+    static func started(taskID: String?, state: String, statusPath: String) throws -> [String: Any] {
+        guard let taskID, !taskID.isEmpty, !statusPath.isEmpty, ["started", "queued"].contains(state) else {
+            throw AudioError.message("处理任务未启动，请检查资源、配置或当前任务状态。")
+        }
+        return ["state": state, "task_id": taskID, "status_path": statusPath, "message": "任务已登记，尚未完成；请通过任务标识查看进度。"]
     }
 }
