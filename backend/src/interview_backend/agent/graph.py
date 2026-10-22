@@ -175,7 +175,7 @@ class AgentEngine:
                                 from interview_backend.services.device import DeviceService
                                 from interview_backend.agent.tools import command_result
                                 output={'result':command_result(DeviceService(self.evidence.database).get(output['result']['command_id']))}
-                            elif not work.valid(cached.get('dependencies',[])):
+                            elif cached.get('legacy') or not work.valid(cached.get('dependencies',[])):
                                 output={'result':{'state':'completed','operation_id':call_context.operation_id,'message':'操作已完成；旧输出的证据依赖已失效，未重新注入，也未重复执行。'}}
                         else:
                             deferred=effect=='device' and context.get('allow_write') and tool_id in {'device.export','device.copy','organize.start','jobs.transcribe'}
@@ -216,7 +216,7 @@ class AgentEngine:
             if result.get('clarification'):
                 await coverage.fail(chunk,'pending',emit)
                 return {'answer':result['clarification'],'clarification':result['clarification'],'claims':[],'coverage':coverage.snapshot()}
-            try:self.evidence.validate_result(result,context,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []))
+            try:self.evidence.validate_result({'claims':result['claims']},context,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []))
             except DomainError:
                 await coverage.fail(chunk,'failed',emit)
                 raise
@@ -226,6 +226,10 @@ class AgentEngine:
             targets += result.get('targets', [])
             if all_questions:
                 allowed = {(r['resource_type'], r['resource_id'], r['revision']) for r in context['resources']}
+                chunk_questions=[]
+                pending_changes=self.evidence.committed(run_id)+([plan.preview] if plan.preview else [])
+                frozen_keys={(r['resource_type'],r['resource_id']) for r in context['resources']}
+                allowed.update((item['resource_type'],item['resource_id'],item['after_revision']) for change in pending_changes for item in change['items'] if (item['resource_type'],item['resource_id']) in frozen_keys)
                 for question in result.get('questions') or []:
                     if not isinstance(question, dict) or not isinstance(question.get('text'), str) or not question['text'].strip():
                         continue
@@ -236,10 +240,12 @@ class AgentEngine:
                     reference.update({key:source[key] for key in ('line','block_id') if key in source})
                     if any(reference[key] is None for key in reference) or (reference['resource_type'], reference['resource_id'], reference['revision']) not in allowed:
                         continue
-                    if not self.evidence.valid(reference):
-                        continue
+                    try:self.evidence.validate_result({'claims':[],'questions':[{'text':question['text'],'source':reference}]},context,pending_changes)
+                    except DomainError:continue
                     start = next((s.get('start') for s in sources if s['resource_type'] == reference['resource_type'] and s['resource_id'] == reference['resource_id']), None)
-                    model_questions.append({'text': question['text'].strip()[:2000], 'source': reference, 'start': start})
+                    chunk_questions.append({'text': question['text'].strip()[:2000], 'source': reference, 'start': start})
+                result['questions']=chunk_questions
+                model_questions += chunk_questions
             answers.append(result['answer']); claims += result['claims']
             covered.update((s['resource_type'], s['resource_id']) for s in chunk)
             await coverage.complete(chunk,result,context,dependencies,emit)

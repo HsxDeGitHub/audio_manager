@@ -35,7 +35,7 @@ class WorkLog:
             rows=c.execute("SELECT payload FROM agent_work WHERE run_id=? AND step_key LIKE 'chunk:%:tool:%' AND substr(step_key,-24)=?",(self.run_id,digest)).fetchall()
         for row in rows:
             output=json.loads(row[0])
-            if output.get('result',{}).get('state')!='planned':return {'output':output,'dependencies':[]}
+            if output.get('result',{}).get('state')!='planned':return {'output':output,'dependencies':[],'legacy':True}
         return None
 
     def started(self,digest):

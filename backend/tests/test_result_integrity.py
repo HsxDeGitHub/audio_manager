@@ -84,8 +84,8 @@ def test_memory_change_does_not_reexecute_completed_device_when_model_cache_rebu
     assert len(calls)==1 and model.step==4
 
 
-@pytest.mark.parametrize('unknown',[False,True])
-def test_external_effect_receipt_is_preserved_without_reinjecting_stale_output(client,unknown):
+@pytest.mark.parametrize('unknown,legacy',[(False,False),(False,True),(True,False)])
+def test_external_effect_receipt_is_preserved_without_reinjecting_stale_output(client,unknown,legacy):
     from interview_backend.tools.registry import ToolSpec
     from interview_backend.agent.tools import EmptyArguments,ResultEnvelope
     service,item=memory_fixture(client);engine=client.app.state.agent.engine;calls=[]
@@ -105,6 +105,8 @@ def test_external_effect_receipt_is_preserved_without_reinjecting_stale_output(c
             return AIMessage(content=json.dumps({'answer':'继续完成。','claims':[]}))
     model=Model();context=client.app.state.evidence.freeze({'recording_id':'r1'},'请使用 mcp.fixture.effect 并分析当前资料')
     with pytest.raises(DomainError):asyncio.run(engine.execute('external-rebuild',context['instruction'],json.loads(json.dumps(context)),model=model))
+    if legacy:
+        with client.app.state.database.transaction(True) as c:c.execute("DELETE FROM agent_work WHERE run_id='external-rebuild' AND step_key LIKE 'effect:%'")
     service.update(item['id'],{'state':'deleted'},1,'forget-external-memory')
     if unknown:
         with pytest.raises(DomainError) as error:asyncio.run(engine.execute('external-rebuild',context['instruction'],json.loads(json.dumps(context)),model=model))
