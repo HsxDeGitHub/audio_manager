@@ -284,24 +284,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return await tool_call_self_test(ModelSettings.load(settings.data_dir))
 
     @app.get('/api/v1/sources/{kind}/{identifier}')
-    def resolve_source(kind: str, identifier: str, revision: int, line: int = Query(1, ge=1)):
-        from interview_backend.services.changesets import read_object
-        if kind not in {'recording', 'segment', 'draft', 'document', 'speaker', 'memory', 'message'}:
-            raise DomainError('invalid_source', '来源类型不正确。', 422)
-        ref = {'resource_type': kind, 'resource_id': identifier, 'revision': revision}
-        if not app.state.evidence.valid(ref):
-            raise DomainError('stale_source', '来源已变化或移除，不能作为当前证据。', 409)
+    def resolve_source(kind: str, identifier: str, revision: int = Query(..., ge=1), line: int = Query(1, ge=1), historical: bool = False, block_id: str | None = None):
+        if kind not in {'recording','segment','draft','document','speaker','memory','message'}:
+            raise DomainError('invalid_source','来源类型不正确。',422)
+        from interview_backend.services.sources import resolve
         with app.state.database.transaction() as c:
-            row = read_object(c, kind, identifier)
-            result = {'resource_type': kind, 'resource_id': identifier, 'revision': revision, 'text': row.get('content', row.get('edited') if row.get('edited') is not None else row.get('original', ''))}
-            if kind == 'document':
-                lines = result['text'].split('\n')
-                if line > len(lines): raise DomainError('invalid_line', '引用行已超出材料范围。', 422)
-                result.update({'line': line, 'line_text': lines[line - 1]})
-            if kind in {'segment','draft'}:
-                from interview_backend.services.common import require
-                result.update({'run_id': row['run_id'], 'recording_id': require(c, 'runs', row['run_id'])['recording_id'], 'segment_id': identifier if kind == 'segment' else None, 'start': row.get('start')})
-            return result
+            return resolve(c,kind,identifier,revision,historical,line,block_id)
 
     @app.patch('/api/v1/recordings/{identifier}')
     def update_recording(identifier: str, body: ContentUpdate):

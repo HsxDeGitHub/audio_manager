@@ -155,7 +155,8 @@ class ChangeSetService:
                 for source in json.loads(updated['sources']):
                     c.execute('INSERT OR IGNORE INTO suppressions VALUES(?,?)', (updated['topic'], encode(source)))
                     c.execute('INSERT OR IGNORE INTO suppressions VALUES(?,?)', ('*', encode(source)))
-            items.append({'resource_type': key[0], 'resource_id': key[1], 'before': old, 'after': read_object(c, *key),
+            from interview_backend.services.sources import location
+            items.append({'source_location': location(c, key[0], old), 'resource_type': key[0], 'resource_id': key[1], 'before': old, 'after': read_object(c, *key),
                           'before_revision': revision, 'after_revision': after_revision})
         c.execute('INSERT INTO changesets VALUES(?,?,?,?,NULL)', (request.operation_id, 'committed', encode(items), time.time()))
         return {'id': request.operation_id, 'state': 'committed', 'count': len(items), 'items': items}

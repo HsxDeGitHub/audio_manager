@@ -436,6 +436,19 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(item.sources.first?.resourceType == "message" && item.sources.first?.resourceID == "msg1")
     }
 
+    @Test func draftAndHistoricalReferencesCarryExactDestination() async throws {
+        BackendStubProtocol.respond = { request in
+            let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            #expect(query.contains(URLQueryItem(name: "historical", value: "true")))
+            #expect(query.contains(URLQueryItem(name: "block_id", value: "b1")))
+            return (200, Data(#"{"text":"历史稿件","recording_id":"r1","run_id":"run1","draft_id":"draft1","block_id":"b1","start":1,"historical":true,"revision":1,"message":"历史来源"}"#.utf8))
+        }
+        let ref = try JSONDecoder().decode(AssistantReference.self, from: Data(#"{"resource_type":"draft","resource_id":"draft1","revision":1,"block_id":"b1","historical":true}"#.utf8))
+        let result = try await client().source(ref)
+        #expect(result.draftID == "draft1" && result.blockID == "b1")
+        #expect(result.historical == true && result.text == "历史稿件" && result.start == 1)
+    }
+
     @Test @MainActor func unavailableAudioAndRejectedStartsCannotReportSuccess() async throws {
         let player = PlayerController()
         await #expect(throws: (any Error).self) { try await player.seekVerified(10, play: true) }

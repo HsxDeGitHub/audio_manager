@@ -624,3 +624,31 @@ def test_resume_completes_remaining_model_step_without_replaying_completed_devic
     with client.app.state.database.transaction() as c:
         assert c.execute('SELECT count(*) FROM device_commands').fetchone()[0]==1
     assert client.post('/api/v1/agent/runs/'+identifier+'/resume').status_code==409
+
+
+def test_historical_source_opens_preserved_text_and_audio_position(client):
+    client.app.state.changesets.submit({'operation_id':'historical-edit','targets':[
+        {'resource_type':'segment','resource_id':'s1','expected_revision':1,'fields':{'text':'新正文'}}]})
+    assert client.get('/api/v1/sources/segment/s1?revision=1').status_code==409
+    result=client.get('/api/v1/sources/segment/s1?revision=1&historical=true').json()
+    assert result['text']=='原始问题' and result['historical']
+    assert result['recording_id']=='r1' and result['start']==1
+    assert client.get('/api/v1/sources/segment/s1?revision=99&historical=true').status_code==409
+
+
+def test_draft_source_resolves_block_text_and_original_location(client):
+    from interview_backend.services.draft_sources import source_fingerprint
+    with client.app.state.database.transaction(True) as c:
+        c.execute("UPDATE ai_drafts SET payload=? WHERE id='draft1'",(json.dumps({'sourceHash':source_fingerprint(c,'run1'),'recordingID':'r1','chunks':[{'blocks':[{'id':'b1','title':'标题','text':'稿件具体内容','sourceIDs':['s1']}]}]}),))
+    result=client.get('/api/v1/sources/draft/draft1?revision=1&block_id=b1').json()
+    assert result['text']=='标题\n稿件具体内容'
+    assert result['draft_id']=='draft1' and result['block_id']=='b1' and result['start']==1
+    assert client.get('/api/v1/sources/draft/draft1?revision=1&block_id=absent').status_code==422
+
+
+def test_historical_location_survives_source_recording_removal(client):
+    client.app.state.changesets.submit({'operation_id':'before-remove','targets':[
+        {'resource_type':'segment','resource_id':'s1','expected_revision':1,'fields':{'text':'改动'}}]})
+    client.post('/api/v1/library/execute',json={'action':'remove','arguments':{'id':'r1'},'operation_id':'remove-for-history'})
+    value=client.get('/api/v1/sources/segment/s1?revision=1&historical=true').json()
+    assert value['text']=='原始问题' and value['recording_id']=='r1' and value['start']==1

@@ -119,8 +119,9 @@ struct BackendSource: Decodable, Sendable {
     let text: String
     let recordingID: String?; let runID: String?; let segmentID: String?; let start: Double?
     let line: Int?; let lineText: String?
+    let draftID: String?; let blockID: String?; let historical: Bool?; let message: String?; let revision: Int?
     private enum CodingKeys: String, CodingKey {
-        case text, start, line, recordingID = "recording_id", runID = "run_id", segmentID = "segment_id", lineText = "line_text"
+        case text, start, line, historical, message, revision, draftID = "draft_id", blockID = "block_id", recordingID = "recording_id", runID = "run_id", segmentID = "segment_id", lineText = "line_text"
     }
 }
 
@@ -275,6 +276,8 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
         try validateID(ref.resourceType); try validateID(ref.resourceID)
         guard ref.revision > 0, ref.line.map({ $0 > 0 }) ?? true else { throw BackendClientError.invalidRequest }
         var query = [URLQueryItem(name: "revision", value: String(ref.revision))]
+        if ref.historical == true { query.append(URLQueryItem(name: "historical", value: "true")) }
+        if let blockID = ref.blockID { query.append(URLQueryItem(name: "block_id", value: blockID)) }
         if let line = ref.line { query.append(URLQueryItem(name: "line", value: String(line))) }
         return try await get(["api", "v1", "sources", ref.resourceType, ref.resourceID], query: query)
     }

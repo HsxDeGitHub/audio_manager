@@ -55,6 +55,8 @@ final class AppModel: ObservableObject {
     @Published var showAICompose = false
     let changeHistory = ChangeHistoryModel()
     @Published var showChangeHistory = false
+    @Published var historicalSource: BackendSource?
+    @Published var focusAIDraftBlockID: String?
     @Published var showMemories = false
     @Published var showDocuments = false
     @Published var documentSourceID: String?
@@ -173,14 +175,28 @@ final class AppModel: ObservableObject {
         do {
             guard let client = assistant.client else { return }
             let resolved = try await client.source(source)
-            if source.resourceType == "document" {
+            if resolved.historical == true {
+                historicalSource = resolved
+                if play { await playHistoricalSource(resolved) }
+            } else if source.resourceType == "document" {
                 documentSourceID = source.resourceID; documentSourceLine = resolved.line ?? 1; showDocuments = true
             } else if let recordingID = resolved.recordingID {
                 await select(recordingID)
                 if let run = resolved.runID, selected?.activeRun != run { switchRun(run) }
-                readerShowsAI = false; reviewFilter = .all; focusSegmentID = resolved.segmentID; focusRequestID = UUID()
+                if let draftID = resolved.draftID {
+                    guard aiDrafts.contains(where: { $0.id == draftID }), store?.contentRevision("draft", id: draftID) == source.revision else { throw BackendClientError.conflict }
+                    selectedAIDraftID = draftID; readerShowsAI = true; focusAIDraftBlockID = resolved.blockID
+                } else { readerShowsAI = false; reviewFilter = .all; focusSegmentID = resolved.segmentID; focusRequestID = UUID() }
                 if play, let start = resolved.start { player.seek(max(0, start - preRoll), play: true) }
             } else { notice = resolved.text }
+        } catch { alert = error.localizedDescription }
+    }
+    func playHistoricalSource(_ source: BackendSource) async {
+        do {
+            guard let id = source.recordingID, recordings.contains(where: { $0.id == id }), let start = source.start else { throw AudioError.message("历史文字已保留，原音频资料已移除或没有时间位置。") }
+            await select(id)
+            guard selectedID == id else { throw BackendClientError.conflict }
+            _ = try await player.seekVerified(max(0,start-preRoll), play: true)
         } catch { alert = error.localizedDescription }
     }
     func reload() {

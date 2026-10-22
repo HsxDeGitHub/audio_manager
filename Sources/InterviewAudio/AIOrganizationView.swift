@@ -116,6 +116,7 @@ struct AIDraftReaderView: View {
             }.padding(.horizontal, 26).padding(.vertical, 12)
             if let draft = model.selectedAIDraft {
                 draftStatus(draft)
+                ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
                         ForEach(draft.blocks) { block in
@@ -134,10 +135,11 @@ struct AIDraftReaderView: View {
                                 } label: { Label("原文与回听（\(block.sourceIDs.count) 处）", systemImage: "waveform") }
                                     .menuStyle(.borderlessButton).fixedSize().font(.caption)
                                 Divider()
-                            }
+                            }.id(block.id).background(model.focusAIDraftBlockID == block.id ? accent.opacity(0.08) : Color.clear)
                         }
                         if draft.blocks.isEmpty { Text("整理后的段落将在这里显示。").foregroundStyle(.secondary).padding(.vertical, 40) }
                     }.frame(maxWidth: 900, alignment: .leading).padding(30).frame(maxWidth: .infinity)
+                }.onChange(of: model.focusAIDraftBlockID, initial: true) { _, id in if let id { proxy.scrollTo(id, anchor: .top) } }
                 }
             } else {
                 VStack(spacing: 14) {

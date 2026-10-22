@@ -57,6 +57,7 @@ final class BackendLibraryStore {
     }
     private func decode<T: Decodable>(_ action: String, _ args: [String: Any] = [:]) throws -> T { try JSONDecoder().decode(T.self, from: json(action, args)) }
     private func object<T: Encodable>(_ value: T) throws -> Any { try JSONSerialization.jsonObject(with: JSONEncoder().encode(value)) }
+    func contentRevision(_ kind: String, id: String) -> Int { versions["\(kind):\(id)"] ?? 1 }
     func recordings() throws -> [Recording] { try decode("recordings") }
     func save(_ r: Recording) throws { _ = try json("save", ["recording": object(r)]) }
     func remove(_ id: String) throws { _ = try json("remove", ["id": id]) }

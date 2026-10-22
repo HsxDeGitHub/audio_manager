@@ -49,6 +49,16 @@ struct LibraryView: View {
         .tint(accent)
         .background(Color(nsColor: .windowBackgroundColor))
         .sheet(isPresented: $model.showChangeHistory) { ChangeHistoryView(model: model.changeHistory, onChange: { model.reload() }) }
+        .sheet(isPresented: Binding(get: { model.historicalSource != nil }, set: { if !$0 { model.historicalSource = nil } })) {
+            if let source = model.historicalSource {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("历史来源 · v\(source.revision ?? 0)").font(.title2)
+                    Text(source.message ?? "历史内容，仅供回看。").foregroundStyle(.orange)
+                    ScrollView { Text(source.text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                    HStack { Button("回听历史时间位置") { Task { await model.playHistoricalSource(source) } }.disabled(source.start == nil); Spacer(); Button("关闭") { model.historicalSource = nil } }
+                }.padding(24).frame(minWidth: 600, minHeight: 420)
+            }
+        }
         .sheet(isPresented: $model.showAbout) { AboutView() }
         .sheet(isPresented: $model.showSettings) { ModelSettingsView(model: model, installer: model.installer) }
         .sheet(isPresented: $model.showAISettings) { AISettingsView(model: model) }
