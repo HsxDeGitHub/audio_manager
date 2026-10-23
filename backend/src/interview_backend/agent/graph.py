@@ -83,6 +83,7 @@ class AgentEngine:
 
     async def _answer(self, run_id, instruction, context, model, emit, change_plan=None):
         from interview_backend.agent.work import WorkLog
+        from interview_backend.agent.model_recovery import parse_result
         work = WorkLog(self.evidence.database, run_id, context.get('root_run_id',run_id))
         run_id = context.get('root_run_id', run_id)
         from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -179,10 +180,18 @@ class AgentEngine:
                     pending_speaker_names=[{'resource_id':t['resource_id'],'name':t['fields']['name']} for t in plan.targets.values() if t['resource_type']=='speaker' and 'name' in t['fields']])
                 if prompt.get('selected_proposal'):
                     prompt['selected_proposal']={**prompt['selected_proposal'],'sources':[s for s in prompt['selected_proposal']['sources'] if (s['resource_type'],s['resource_id']) in batch_keys]}
+                # 旧任务保留原请求签名，继续复用已经通过校验的批次缓存。
+                if context.get('model_step_policy')=='recovery-v1':
+                    prompt['batch_result_hint']='本批answer简要说明修改或待核对项，不复述资料、不长篇讨论其他批次；仅有必要时输出claims，正文纠错及说话人校正可以claims为空。全部完成后应用统一提交。'
+            def validate_response(response):
+                if response.tool_calls: return
+                parsed=parse_result(response)
+                validate_edit_claims(self.evidence,parsed,context,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []),
+                                     list(plan.targets.values())+(parsed.get('targets') or []))
             try:
                 messages = [SystemMessage(content=SYSTEM), HumanMessage(content=encode(prompt))]
                 model_key = f'chunk:{i}:model:0'
-                response = await work.model(model_key,bound,messages,configuration,dependencies,emit=emit)
+                response = await work.model(model_key,bound,messages,configuration,dependencies,emit=emit,validator=validate_response)
                 for turn in range(8):
                     if not response.tool_calls: break
                     messages.append(response)
@@ -235,20 +244,16 @@ class AgentEngine:
                         messages.append(ToolMessage(content=encode(model_output), tool_call_id=call['id']))
                         if emit: await emit('tool_end', {'tool': call['name']})
                     model_key = f'chunk:{i}:model:{turn+1}'
-                    response = await work.model(model_key,bound,messages,configuration,dependencies,emit=emit)
+                    response = await work.model(model_key,bound,messages,configuration,dependencies,emit=emit,validator=validate_response)
                 if response.tool_calls: raise ValueError()
-                content = response.content if isinstance(response.content, str) else ''.join(b.get('text', '') for b in response.content if isinstance(b, dict))
-                content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content.strip())
-                result = json.loads(content)
-                if not isinstance(result.get('answer'), str) or not isinstance(result.get('claims'), list): raise ValueError()
+                result = parse_result(response)
                 if needs_edit_result(result, context, plan):
                     # 不能把自然语言里的“已登记”当作修改操作。最多补取一次结构化目标。
                     messages += [response, SystemMessage(content=load_text('agent/text-edit-result.md'))]
                     model_key += ':edit-result'
-                    response = await work.model(model_key,model,messages,configuration,dependencies,emit=emit)
-                    content = response.content if isinstance(response.content,str) else ''.join(b.get('text','') for b in response.content if isinstance(b,dict))
-                    result = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', content.strip()))
-                    if response.tool_calls or not isinstance(result.get('answer'),str) or not isinstance(result.get('claims'),list): raise ValueError()
+                    response = await work.model(model_key,model,messages,configuration,dependencies,emit=emit,validator=validate_response)
+                    result = parse_result(response)
+                    if response.tool_calls: raise ValueError()
                     if not result.get('targets') and not result.get('clarification') and not result.get('no_match'):
                         work.discard(model_key)
                         raise DomainError('edit_not_applied','正文尚未修改：模型没有返回可执行的修改内容。',409)
@@ -256,7 +261,7 @@ class AgentEngine:
                 await coverage.fail(chunk,'cancelled',emit)
                 raise
             except DomainError as error:
-                work.save('failure:'+model_key,{'code':error.code, 'details':getattr(error,'details',{})})
+                work.save('failure:'+model_key,{**(work.get('failure:'+model_key) or {}),'code':error.code, 'details':getattr(error,'details',{})})
                 work.discard(model_key)
                 await coverage.fail(chunk,'failed',emit)
                 raise

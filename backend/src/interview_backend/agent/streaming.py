@@ -79,7 +79,7 @@ async def invoke(bound, messages, emit=None, block_id='answer'):
                 aggregate = chunk if aggregate is None else aggregate + chunk
                 if emit: await preview()
         except Exception as error:
-            # 仅明确不支持stream且没有任何输出时回退，不能重放已经开始的推理或工具。
+            # 本层只处理明确不支持stream的回退。中途失败交给WorkLog重试当前模型步骤，工具由外层执行。
             body = getattr(error, 'body', None) or {}
             detail = body.get('error', body) if isinstance(body, dict) else {}
             unsupported = getattr(error, 'status_code', None) == 501 or (detail.get('param') == 'stream' and detail.get('code') in {'unsupported_value','unsupported_parameter','not_supported'})

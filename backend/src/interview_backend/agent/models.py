@@ -30,11 +30,13 @@ class ModelSettings(BaseModel):
         os.environ['LANGCHAIN_TRACING_V2'] = 'false'
         os.environ['LANGSMITH_TRACING'] = 'false'
         from langchain_openai import ChatOpenAI
+        from httpx import Timeout
         base = self.base_url.strip().rstrip('/')
         if base.endswith('/chat/completions'):
             base = base[:-len('/chat/completions')]
         return ChatOpenAI(model=self.model.strip(), base_url=base, api_key=self.api_key.get_secret_value() or 'local-no-key',
-                          max_tokens=self.max_output_tokens, timeout=60, max_retries=1)
+                          max_tokens=self.max_output_tokens,
+                          timeout=Timeout(connect=10, read=180, write=30, pool=10), max_retries=0)
 
 
 async def tool_call_self_test(settings):

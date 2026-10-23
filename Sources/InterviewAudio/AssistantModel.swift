@@ -388,6 +388,7 @@ final class AssistantModel: ObservableObject {
             update(session) { $0.error = nil }
             let _: AssistantAcknowledgment = try await client.send("/api/v1/agent/runs/\(id)/resume", method: "POST")
             follow(id, session: session, model: model)
+            try await refresh(session)
         } catch { update(session) { $0.error = error.localizedDescription } }
     }
     func reconnect(model: AppModel) async {

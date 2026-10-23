@@ -1,9 +1,7 @@
 """对已校验的分块结论做分层综合，任何一层都不能执行工具或扩展来源。"""
-import json
-import re
-
 from interview_backend.agent.work import WorkLog
 from interview_backend.agent.models import ModelSettings
+from interview_backend.agent.model_recovery import parse_result, OutputError
 from interview_backend.errors import DomainError
 from interview_backend.prompt_catalog import load_text
 from interview_backend.services.common import encode
@@ -41,15 +39,16 @@ async def synthesize(engine, run_id, instruction, context, parts, model=None, em
         reduced = []
         for index, values in enumerate(groups):
             key = f'synthesis:{level}:{index}'
+            def validate(response):
+                if response.tool_calls: raise OutputError('invalid_structure')
+                result=parse_result(response)
+                if set(result)!={'answer','claims'}: raise OutputError('invalid_structure')
+                engine.evidence.validate_result(result,context,engine.evidence.committed(run_id))
             try:
                 response = await work.model(key, client, [SystemMessage(content=load_text('agent/synthesis.md')),
                     HumanMessage(content=encode({'instruction':instruction,'untrusted_parts':values}))],
-                    {'stage':'synthesis','level':level}, dependencies, emit=emit)
-                if response.tool_calls or not isinstance(response.content, str):
-                    raise ValueError()
-                result = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', response.content.strip()))
-                if set(result) != {'answer','claims'} or not isinstance(result['answer'],str) or not isinstance(result['claims'],list):
-                    raise ValueError()
+                    {'stage':'synthesis','level':level}, dependencies, emit=emit, validator=validate)
+                result = parse_result(response)
                 engine.evidence.validate_result(result, context, engine.evidence.committed(run_id))
             except DomainError:
                 work.discard(key)

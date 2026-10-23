@@ -17,6 +17,16 @@ import Testing
         output.apply(event(5,"answer_delta",#"{"attempt_id":"a","block_id":"b","text":"迟到"}"#))
         #expect(output.text.isEmpty)
     }
+    @Test func retryReplacesOnlyTheFailedModelBlock() {
+        var output = AssistantOutput()
+        func event(_ id: Int, _ kind: String, _ json: String) -> BackendClient.Event { .init(id: id, kind: kind, data: Data(json.utf8)) }
+        output.apply(event(1,"answer_reset",#"{"attempt_id":"a"}"#))
+        output.apply(event(2,"answer_delta",#"{"attempt_id":"a","block_id":"completed","text":"已完成批次"}"#))
+        output.apply(event(3,"answer_delta",#"{"attempt_id":"a","block_id":"retry","text":"未通过校验的回答"}"#))
+        output.apply(event(4,"answer_start",#"{"attempt_id":"a","block_id":"retry"}"#))
+        output.apply(event(5,"answer_delta",#"{"attempt_id":"a","block_id":"retry","text":"重试后完整回答"}"#))
+        #expect(output.text == "已完成批次\n\n重试后完整回答")
+    }
     @MainActor @Test func draftsAndErrorsAreIsolatedBySession() {
         let model=AssistantModel()
         model.activate("a"); model.input="未发送草稿"; model.allMaterials=true

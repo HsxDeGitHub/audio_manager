@@ -296,11 +296,11 @@ private struct AssistantRunView: View {
                 else { AssistantMarkdown(text: answer) }
             } else if running { Text("正在读取资料并准备回答…").font(.callout).foregroundStyle(.secondary) }
             if let result = run.result { details(result) }
-            if let error = run.result?.error {
+            if !running, let error = run.result?.error {
                 Label(error.message, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
-                if error.code.hasPrefix("model_") { Button("打开大模型配置") { model.showAISettings = true }.controlSize(.small) }
+                if ["model_not_configured", "model_auth_failed", "model_request_rejected", "model_tool_unavailable"].contains(error.code) { Button("打开大模型配置") { model.showAISettings = true }.controlSize(.small) }
             }
-            if ["interrupted", "failed", "cancelled"].contains(run.state) {
+            if !running, ["interrupted", "failed", "cancelled"].contains(run.state) {
                 HStack {
                     Button("继续未完成任务") { Task { await assistant.resume(run.id, model: model) } }.disabled(assistant.activeRun != nil)
                     Button("基于当前资料重新提问") {

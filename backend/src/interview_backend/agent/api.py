@@ -149,6 +149,7 @@ class AgentAPI:
             context['pending_proposals'] = pending(c, context)
         if hasattr(self.engine, 'prepare_context'):
             context['intent_policy'] = 'semantic-v2'
+            context['model_step_policy'] = 'recovery-v1'
             # 周报由语义分类决定；不因资料或主题里出现“本周”而重选目标。
             context.pop('report_plan', None)
         identifier = str(uuid.uuid4())
@@ -296,7 +297,9 @@ class AgentAPI:
                 raise DomainError('stale_context', '源版本已发生外部变化，请发送基于当前资料的新指令。', 409)
             from interview_backend.services.device import DeviceService
             DeviceService.resume_run(c, identifier)
-            c.execute("UPDATE agent_runs SET state='queued' WHERE id=?", (identifier,))
+            result=dict(run.get('result') or {})
+            result.pop('error',None)
+            c.execute("UPDATE agent_runs SET state='queued',result=? WHERE id=?", (encode(result),identifier))
             self.append_event(c, identifier, 'resuming', {'state': 'queued', 'message': '恢复剩余步骤，已完成操作将复用业务回执。'})
         self.tasks[identifier] = asyncio.create_task(self._execute(identifier))
         return {'id': identifier, 'state': 'queued'}
