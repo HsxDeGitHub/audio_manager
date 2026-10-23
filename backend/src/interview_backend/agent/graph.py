@@ -212,7 +212,7 @@ class AgentEngine:
                 raise
             if result.get('targets') and not context.get('allow_write'):
                 await coverage.fail(chunk,'failed',emit)
-                raise DomainError('write_not_authorized', '当前用户消息未授权内容修改，未执行模型提出的写入。', 403)
+                raise DomainError('write_not_authorized', '本轮要求只读或不修改，已阻止内容写入；需要应用修改时请直接说明要执行的任务。', 403)
             targets += result.get('targets', [])
             if all_questions:
                 allowed = {(r['resource_type'], r['resource_id'], r['revision']) for r in context['resources']}

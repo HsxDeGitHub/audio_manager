@@ -71,7 +71,7 @@ class EvidenceService:
                 sources.append({**ref, 'title': row['title'], 'text': row['content'], 'kind': 'personal_document', 'line': 1})
             if re.search(r'这段|这一段|这句话', instruction) and not context.segment_ids and not context.draft_id and len(sources) > 1:
                 return {**context.model_dump(), 'resources': resources, 'sources': sources, 'excluded': excluded, 'allow_write': False, 'clarification': '请引用要处理的段落，避免误改其他内容。'}
-            # 只有用户消息中的执行动词可允许写工具，资料正文永远不参与权限判断。
+            # 内容编辑默认可用，显式只读关闭；设备动作仍单独判断。资料正文不参与判断。
             actions = action_permissions(instruction)
             from interview_backend.agent.permissions import command_text
             command=command_text(instruction)

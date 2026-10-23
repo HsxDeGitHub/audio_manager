@@ -1,4 +1,4 @@
-"""只有用户消息的执行语句能授权工具；引文及讨论不构成操作许可。"""
+"""范围内内容默认可编辑；显式只读受服务端保护，设备动作仍按具体指令授权。"""
 import re
 
 ACTION_VERBS = {
@@ -18,14 +18,22 @@ def command_text(instruction):
 
 
 def write_permissions(instruction):
-    command = command_text(instruction)
+    command = command_text(instruction).strip()
     if transcript_organization(instruction): return True, False
     verbs = r'修改|修正|替换|改成|改为|删除|忘记|停用|重命名|撤销|合并|设置|更正|导入|添加材料|记住|更改|改动|编辑|写入'
-    if re.search(r'(?:'+NEGATIVE+r').{0,20}(?:'+verbs+r'|执行|操作)',command) or re.search(READONLY,command) or re.search(DISCUSSION,command):
+    if not command or re.search(r'(?:'+NEGATIVE+r').{0,20}(?:'+verbs+r'|整理|润色|优化|梳理|执行|应用|实施|操作)',command) or re.search(READONLY,command) or re.search(DISCUSSION,command):
+        return False,False
+    if re.fullmatch(r'(?:以下|下面|上述)?(?:是|为)?(?:原文|资料|正文|转写|引用|内容)[：:\s]*', command):
         return False,False
     importing = bool(re.search(r'(?:帮我|请|把|将|直接).{0,40}(?:导入|添加材料)|^(?:导入|添加材料)',command))
-    mutation = importing or bool(re.search(r'^(?:本周|这周)(?:只|仅)(?:'+verbs+r')|(?:帮我|请|把|将|直接).{0,40}(?:'+verbs+r')|^(?:'+verbs+r')',command))
-    return mutation,importing
+    # “修改建议”是读任务；“总结后修改正文”仍有明确的编辑动作。
+    executable = re.sub(r'(?:'+verbs+r'|整理|润色|优化|梳理)(?:建议|方案|思路|示例)', '', command)
+    mutation = importing or bool(re.search(r'^(?:本周|这周)(?:只|仅)(?:'+verbs+r')|(?:帮我|请|把|将|直接).{0,40}(?:'+verbs+r')|^(?:'+verbs+r')',executable))
+    read_task = r'分析|阅读|解释|说明|总结|摘要|评估|检查|讨论|查看|列出|罗列|提取|汇总|(?:提供|给出|提出|生成).*(?:建议|方案|思路|示例)|(?:整理|梳理).*(?:问题|清单|建议)'
+    if not mutation and re.search(read_task, command): return False,False
+    # 这是可用能力，不是执行命令。简短选择和自然表达交由模型结合历史理解，
+    # 实际修改仍须遵循用户任务，并经过冻结范围、版本和事务校验。
+    return True,importing
 
 
 def transcript_organization(instruction):
