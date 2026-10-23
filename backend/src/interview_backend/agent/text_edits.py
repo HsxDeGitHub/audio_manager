@@ -9,8 +9,15 @@ def text_only_targets(targets):
         and isinstance(target.get('fields'), dict) and set(target['fields']) == {'text'} for target in targets)
 
 
+def transcript_targets(targets):
+    return bool(targets) and all(isinstance(t, dict) and isinstance(t.get('fields'), dict) and t['fields']
+        and ((t.get('resource_type') == 'segment' and set(t['fields']) <= {'text', 'speaker', 'needs_review', 'reviewed'})
+             or (t.get('resource_type') == 'speaker' and set(t['fields']) == {'name'})) for t in targets)
+
+
 def validate_edit_claims(evidence, result, context, changes, targets):
-    editing = context.get('allow_write') and text_only_targets(targets)
+    editing = context.get('allow_write') and (text_only_targets(targets) or
+        (context.get('intent_policy') == 'semantic-v2' and transcript_targets(targets)))
     claims = []
     for claim in result['claims']:
         try:
@@ -31,5 +38,5 @@ def needs_edit_result(result, context, plan):
         return False
     answer = result.get('answer', '')
     body = context.get('instruction', '') + '\n' + answer
-    return bool(re.search(r'原文|正文|转写|翻译|文本|文字|片段|分段', body)
+    return bool(re.search(r'原文|正文|转写|翻译|文本|文字|片段|分段|说话人|发言归属', body)
         and re.search(r'planned|待提交|已登记|已(?:经)?(?:修改|修正|更正|替换|改好)|准备.{0,8}(?:修改|提交)', answer))

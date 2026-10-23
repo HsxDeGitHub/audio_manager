@@ -40,7 +40,7 @@ class EvidenceService:
             raise DomainError('invalid_scope', '资料范围不正确。', 422)
         with self.database.transaction() as c:
             recordings = [dict(r) for r in c.execute('SELECT * FROM recordings ORDER BY created_at,id')] if context.scope == 'all' else [require(c, 'recordings', context.recording_id)] if context.recording_id else []
-            resources = []; excluded = []; sources = []; device_targets = []; cancel_tasks = []
+            resources = []; excluded = []; sources = []; device_targets = []; cancel_tasks = []; speaker_catalog = []
             if not semantic and context.scope == 'current' and not recordings and not context.document_ids and not importing:
                 return {**context.model_dump(), 'resources': [], 'sources': [], 'excluded': [], 'allow_write': False, 'clarification': '请指定当前资料，或切换为全部资料。'}
             for recording in recordings:
@@ -57,6 +57,8 @@ class EvidenceService:
                 from interview_backend.services.device_targets import snapshot
                 device_targets.append(snapshot(c, recording['id'], run_id, context.draft_id))
                 rows = c.execute('SELECT * FROM segments WHERE run_id=? ORDER BY start,id', (run_id,)).fetchall()
+                from interview_backend.services.library import default_name
+                names = {r['speaker']: r['name'] for r in c.execute('SELECT * FROM speakers WHERE run_id=?', (run_id,))}
                 available = {r['id'] for r in rows}
                 if context.segment_ids and context.scope == 'current':
                     if not set(context.segment_ids) <= available:
@@ -66,9 +68,14 @@ class EvidenceService:
                     ref = self.ref(c, 'segment', row['id'])
                     resources.append(ref)
                     sources.append({**ref, 'recording_id': recording['id'], 'run_id': run_id, 'start': row['start'], 'end': row['end'],
-                                    'text': row['edited'] if row['edited'] is not None else row['original'], 'kind': 'original_statement', 'speaker_confirmed': False})
-                for speaker in c.execute('SELECT speaker FROM speakers WHERE run_id=?', (run_id,)):
-                    resources.append(self.ref(c, 'speaker', f"{run_id}:{speaker[0]}"))
+                                    'text': row['edited'] if row['edited'] is not None else row['original'],
+                                    'speaker': row['speaker'], 'speaker_name': names.get(row['speaker'], default_name(row['speaker'])),
+                                    'speaker_edited': bool(row['speaker_edited']), 'needs_review': bool(row['needs_review']),
+                                    'reviewed': bool(row['reviewed']), 'kind': 'original_statement', 'speaker_confirmed': False})
+                for speaker, name in names.items():
+                    ref = self.ref(c, 'speaker', f'{run_id}:{speaker}')
+                    resources.append(ref)
+                    speaker_catalog.append({**ref, 'recording_id': recording['id'], 'run_id': run_id, 'speaker': speaker, 'name': name})
             document_rows = c.execute('SELECT * FROM documents WHERE removed=0 ORDER BY id').fetchall() if context.scope == 'all' else [require(c, 'documents', identifier) for identifier in context.document_ids]
             for row in document_rows:
                 if row['removed']: continue
@@ -89,7 +96,7 @@ class EvidenceService:
                     'scope_title': '、'.join([r['title'] for r in recordings] + [r['title'] for r in document_rows])[:240] or '未选择资料',
                     'write_resources': [r for r in resources if r['resource_type'] == 'segment'] if organizing else list(resources),
                     'transcript_organization': organizing, 'write_field_limits': {'segment': ['text']} if organizing else {},
-                    'sources': sources, 'excluded': excluded, 'allow_write': mutation,
+                    'sources': sources, 'speaker_catalog': speaker_catalog, 'excluded': excluded, 'allow_write': mutation,
                     'allow_device': device, 'allow_external': external, 'allowed_actions': actions,
                     'allow_document_import': importing,
                     'cancel_tasks':cancel_tasks, 'device_targets': device_targets, 'instruction': instruction, 'recording_ids': [r['id'] for r in recordings]}
@@ -231,7 +238,7 @@ def install_agent_tools(registry, changesets):
     def read(args, context):
         if context.frozen_context is None:
             raise DomainError('scope_required', '需要先确定资料范围。', 409)
-        return {'result': {'sources': context.frozen_context['sources'], 'excluded': context.frozen_context.get('excluded', []), 'tasks':context.frozen_context.get('cancel_tasks',[])}}
+        return {'result': {'sources': context.frozen_context['sources'], 'speaker_catalog': context.frozen_context.get('speaker_catalog', []), 'excluded': context.frozen_context.get('excluded', []), 'tasks':context.frozen_context.get('cancel_tasks',[])}}
     registry.register(ToolSpec(tool_id='evidence.read', version='1.0', title='读取固定范围证据',
         description=tool_description('evidence.read'), input_model=EmptyArguments, output_model=ResultEnvelope, handler=read))
 

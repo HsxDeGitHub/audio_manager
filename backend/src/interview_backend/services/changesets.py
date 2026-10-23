@@ -144,6 +144,9 @@ class ChangeSetService:
                 raise DomainError('scope_denied', '导入目标未经授权。', 403)
             c.execute('INSERT INTO documents VALUES(?,?,?,?,?,?,1,1)', (document.id, document.title, document.format,
                       document.content, document.content, hashlib.sha256(document.content.encode()).hexdigest()))
+        segment_ids = [t.resource_id for t in request.targets if t.resource_type == 'segment']
+        before_names = {(r['run_id'], r['speaker']): r['name'] for r in c.execute(
+            'SELECT * FROM speakers WHERE run_id IN (SELECT run_id FROM segments WHERE id IN (' + ','.join('?' for _ in segment_ids) + '))', segment_ids)} if segment_ids else {}
         seen = set(); items = []
         for target in request.targets:
             key = (target.resource_type, target.resource_id)
@@ -157,6 +160,9 @@ class ChangeSetService:
             if revision != target.expected_revision:
                 raise DomainError('version_conflict', '对象版本已变化，整次修改未提交。', 409)
             updated = patch(target.resource_type, old, target.fields)
+            if target.resource_type == 'segment' and 'speaker' in target.fields and updated['speaker'] is not None:
+                if not c.execute('SELECT 1 FROM speakers WHERE run_id=? AND speaker=?', (old['run_id'], updated['speaker'])).fetchone():
+                    raise DomainError('invalid_speaker', '目标说话人不属于该转写版本，请选择该版本已有的说话人。', 422)
             if target.resource_type == 'recording' and updated.get('active_run') and require(c, 'runs', updated['active_run'])['recording_id'] != target.resource_id:
                 raise DomainError('scope_denied', '目标版本不属于该资料。', 409)
             if old == updated:
@@ -172,6 +178,13 @@ class ChangeSetService:
             from interview_backend.services.sources import location
             items.append({'source_location': location(c, key[0], old), 'resource_type': key[0], 'resource_id': key[1], 'before': old, 'after': read_object(c, *key),
                           'before_revision': revision, 'after_revision': after_revision})
+        from interview_backend.services.library import default_name
+        for item in items:
+            if item['resource_type'] != 'segment': continue
+            before, after = item['before'], item['after']
+            name = c.execute('SELECT name FROM speakers WHERE run_id=? AND speaker=?', (after['run_id'], after['speaker'])).fetchone()
+            item['speaker_names'] = {'before': before_names.get((before['run_id'], before['speaker']), default_name(before['speaker'])),
+                                     'after': name[0] if name else default_name(after['speaker'])}
         c.execute('INSERT INTO changesets VALUES(?,?,?,?,NULL)', (request.operation_id, 'committed', encode(items), time.time()))
         return {'id': request.operation_id, 'state': 'committed', 'count': len(items), 'items': items}
 
@@ -219,7 +232,7 @@ class ChangePlan:
             if (self.allowed is not None and key not in self.allowed) or (allowed is not None and key not in allowed):
                 raise DomainError('scope_denied', '修改超出用户指定范围。', 403)
             if key[0] in self.field_limits and set(target['fields']) - set(self.field_limits[key[0]]):
-                raise DomainError('scope_denied', '正文整理只能修订文字，不能修改说话人或其他字段。', 403)
+                raise DomainError('scope_denied', '本次任务的修改字段超出已确定范围，请基于当前资料重新提出所需修改。', 403)
             prior = candidate.get(key)
             if prior:
                 if prior['expected_revision'] != target['expected_revision'] or any(k in prior['fields'] and prior['fields'][k] != v for k, v in target['fields'].items()):

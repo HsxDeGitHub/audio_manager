@@ -7,7 +7,7 @@ from interview_backend.services.source_validity import source_valid
 
 
 def location(c, kind, row):
-    if kind not in {'segment', 'draft'}: return {}
+    if kind not in {'segment', 'draft', 'speaker'}: return {}
     run_id = row['run_id']
     run = c.execute('SELECT recording_id FROM runs WHERE id=?',(run_id,)).fetchone()
     return {'run_id':run_id,'recording_id':run[0] if run else None,
@@ -41,7 +41,7 @@ def resolve(c, kind, identifier, revision, historical=False, line=1, block_id=No
         row=read_object(c,kind,identifier)
     else:
         row,origin=snapshot(c,kind,identifier,revision)
-    text=row.get('content',row.get('edited') if row.get('edited') is not None else row.get('original',''))
+    text=row.get('name','') if kind=='speaker' else row.get('content',row.get('edited') if row.get('edited') is not None else row.get('original',''))
     result={**ref,'text':text,'historical':historical,**location(c,kind,row),**origin}
     if historical: result['message']='历史来源，仅供回看，不代表当前有效证据。'
     if kind=='draft':

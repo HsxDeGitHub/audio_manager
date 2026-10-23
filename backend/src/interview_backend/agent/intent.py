@@ -93,6 +93,10 @@ def apply(context, intent):
     value['transcript_organization'] = intent['edit_target'] == 'transcript'
     value['write_resources'] = [r for r in context['resources'] if r['resource_type'] == 'segment'] if value['transcript_organization'] else list(context['resources'])
     value['write_field_limits'] = {'segment': ['text']} if value['transcript_organization'] else {}
+    if value['transcript_organization'] and context.get('intent_policy') == 'semantic-v2':
+        # 新消息可校对发言归属、名称和核对状态；旧运行继续使用已冻结的文字边界。
+        value['write_resources'] = [r for r in context['resources'] if r['resource_type'] in {'segment', 'speaker'}]
+        value['write_field_limits'] = {'segment': ['text', 'speaker', 'needs_review', 'reviewed'], 'speaker': ['name']}
     value['allowed_actions'] = list(dict.fromkeys(intent['actions'])) if intent['mode'] != 'clarify' else []
     value['allow_device'] = any(a.startswith(('device.', 'jobs.')) for a in value['allowed_actions'])
     value['allow_external'] = any(a.startswith('mcp.') for a in value['allowed_actions'])

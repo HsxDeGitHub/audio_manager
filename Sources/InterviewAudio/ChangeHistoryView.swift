@@ -78,12 +78,12 @@ struct TextChangeSpan: Equatable {
 struct ChangeDifferenceView: View {
     let item: BackendJSONValue
     var onOpen: ((AssistantReference) -> Void)? = nil
-    private var textChange: (String, String)? {
+    private var textChange: (String, String, String)? {
         guard case .object(let row) = item, case .object(let before) = row["before"], case .object(let after) = row["after"] else { return nil }
-        for key in ["edited", "content", "title"] where before[key] != after[key] {
+        for key in ["edited", "content", "title", "name"] where before[key] != after[key] {
             let a = (before[key] == .null ? nil : before[key]?.stringValue) ?? (key == "edited" ? before["original"]?.stringValue : nil) ?? ""
             let b = (after[key] == .null ? nil : after[key]?.stringValue) ?? (key == "edited" ? after["original"]?.stringValue : nil) ?? ""
-            return (a, b)
+            return (key, a, b)
         }
         return nil
     }
@@ -94,12 +94,14 @@ struct ChangeDifferenceView: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let (before, after) = textChange {
+            if let (key, before, after) = textChange {
                 let span = TextChangeSpan(before: before, after: after)
                 Text("修改前").foregroundStyle(.secondary)
                 (Text(span.prefix) + Text(span.removed).foregroundColor(.red).strikethrough() + Text(span.suffix)).textSelection(.enabled)
                 Text("修改后").foregroundStyle(.secondary)
                 (Text(span.prefix) + Text(span.inserted).foregroundColor(accent).bold() + Text(span.suffix)).textSelection(.enabled)
+                let otherChanges = ChangeDifference.describe(item, excluding: [key])
+                if !otherChanges.isEmpty { Text(otherChanges).textSelection(.enabled) }
             } else { Text(ChangeDifference.describe(item)).textSelection(.enabled) }
             if let onOpen, let reference { Button("定位这处修改") { onOpen(reference) }.buttonStyle(.link) }
         }.font(.caption).padding(10).frame(maxWidth: .infinity, alignment: .leading)
@@ -108,11 +110,22 @@ struct ChangeDifferenceView: View {
 }
 
 enum ChangeDifference {
-    static func describe(_ item: BackendJSONValue) -> String {
+    static func describe(_ item: BackendJSONValue, excluding: Set<String> = []) -> String {
         guard case .object(let row) = item, case .object(let before) = row["before"], case .object(let after) = row["after"] else { return "修改详情不可用" }
-        let labels = ["edited":"正文", "title":"名称", "payload":"整理稿", "content":"内容", "state":"状态", "removed":"移除", "kind":"类型", "company":"公司", "role":"岗位", "interview_date":"实际面试日期"]
-        return after.keys.sorted().filter { before[$0] != after[$0] && $0 != "revision" }.map { key in
-            "\(labels[key] ?? key)\n修改前：\(display(visibleValue(key, in: before)))\n修改后：\(display(visibleValue(key, in: after)))"
+        let labels = ["edited":"正文", "title":"名称", "name":"说话人名称", "speaker":"发言归属", "needs_review":"待核对", "reviewed":"已核对", "payload":"整理稿", "content":"内容", "state":"状态", "removed":"移除", "kind":"类型", "company":"公司", "role":"岗位", "interview_date":"实际面试日期"]
+        let hidden = excluding.union(["revision", "speaker_edited"])
+        func value(_ key: String, side: String, values: [String: BackendJSONValue]) -> String {
+            if key == "speaker" {
+                if case .object(let names) = row["speaker_names"], let name = names[side]?.stringValue { return name }
+                return values[key]?.doubleValue.map { "说话人 \(Int($0) + 1)" } ?? "未识别"
+            }
+            if ["needs_review", "reviewed"].contains(key), let raw = values[key] {
+                return (raw == .bool(true) || raw.doubleValue == 1) ? "是" : "否"
+            }
+            return display(visibleValue(key, in: values))
+        }
+        return after.keys.sorted().filter { before[$0] != after[$0] && !hidden.contains($0) }.map { key in
+            "\(labels[key] ?? key)\n修改前：\(value(key, side: "before", values: before))\n修改后：\(value(key, side: "after", values: after))"
         }.joined(separator: "\n\n")
     }
     private static func visibleValue(_ key: String, in row: [String: BackendJSONValue]) -> BackendJSONValue? {

@@ -142,7 +142,7 @@ class AgentEngine:
             scopes+=['document:'+r['resource_id'] for r in context.get('write_resources',context.get('resources',[])) if r['resource_type']=='document']
             return self.memory_service.active(scopes) if hasattr(self,'memory_service') else []
         from interview_backend.agent.coverage import Coverage
-        initial_dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources]
+        initial_dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources + context.get('speaker_catalog', [])]
         initial_dependencies += [{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in live_memories()]
         coverage=Coverage(work,chunks,context.get('excluded',[]),initial_dependencies,configuration)
         answers = []; claims = []; targets = []; covered = set(); model_questions = []; proposals = []
@@ -161,8 +161,8 @@ class AgentEngine:
                         if key not in known:
                             context['resources'].append(reference); known.add(key)
             current_scope=[r for r in context['resources'] if self.evidence.valid_after_changes(r,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []))]
-            dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources]+[{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in memory]
-            prompt = {'selected_proposal':context.get('selected_proposal'), 'pending_proposals':context.get('pending_proposals',[]), 'task_intent':context.get('task_intent'), 'conversation_history':context.get('conversation_history',[]), 'history_omitted':context.get('history_omitted',False), 'selected_quotes':context.get('quotes',[]), 'device_tasks':context.get('cancel_tasks',[]), 'current_valid_memories': memory, 'instruction': instruction, 'scope': current_scope, 'untrusted_evidence': chunk,
+            dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources + context.get('speaker_catalog', [])]+[{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in memory]
+            prompt = {'selected_proposal':context.get('selected_proposal'), 'pending_proposals':context.get('pending_proposals',[]), 'task_intent':context.get('task_intent'), 'conversation_history':context.get('conversation_history',[]), 'history_omitted':context.get('history_omitted',False), 'selected_quotes':context.get('quotes',[]), 'device_tasks':context.get('cancel_tasks',[]), 'speaker_catalog':context.get('speaker_catalog',[]), 'write_field_limits':context.get('write_field_limits',{}), 'current_valid_memories': memory, 'instruction': instruction, 'scope': current_scope, 'untrusted_evidence': chunk,
                       'allow_write': context.get('allow_write', False), 'transcript_organization': context.get('transcript_organization', False), 'chunk': i+1, 'chunks': len(chunks)}
             try:
                 messages = [SystemMessage(content=SYSTEM), HumanMessage(content=encode(prompt))]

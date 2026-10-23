@@ -2,7 +2,7 @@
 import copy
 from interview_backend.errors import DomainError
 from interview_backend.agent.work import WorkLog
-from interview_backend.agent.text_edits import text_only_targets, validate_edit_claims
+from interview_backend.agent.text_edits import text_only_targets, transcript_targets, validate_edit_claims
 from interview_backend.tools.registry import ToolContext
 
 
@@ -44,7 +44,7 @@ async def resume(engine,run_id,payload,emit=None):
     changes=evidence.committed(run_id)
     prior=next((c for c in changes if request and c['id']==request['operation_id']),None)
     if prior and prior['state']=='reverted': raise DomainError('reverted_operation','本次修改已撤销，未重复提交或执行后续步骤。',409)
-    if any(not evidence.valid_after_changes(s,changes) for s in context.get('sources',[])):
+    if any(not evidence.valid_after_changes(s,changes) for s in context.get('sources',[]) + context.get('speaker_catalog',[])):
         raise DomainError('stale_source','运行来源已有外部变化，请重新指定任务。',409)
     validate_edit_claims(evidence,result,context,changes+([payload['preview']] if payload.get('preview') else []),request['targets'] if request else [])
     if request and not prior:
@@ -81,5 +81,14 @@ async def resume(engine,run_id,payload,emit=None):
     if request and text_only_targets(request['targets']) and not steps:
         count=sum(change['count'] for change in changes if change['state']=='committed')
         result['answer']=f'已更新左侧正文 {count} 处，可在修改记录中撤销。'
+    elif request and transcript_targets(request['targets']) and not steps:
+        items = [i for change in changes if change['state']=='committed' for i in change['items']]
+        counts = [('发言归属', sum(i['resource_type']=='segment' and i['before']['speaker']!=i['after']['speaker'] for i in items)),
+                  ('说话人名称', sum(i['resource_type']=='speaker' for i in items)),
+                  ('正文', sum(i['resource_type']=='segment' and i['before']['edited']!=i['after']['edited'] for i in items)),
+                  ('核对状态', sum(i['resource_type']=='segment' and any(i['before'][k]!=i['after'][k] for k in ('needs_review','reviewed')) for i in items))]
+        summary = '、'.join(f'{label} {count} 处' for label,count in counts if count)
+        status = f'已更新{summary}，可在修改记录中整次撤销。' if summary else '本次没有需要保存的差异。'
+        result['answer'] = status + ('\n\n' + result['answer'] if result.get('answer') else '')
     work.save('finalization_result',describe(result))
     return result
