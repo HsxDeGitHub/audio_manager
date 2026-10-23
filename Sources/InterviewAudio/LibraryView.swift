@@ -7,6 +7,7 @@ import AudioCore
 
 struct LibraryView: View {
     @ObservedObject var model: AppModel
+    @AppStorage("assistant.visible") private var assistantVisible = false
     @UIState private var removeID: String?
     @UIState private var renaming: Recording?
     @UIState private var metadataRecording: Recording?
@@ -37,13 +38,25 @@ struct LibraryView: View {
                 }.font(.caption).padding(.horizontal, 24).padding(.vertical, 8)
             }
             Divider()
-            HSplitView {
-                sidebar.frame(minWidth: 220, idealWidth: 248, maxWidth: 280)
-                if !model.searchText.isEmpty {
-                    searchResults.frame(minWidth: 240, idealWidth: 270, maxWidth: 330)
+            AssistantWorkspace(visible: assistantVisible) {
+                HSplitView {
+                    Group {
+                        if model.searchText.isEmpty { sidebar }
+                        else {
+                            VStack(spacing: 0) {
+                                HStack {
+                                    Button { model.searchText = "" } label: { Label("资料库", systemImage: "chevron.left") }
+                                    Spacer()
+                                    Button("返回原位置") { Task { await model.returnFromSearch() } }.disabled(!model.hasSearchOrigin)
+                                }.font(.caption).padding(12)
+                                searchResults
+                            }
+                        }
+                    }.frame(minWidth: 220, idealWidth: 248, maxWidth: 280)
+                    detail.frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
                 }
-                detail.frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
-                AssistantView(model: model, assistant: model.assistant).frame(minWidth: 300, idealWidth: 350, maxWidth: 500)
+            } assistant: {
+                AssistantView(model: model, assistant: model.assistant)
             }
         }
         .tint(accent)
@@ -130,7 +143,8 @@ struct LibraryView: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-            .frame(width: 380)
+            .frame(minWidth: 240, idealWidth: 320, maxWidth: 380)
+            AssistantToggle(assistant: model.assistant)
             Button { model.pickFiles() } label: { Label(model.importing ? "正在导入" : "导入音频", systemImage: "plus") }
                 .buttonStyle(.borderedProminent).disabled(model.importing)
             Menu {

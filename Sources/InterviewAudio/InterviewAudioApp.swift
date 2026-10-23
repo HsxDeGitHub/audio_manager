@@ -57,6 +57,9 @@ struct InterviewAudioApp: App {
                 Button("后退 10 秒") { model.player.seek(model.player.position - 10) }.keyboardShortcut(.leftArrow, modifiers: [.command])
                 Button("前进 10 秒") { model.player.seek(model.player.position + 10) }.keyboardShortcut(.rightArrow, modifiers: [.command])
             }
+            CommandGroup(after: .sidebar) {
+                Button("显示或收起听阅助手") { model.assistant.toggle() }.keyboardShortcut("a", modifiers: [.command, .shift])
+            }
             CommandMenu("阅读") {
                 Button("搜索音频文字") { model.searchFocusRequestID = UUID() }.keyboardShortcut("f")
                 Button("下一个搜索结果") { model.navigateHit(1) }.keyboardShortcut("g").disabled(model.hits.isEmpty)

@@ -300,7 +300,12 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
                     var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/agent/runs/\(runID)/events"), timeoutInterval: 120)
                     request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
                     request.setValue(String(after), forHTTPHeaderField: "Last-Event-ID")
-                    let (bytes, response) = try await session.bytes(for: request)
+                    let streamConfig = session.configuration
+                    streamConfig.timeoutIntervalForResource = 3600
+                    streamConfig.timeoutIntervalForRequest = 45
+                    let streamSession = URLSession(configuration: streamConfig, delegate: BackendSessionDelegate(), delegateQueue: nil)
+                    defer { streamSession.invalidateAndCancel() }
+                    let (bytes, response) = try await streamSession.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else { throw BackendClientError.invalidResponse }
                     guard http.statusCode == 200 else { throw http.statusCode == 401 ? BackendClientError.unauthorized : BackendClientError.unavailable }
                     var identifier = after, kind = "message", lines: [String] = []
@@ -321,7 +326,7 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
                     continuation.finish()
                 } catch {
                     if Task.isCancelled { continuation.finish(throwing: CancellationError()) }
-                    else { if error is URLError { onTransportFailure?() }; continuation.finish(throwing: (error as? BackendClientError) ?? BackendClientError.unavailable) }
+                    else { continuation.finish(throwing: (error as? BackendClientError) ?? BackendClientError.unavailable) }
                 }
             }
             continuation.onTermination = { _ in task.cancel() }

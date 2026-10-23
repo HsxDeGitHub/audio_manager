@@ -178,6 +178,7 @@ final class AppModel: ObservableObject {
             store = BackendLibraryStore(connection: connection, onTransportFailure: onFailure)
             backendClient = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 30, onTransportFailure: onFailure)
             changeHistory.client = backendClient
+            assistant.bind(self)
             try await assistant.attach(connection, onTransportFailure: onFailure)
             deviceBridge?.stop()
             deviceBridge = nil

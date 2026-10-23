@@ -118,8 +118,14 @@ struct TranscriptView: View {
         }.padding(.horizontal, 26).padding(.vertical, 20)
     }
     private var readerToolbar: some View {
-        HStack(spacing: 14) {
-            Button { showSpeakers.toggle() } label: { Label("说话人", systemImage: "person.2") }
+        ViewThatFits(in: .horizontal) {
+            readerToolbarContent(compact: false)
+            readerToolbarContent(compact: true)
+        }.font(.caption).padding(.horizontal, 26).padding(.vertical, 11)
+    }
+    private func readerToolbarContent(compact: Bool) -> some View {
+        HStack(spacing: compact ? 8 : 14) {
+            Button { showSpeakers.toggle() } label: { if compact { Image(systemName: "person.2") } else { Label("说话人", systemImage: "person.2") } }.help("说话人").accessibilityLabel("说话人")
                 .popover(isPresented: $showSpeakers) { SpeakerSettingsView(model: model).padding(20).frame(width: 470) }
             Menu {
                 Toggle("智能标点（本地）", isOn: Binding(get: { model.smartPunctuation }, set: { model.setSmartPunctuation($0) }))
@@ -133,7 +139,7 @@ struct TranscriptView: View {
                 ForEach([14.0,16,18,20,22], id: \.self) { size in
                     Button("\(Int(size)) 号" + (model.readerFontSize == size ? " ✓" : "")) { model.setReaderFontSize(size) }
                 }
-            } label: { Label("排版", systemImage: "textformat.size") }.menuStyle(.borderlessButton).fixedSize().help("标点、分段与字号")
+            } label: { if compact { Image(systemName: "textformat.size") } else { Label("排版", systemImage: "textformat.size") } }.accessibilityLabel("排版").menuStyle(.borderlessButton).fixedSize().help("标点、分段与字号")
             Picker("核对筛选", selection: $model.reviewFilter) {
                 ForEach(ReviewFilter.allCases, id: \.self) { Text($0 == .pending ? "待核对 \(model.pendingReviewCount)" : $0.title).tag($0) }
             }.labelsHidden().frame(width: 112)
@@ -146,8 +152,8 @@ struct TranscriptView: View {
             else if !model.punctuationMessage.isEmpty { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).help(model.punctuationMessage) }
             Spacer()
             Button { model.locateCurrentSentence() } label: { Image(systemName: "scope") }.help("定位当前播放句子 ⇧⌘L").disabled(model.currentSegmentID == nil)
-            Toggle("跟随播放", isOn: $followPlayback).toggleStyle(.checkbox)
-        }.font(.caption).padding(.horizontal, 26).padding(.vertical, 11)
+            Toggle(compact ? "跟随" : "跟随播放", isOn: $followPlayback).toggleStyle(.checkbox).help("跟随播放")
+        }
     }
     private func runLabel(_ run: TranscriptRun) -> String {
         Date(timeIntervalSince1970: run.createdAt).formatted(date: .abbreviated, time: .shortened) + (run.hasEdits ? " · 已纠错" : "")
