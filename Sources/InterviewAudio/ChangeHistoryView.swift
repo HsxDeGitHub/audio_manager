@@ -66,8 +66,12 @@ enum ChangeDifference {
         guard case .object(let row) = item, case .object(let before) = row["before"], case .object(let after) = row["after"] else { return "修改详情不可用" }
         let labels = ["edited":"正文", "title":"名称", "payload":"整理稿", "content":"内容", "state":"状态", "removed":"移除", "kind":"类型", "company":"公司", "role":"岗位", "interview_date":"实际面试日期"]
         return after.keys.sorted().filter { before[$0] != after[$0] && $0 != "revision" }.map { key in
-            "\(labels[key] ?? key)\n修改前：\(display(before[key]))\n修改后：\(display(after[key]))"
+            "\(labels[key] ?? key)\n修改前：\(display(visibleValue(key, in: before)))\n修改后：\(display(visibleValue(key, in: after)))"
         }.joined(separator: "\n\n")
+    }
+    private static func visibleValue(_ key: String, in row: [String: BackendJSONValue]) -> BackendJSONValue? {
+        if key == "edited", row[key] == nil || row[key] == .null { return row["original"] }
+        return row[key]
     }
     private static func display(_ value: BackendJSONValue?) -> String {
         guard let value else { return "无" }

@@ -13,13 +13,6 @@ struct TranscriptView: View {
             titleBar
             Divider()
             if !model.segments.isEmpty {
-                Picker("阅读内容", selection: $model.readerShowsAI) {
-                    Text("转写原文").tag(false)
-                    Text("AI 整理稿").tag(true)
-                }.pickerStyle(.segmented).frame(width: 260).padding(.vertical, 10)
-                if model.readerShowsAI {
-                    AIDraftReaderView(model: model)
-                } else {
                 readerToolbar
                 if model.selectionMode { BulkReviewBar(model: model) }
                 ScrollViewReader { proxy in
@@ -51,7 +44,6 @@ struct TranscriptView: View {
                         if let id = model.utteranceID(for: model.focusSegmentID) { proxy.scrollTo(id, anchor: .top) }
                     }
                 }
-                }
             } else {
                 VStack(spacing: 14) {
                     Image(systemName: recording.state.isRunning ? "waveform" : "text.alignleft").font(.system(size: 36, weight: .light)).foregroundStyle(.tertiary)
@@ -78,8 +70,6 @@ struct TranscriptView: View {
                     }.font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 10)
-                Button { model.showAICompose = true } label: { Label("AI 整理", systemImage: "sparkles") }
-                    .disabled(model.segments.isEmpty || model.aiActiveDraftID != nil)
                 Menu {
                     Button("导出纯对话 TXT（无时间范围）…") { model.export(srt: false, plainDialogue: true) }
                     Button("导出发言文字 TXT（带时间范围）…") { model.export(srt: false) }

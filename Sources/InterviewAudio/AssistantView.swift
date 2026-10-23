@@ -18,8 +18,6 @@ struct AssistantView: View {
         .background(Color(nsColor: .windowBackgroundColor))
         .onChange(of: model.selectedID) { _, _ in assistant.contextChanged(model: model) }
         .onChange(of: model.selected?.activeRun) { _, _ in assistant.contextChanged(model: model) }
-        .onChange(of: model.readerShowsAI) { _, _ in assistant.contextChanged(model: model) }
-        .onChange(of: model.selectedAIDraftID) { _, _ in assistant.contextChanged(model: model) }
         .task { await assistant.reconnect(model: model) }
     }
     private var header: some View {

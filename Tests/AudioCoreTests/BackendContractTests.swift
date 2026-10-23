@@ -450,23 +450,6 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(result.partialResults?.first?.answer == "保留的分析")
     }
 
-    @Test @MainActor func cancelPinsTheActualOrganizationTask() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let app = AppModel(dataDirectoryOverride: root)
-        let task = Task<Void, Never> { _ = try? await Task.sleep(nanoseconds: 10_000_000_000) }
-        defer { task.cancel() }
-        app.aiTask = task; app.aiActiveDraftID = "draft-task"; app.aiActiveRecordingID = "r1"
-        let result = try await app.cancelDeviceTask(recordingID: "r1", taskID: "draft-task", taskType: "organize")
-        #expect(task.isCancelled && result["state"] as? String == "cancelling")
-        let replacement = Task<Void, Never> { _ = try? await Task.sleep(nanoseconds: 10_000_000_000) }
-        defer { replacement.cancel() }
-        app.aiTask = replacement; app.aiActiveDraftID = "replacement"
-        await #expect(throws: (any Error).self) { try await app.cancelDeviceTask(recordingID: "r1", taskID: "draft-task", taskType: "organize") }
-        #expect(!replacement.isCancelled)
-        #expect(!app.cancelAudioTask(recordingID: "r1", taskID: "absent"))
-    }
-
     @Test @MainActor func deviceReceiptsSurviveBothKindsOfLostAcknowledgment() async throws {
         let c = try client()
         for committedBeforeLoss in [false, true] {
@@ -564,6 +547,34 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(result.historical == true && result.text == "历史稿件" && result.start == 1)
     }
 
+    @Test @MainActor func legacyDraftReferenceOpensReadOnlyWithoutDraftReaderState() async throws {
+        BackendStubProtocol.respond = { _ in
+            (200, Data(#"{"text":"旧稿保留文字","draft_id":"draft1","block_id":"b1","revision":1,"historical":false}"#.utf8))
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let app = AppModel(dataDirectoryOverride: root)
+        let reference = try JSONDecoder().decode(AssistantReference.self, from: Data(#"{"resource_type":"draft","resource_id":"draft1","revision":1,"block_id":"b1"}"#.utf8))
+        let resolved = try await client().source(reference)
+        await app.openReadOnlySource(resolved, play: false)
+        #expect(app.historicalSource?.draftID == "draft1")
+        #expect(app.historicalSource?.text == "旧稿保留文字")
+        #expect(app.recordings.isEmpty && app.alert == nil)
+    }
+
+    @Test func transcriptDifferenceShowsEffectiveTextAndPreservesExplicitEmptyEdits() {
+        func item(_ before: BackendJSONValue, _ after: BackendJSONValue) -> BackendJSONValue {
+            .object(["before": .object(["original": .string("识别原文"), "edited": before]),
+                     "after": .object(["original": .string("识别原文"), "edited": after])])
+        }
+        let first = ChangeDifference.describe(item(.null, .string("修订正文")))
+        #expect(first.contains("修改前：识别原文") && first.contains("修改后：修订正文"))
+        let restored = ChangeDifference.describe(item(.string("修订正文"), .null))
+        #expect(restored.contains("修改后：识别原文"))
+        let empty = ChangeDifference.describe(item(.string(""), .string("修订正文")))
+        #expect(empty.contains("修改前：（空）"))
+    }
+
     @Test @MainActor func unavailableAudioAndRejectedStartsCannotReportSuccess() async throws {
         let player = PlayerController()
         await #expect(throws: (any Error).self) { try await player.seekVerified(10, play: true) }
@@ -577,8 +588,6 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(app.enqueue("absent") == nil)
         var recording = Recording(title: "合成", path: "/synthetic/unavailable.wav", fingerprint: "synthetic", duration: 5)
         recording.activeRun = "synthetic-run"; app.recordings = [recording]; app.selectedID = recording.id
-        #expect(app.startAI(mode: .dialogue, instructions: "合成") == nil)
-        #expect(app.aiActiveDraftID == nil)
     }
 
     @Test @MainActor func manualChangesRemainVisibleAndUndoAfterReload() async throws {

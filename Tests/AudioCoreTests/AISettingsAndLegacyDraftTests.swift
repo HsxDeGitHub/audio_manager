@@ -18,7 +18,7 @@ private final class AIStubProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-@Suite(.serialized) final class AIOrganizationTests {
+@Suite(.serialized) final class AISettingsAndLegacyDraftTests {
     private let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     deinit { AIStubProtocol.respond = nil; try? FileManager.default.removeItem(at: folder) }
     private func settings() -> AISettings {
@@ -34,9 +34,9 @@ private final class AIStubProtocol: URLProtocol, @unchecked Sendable {
     private func draft(_ mode: AIOrganizationMode = .dialogue) throws -> AIDraft {
         try AIDraft(runID: "run", recordingID: "recording", title: "测试访谈", settings: settings(), mode: mode, instructions: "保留具体例子", sources: sources())
     }
-    private func client() -> AIClient {
+    private func client() -> AIConnectionClient {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [AIStubProtocol.self]
-        return AIClient(session: URLSession(configuration: config))
+        return AIConnectionClient(session: URLSession(configuration: config))
     }
     private func response(_ text: String, finish: String = "stop") throws -> Data {
         try JSONSerialization.data(withJSONObject: ["choices": [["message": ["content": text], "finish_reason": finish]]])
@@ -59,6 +59,8 @@ private final class AIStubProtocol: URLProtocol, @unchecked Sendable {
         let s = try JSONDecoder().decode(AISettings.self, from: minimal)
         try s.validate()
         #expect(s.apiKey.isEmpty && s.chunkCharacters == 4500)
+        var retired = s; retired.chunkCharacters = 0
+        try retired.validate()
         #expect(try s.endpoint().absoluteString == "http://localhost:11434/v1/chat/completions")
         var complete = s; complete.baseURL = "https://example.test/chat/completions"
         #expect(try complete.endpoint().absoluteString == complete.baseURL)
@@ -98,22 +100,6 @@ private final class AIStubProtocol: URLProtocol, @unchecked Sendable {
         #expect(tinyDraft.chunks.count == 3)
         #expect(tinyDraft.chunks.flatMap(\.sources).map(\.id) == tiny.map(\.id))
     }
-    @Test func outputRequiresValidReferencesAndCompleteDialogueCoverage() throws {
-        let chunk = try draft().chunks[0]
-        let valid = #"{"blocks":[{"title":"项目交流","text":"项目介绍与回答。","source_ids":["S1","S2"]}]}"#
-        let blocks = try AIClient.parse("```json\n\(valid)\n```", chunk: chunk, requireCoverage: true)
-        #expect(blocks[0].sourceIDs == ["a","b"])
-        for invalid in [
-            #"{"blocks":[{"text":"编造来源","source_ids":["S999"]}]}"#,
-            #"{"blocks":[{"text":"缺失第二句","source_ids":["S1"]}]}"#,
-            #"{"blocks":[{"text":"","source_ids":["S1","S2"]}]}"#,
-            #"{"blocks":[]}"#, "不是 JSON"
-        ] { #expect(throws: (any Error).self) { try AIClient.parse(invalid, chunk: chunk, requireCoverage: true) } }
-        let summary = #"{"blocks":[{"text":"只提取重点。","source_ids":["S2"]}]}"#
-        #expect(try AIClient.parse(summary, chunk: chunk, requireCoverage: false).count == 1)
-        var withContext = chunk; withContext.sources = [chunk.sources[1]]; withContext.context = [chunk.sources[0]]
-        #expect(throws: (any Error).self) { try AIClient.parse(valid, chunk: withContext, requireCoverage: false) }
-    }
     @Test func draftPersistenceIsIndependentAndCascadesWithRecording() throws {
         let dbURL = folder.appendingPathComponent("library.sqlite")
         let db = try LibraryStore(url: dbURL)
@@ -143,29 +129,10 @@ private final class AIStubProtocol: URLProtocol, @unchecked Sendable {
         #expect(try db.aiDrafts(runID: "run").isEmpty)
         #expect(FileManager.default.fileExists(atPath: audio.path))
     }
-    @Test func compatibleRequestUsesSnapshotAndKeepsKeyOutOfBody() async throws {
-        let expected = try response(#"{"blocks":[{"title":"交流","text":"整理后的问答","source_ids":["S1","S2"]}]}"#)
-        AIStubProtocol.respond = { request in
-            #expect(request.url?.absoluteString == "https://example.test/v1/chat/completions")
-            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-secret")
-            let data = try Self.body(request)
-            let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
-            #expect(body["model"] as? String == "test-model")
-            #expect(body["max_tokens"] as? Int == 8192)
-            let messages = try #require(body["messages"] as? [[String: String]])
-            #expect(messages.count == 2)
-            #expect(messages[0]["content"]?.contains("保留具体例子") == true)
-            #expect(messages[1]["content"]?.contains("请介绍项目") == true)
-            #expect(!String(decoding: data, as: UTF8.self).contains("fixture-secret"))
-            return (200, expected)
-        }
-        let result = try await client().organize(settings: settings(), draft: draft(), chunkIndex: 0)
-        #expect(result[0].sourceIDs == ["a","b"])
-    }
-    @Test func providerErrorsAndTruncatedOutputsCannotBecomeSavedResults() async throws {
+    @Test func connectionErrorsAndTruncationDoNotExposeSecrets() async throws {
         for (status, body) in [(401, Data("fixture-secret private transcript".utf8)), (200, try response("partial", finish: "length")), (200, Data("invalid JSON".utf8)), (200, try response(""))] {
             AIStubProtocol.respond = { _ in (status,body) }
-            do { _ = try await client().organize(settings: settings(), draft: draft(), chunkIndex: 0); Issue.record("应拒绝无效响应") }
+            do { try await client().test(settings: settings()); Issue.record("应拒绝无效响应") }
             catch {
                 #expect(!error.localizedDescription.contains("fixture-secret"))
                 #expect(!error.localizedDescription.contains("private transcript"))

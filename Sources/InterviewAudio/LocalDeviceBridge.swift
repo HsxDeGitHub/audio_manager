@@ -151,7 +151,7 @@ final class DeviceBridge {
                 var position = command.arguments["start"]?.doubleValue
                 if let segmentID = command.arguments["segment_id"]?.stringValue {
                     guard let segment = app.segments.first(where: { $0.id == segmentID }) else { throw DeviceBridgeError.failed("片段已不存在。") }
-                    app.readerShowsAI = false; app.reviewFilter = .all; app.focusSegmentID = segmentID; app.focusRequestID = UUID()
+                    app.reviewFilter = .all; app.focusSegmentID = segmentID; app.focusRequestID = UUID()
                     if position == nil { position = segment.start }
                 }
                 let play = command.arguments["play"]?.boolValue ?? true
@@ -188,17 +188,7 @@ final class DeviceBridge {
                 return ("completed", try await app.cancelDeviceTask(recordingID: recordingID, taskID: taskID, taskType: taskType))
 
             case "organize":
-                guard let recordingID = command.arguments["recording_id"]?.stringValue,
-                      let rawMode = command.arguments["mode"]?.stringValue,
-                      let mode = AIOrganizationMode(rawValue: rawMode) else { return ("failed", ["message": "整理参数不正确。"]) }
-                if app.aiActiveDraftID != nil { return ("failed", ["message": "已有整理任务在进行。"]) }
-                await app.select(recordingID)
-                if let runID = command.arguments["run_id"]?.stringValue, app.selected?.activeRun != runID { app.switchRun(runID) }
-                guard let runID = command.arguments["run_id"]?.stringValue, app.selected?.activeRun == runID else { throw DeviceBridgeError.failed("转写版本未成功选择。") }
-                let instructions = command.arguments["instructions"]?.stringValue ?? ""
-                guard app.selectedID == recordingID else { throw DeviceBridgeError.failed("资料选择已变化。") }
-                let taskID = app.startAI(mode: mode, instructions: instructions)
-                return ("completed", try DeviceExecutionResult.started(taskID: taskID, state: "started", statusPath: "/api/v1/transcripts/\(command.arguments["run_id"]?.stringValue ?? "")/drafts"))
+                return ("failed", ["message": "独立整理稿流程已停用，请让听阅助手直接整理正文。", "retry_safe": false])
             default:
                 return ("failed", ["message": "不支持的设备命令。"])
             }
@@ -327,10 +317,6 @@ enum DeviceExecutionResult {
 
 extension AppModel {
     func cancelDeviceTask(recordingID: String, taskID: String, taskType: String) async throws -> [String: Any] {
-        if taskType == "organize", aiActiveRecordingID == recordingID, aiActiveDraftID == taskID, aiTask != nil {
-            cancelAI()
-            return ["state": "cancelling", "task_id": taskID, "task_type": taskType]
-        }
         if taskType == "audio", cancelAudioTask(recordingID: recordingID, taskID: taskID) {
             return ["state": "cancelling", "task_id": taskID, "task_type": taskType]
         }

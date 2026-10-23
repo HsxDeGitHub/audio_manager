@@ -22,21 +22,6 @@ struct LibraryView: View {
                 HStack { Text(model.backendState); Spacer(); Button("重试本地服务") { Task { await model.connectBackend() } }.disabled(model.backendConnecting) }
                     .font(.caption).padding(12).background(Color.orange.opacity(0.12))
             }
-            if model.aiActiveDraftID != nil {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text(model.aiProgressMessage.isEmpty ? "正在准备 AI 整理…" : model.aiProgressMessage).lineLimit(1)
-                    Spacer()
-                    Button("查看整理稿") {
-                        Task {
-                            if let id = model.aiActiveRecordingID { await model.select(id) }
-                            if let run = model.aiWorkingDraft?.runID, model.selected?.activeRun != run { model.switchRun(run) }
-                            model.selectedAIDraftID = model.aiActiveDraftID; model.readerShowsAI = true
-                        }
-                    }
-                    Button("取消") { model.cancelAI() }
-                }.font(.caption).padding(.horizontal, 24).padding(.vertical, 8)
-            }
             Divider()
             AssistantWorkspace(visible: assistantVisible) {
                 HSplitView {
@@ -65,8 +50,8 @@ struct LibraryView: View {
         .sheet(isPresented: Binding(get: { model.historicalSource != nil }, set: { if !$0 { model.historicalSource = nil } })) {
             if let source = model.historicalSource {
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("历史来源 · v\(source.revision ?? 0)").font(.title2)
-                    Text(source.message ?? "历史内容，仅供回看。").foregroundStyle(.orange)
+                    Text("\(source.draftID == nil ? "历史来源" : "旧版整理稿来源") · v\(source.revision ?? 0)").font(.title2)
+                    Text(source.message ?? "已保留的旧版内容，仅供回看；后续整理直接修改正文。").foregroundStyle(.orange)
                     ScrollView { Text(source.text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
                     HStack { Button("回听历史时间位置") { Task { await model.playHistoricalSource(source) } }.disabled(source.start == nil); Spacer(); Button("关闭") { model.historicalSource = nil } }
                 }.padding(24).frame(minWidth: 600, minHeight: 420)
@@ -75,7 +60,6 @@ struct LibraryView: View {
         .sheet(isPresented: $model.showAbout) { AboutView() }
         .sheet(isPresented: $model.showSettings) { ModelSettingsView(model: model, installer: model.installer) }
         .sheet(isPresented: $model.showAISettings) { AISettingsView(model: model) }
-        .sheet(isPresented: $model.showAICompose) { AIComposeView(model: model) }
         .sheet(item: $renaming) { recording in
             VStack(alignment: .leading, spacing: 18) {
                 Text("重命名音频").font(.headline)
@@ -359,7 +343,7 @@ struct ModelSettingsView: View {
             }
             Text(installer.message).font(.caption).foregroundStyle(.secondary)
             if let error = installer.error { Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
-            Label("本地识别不发送录音或文字；AI 整理使用单独配置的接口。", systemImage: "lock.shield").font(.caption).foregroundStyle(.secondary)
+            Label("语音识别在本机完成；听阅助手使用配置的大模型接口。", systemImage: "lock.shield").font(.caption).foregroundStyle(.secondary)
             HStack {
                 if installer.busy { Button("取消下载") { installer.cancel() } }
                 else if !installer.ready {

@@ -52,26 +52,16 @@ final class AppModel: ObservableObject {
     @Published var hasSearchOrigin = false
     @Published var showAbout = false
     @Published var showAISettings = false
-    @Published var showAICompose = false
     let changeHistory = ChangeHistoryModel()
     @Published var showChangeHistory = false
     @Published var historicalSource: BackendSource?
-    @Published var focusAIDraftBlockID: String?
     @Published var showMemories = false
     @Published var showDocuments = false
     @Published var documentSourceID: String?
     @Published var documentSourceLine: Int = 1
     @Published var showToolSettings = false
     @Published var aiSettings = AISettings()
-    @Published var aiDrafts: [AIDraft] = []
-    @Published var selectedAIDraftID: String?
-    @Published var readerShowsAI = false
-    @Published var aiActiveDraftID: String?
-    @Published var aiActiveRecordingID: String?
-    @Published var aiProgressMessage = ""
-    var aiTask: Task<Void, Never>?
-    var aiWorkingDraft: AIDraft?
-    let aiClient = AIClient()
+    let aiConnectionClient = AIConnectionClient()
     private struct SearchOrigin { var recordingID: String?; var position: Double; var focusedID: String?; var playing: Bool }
     private var searchOrigin: SearchOrigin?
     private var searchSession = false
@@ -196,21 +186,21 @@ final class AppModel: ObservableObject {
         do {
             guard let client = assistant.client else { return }
             let resolved = try await client.source(source)
-            if resolved.historical == true {
-                historicalSource = resolved
-                if play { await playHistoricalSource(resolved) }
+            if resolved.historical == true || resolved.draftID != nil {
+                await openReadOnlySource(resolved, play: play)
             } else if source.resourceType == "document" {
                 documentSourceID = source.resourceID; documentSourceLine = resolved.line ?? 1; showDocuments = true
             } else if let recordingID = resolved.recordingID {
                 await select(recordingID)
                 if let run = resolved.runID, selected?.activeRun != run { switchRun(run) }
-                if let draftID = resolved.draftID {
-                    guard aiDrafts.contains(where: { $0.id == draftID }), store?.contentRevision("draft", id: draftID) == source.revision else { throw BackendClientError.conflict }
-                    selectedAIDraftID = draftID; readerShowsAI = true; focusAIDraftBlockID = resolved.blockID
-                } else { readerShowsAI = false; reviewFilter = .all; focusSegmentID = resolved.segmentID; focusRequestID = UUID() }
+                reviewFilter = .all; focusSegmentID = resolved.segmentID; focusRequestID = UUID()
                 if play, let start = resolved.start { player.seek(max(0, start - preRoll), play: true) }
             } else { notice = resolved.text }
         } catch { alert = error.localizedDescription }
+    }
+    func openReadOnlySource(_ source: BackendSource, play: Bool) async {
+        historicalSource = source
+        if play { await playHistoricalSource(source) }
     }
     func playHistoricalSource(_ source: BackendSource) async {
         do {
@@ -255,7 +245,6 @@ final class AppModel: ObservableObject {
                 utterance.segments.map { ($0.id, utterance.id) }
             })
             preparePunctuation()
-            loadAIDrafts()
         } catch { alert = error.localizedDescription }
     }
     func savePosition(_ value: Double? = nil) {
@@ -280,7 +269,7 @@ final class AppModel: ObservableObject {
     }
     func select(_ id: String?) async {
         // Save the old selection before changing it (selection is kept separately from the List binding).
-        if selectedID != id { savePosition(); selectedID = id; reviewFilter = .all; bulkSelection = []; selectionMode = false; sampleSpeaker = nil; readerShowsAI = false; selectedAIDraftID = nil }
+        if selectedID != id { savePosition(); selectedID = id; reviewFilter = .all; bulkSelection = []; selectionMode = false; sampleSpeaker = nil }
         lastRecordingID = id; savePreferences()
         focusSegmentID = nil; loadTranscript(); refreshSearch()
         guard let recording = selected else { player.unload(); return }
@@ -571,7 +560,6 @@ final class AppModel: ObservableObject {
         }
     }
     func openHit(_ hit: SearchHit) async {
-        readerShowsAI = false
         activeHitID = hit.id; reviewFilter = .all
         if selectedID != hit.recordingID { await select(hit.recordingID) }
         guard selectedID == hit.recordingID else { return }
@@ -593,7 +581,7 @@ final class AppModel: ObservableObject {
         focusSegmentID = origin.focusedID ?? segments.first(where: { $0.end >= origin.position })?.id; focusRequestID = UUID()
     }
     func playSegment(_ segment: TranscriptSegment) { focusSegmentID = segment.id; focusRequestID = UUID(); player.seek(max(0, segment.start - preRoll), play: true) }
-    func locateCurrentSentence() { readerShowsAI = false; reviewFilter = .all; focusSegmentID = currentSegmentID; focusRequestID = UUID() }
+    func locateCurrentSentence() { reviewFilter = .all; focusSegmentID = currentSegmentID; focusRequestID = UUID() }
     func focusText(at position: Double) {
         focusSegmentID = (segments.first(where: { $0.end >= position }) ?? segments.last)?.id
         focusRequestID = UUID()
@@ -612,7 +600,6 @@ final class AppModel: ObservableObject {
     }
     func remove(_ id: String) {
         guard activeRecordingID != id else { alert = "请先取消当前任务，等待清理完成后再移除。"; return }
-        guard aiActiveRecordingID != id else { alert = "请先取消该录音的 AI 整理，再移除。"; return }
         queue.removeAll { $0.recordingID == id }
         do {
             try store?.remove(id)
@@ -643,7 +630,6 @@ final class AppModel: ObservableObject {
     }
     func shutdown() {
         shuttingDown = true; backendGeneration = UUID()
-        stopAIForShutdown()
         if let job = activeJobID { try? store?.stopWorker(job, state: "interrupted") }
         savePosition(); installer.cancel(); punctuationTask?.cancel(); punctuationProcessor.cancel()
         for job in queue {

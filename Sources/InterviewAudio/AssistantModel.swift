@@ -124,7 +124,7 @@ final class AssistantModel: ObservableObject {
         update(selectedSession) { $0.quoteScope = scopeKey(model) }
         isVisible = true; focusRequest = UUID()
     }
-    private func scopeKey(_ model: AppModel) -> String { [model.selectedID ?? "", model.selected?.activeRun ?? "", model.readerShowsAI ? model.selectedAIDraftID ?? "" : ""].joined(separator: ":") }
+    private func scopeKey(_ model: AppModel) -> String { [model.selectedID ?? "", model.selected?.activeRun ?? ""].joined(separator: ":") }
     func contextChanged(model: AppModel) {
         let key = scopeKey(model)
         for session in Array(conversations.keys) where conversations[session]?.quoteScope != nil && conversations[session]?.quoteScope != key {
@@ -186,8 +186,7 @@ final class AssistantModel: ObservableObject {
             if value.pendingInstruction == instruction, let saved = value.pendingBody { body = saved }
             else {
                 let context: [String: Any] = ["scope": value.allMaterials ? "all" : "current", "recording_id": value.allMaterials ? NSNull() : model.selectedID as Any? ?? NSNull(),
-                    "run_id": value.allMaterials ? NSNull() : model.selected?.activeRun as Any? ?? NSNull(), "segment_ids": value.allMaterials ? [] : value.quotedIDs,
-                    "draft_id": !value.allMaterials && model.readerShowsAI ? model.selectedAIDraftID as Any? ?? NSNull() : NSNull()]
+                    "run_id": value.allMaterials ? NSNull() : model.selected?.activeRun as Any? ?? NSNull(), "segment_ids": value.allMaterials ? [] : value.quotedIDs]
                 body = try JSONSerialization.data(withJSONObject: ["session_id": id, "message_id": UUID().uuidString, "instruction": instruction, "context": context])
                 update(id) { $0.pendingInstruction = instruction; $0.pendingBody = body }
             }

@@ -73,6 +73,9 @@ private final class ExperienceProtocol: URLProtocol, @unchecked Sendable {
                     stream.open(); defer { stream.close() }; var buffer = [UInt8](repeating: 0, count: 4096)
                     while stream.hasBytesAvailable { let n = stream.read(&buffer, maxLength: buffer.count); if n <= 0 { break }; data.append(buffer, count: n) }
                 }
+                let requestBody = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                let context = try #require(requestBody["context"] as? [String: Any])
+                #expect(context["draft_id"] == nil)
                 bodies.append(data)
                 if bodies.count == 1 { throw URLError(.timedOut) }
                 return Data(#"{"id":"run","state":"completed"}"#.utf8)
