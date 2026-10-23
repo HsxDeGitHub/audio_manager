@@ -376,6 +376,11 @@ def test_model_tool_domain_errors_keep_stable_code_in_run_result(client, monkeyp
     from interview_backend.agent.models import ModelSettings
     class InvalidToolModel(FakeModel):
         async def ainvoke(self, messages):
+            if code == 'version_conflict':
+                # 版本由服务端绑定后，冲突用真实并发修改触发，不能靠模型填错数字。
+                from interview_backend.services.changesets import ChangeSetService
+                ChangeSetService(client.app.state.database).submit({'operation_id':'external-review','targets':[
+                    {'resource_type':'segment','resource_id':'s1','expected_revision':1,'fields':{'reviewed':True}}]})
             return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'invalid-tool', 'args': {'targets': [target]}}])
     class Settings:
         def client(self): return InvalidToolModel()

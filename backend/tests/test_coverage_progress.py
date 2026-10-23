@@ -40,17 +40,18 @@ def test_long_source_failure_and_resume_preserve_exact_unfinished_ranges(client,
     model,identifier=prepare(client,monkeypatch)
     failed=wait(client,identifier)
     coverage=failed['result']['coverage']
-    assert coverage['unit']=='parts' and coverage['covered']==1 and coverage['total']==3
+    assert coverage['unit']=='parts' and coverage['covered']==2 and coverage['total']==10
     assert coverage['source_covered']==0 and coverage['source_total']==1
-    assert [p['char_start'] for p in coverage['parts']]==[0,6000,12000]
-    assert [p['state'] for p in coverage['parts']]==['completed','failed','pending']
+    assert [p['char_start'] for p in coverage['parts']]==list(range(0,18000,1800))
+    assert [p['char_end'] for p in coverage['parts']]==list(range(1800,18001,1800))
+    assert [p['state'] for p in coverage['parts']]==['completed']*2+['failed']*2+['pending']*6
     assert failed['result']['partial_results'][0]['answer']=='已保留的合成分块分析'
     ids=[p['id'] for p in coverage['parts']]
     model.ready=True
     assert client.post('/api/v1/agent/runs/'+identifier+'/resume').status_code==200
     completed=wait(client,identifier)
-    assert completed['state']=='completed' and completed['result']['coverage']['covered']==3
-    assert completed['result']['coverage']['source_covered']==1 and model.count==4
+    assert completed['state']=='completed' and completed['result']['coverage']['covered']==10
+    assert completed['result']['coverage']['source_covered']==1 and model.count==coverage['chunks']+1
     assert [p['id'] for p in completed['result']['coverage']['parts']]==ids
 
 
@@ -61,8 +62,8 @@ def test_cancelled_long_source_does_not_claim_complete_source(client,monkeypatch
         time.sleep(.005)
     run=client.post('/api/v1/agent/runs/'+identifier+'/cancel').json()
     coverage=run['result']['coverage']
-    assert coverage['covered']==1 and coverage['total']==3 and coverage['source_covered']==0
-    assert coverage['parts'][1]['state']=='cancelled'
+    assert coverage['covered']==2 and coverage['total']==10 and coverage['source_covered']==0
+    assert [p['state'] for p in coverage['parts']][2:4]==['cancelled','cancelled']
 
 
 def test_mixed_sources_count_only_fully_processed_sources(client,monkeypatch):

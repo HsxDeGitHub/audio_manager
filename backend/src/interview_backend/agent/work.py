@@ -1,5 +1,5 @@
 """推理缓存绑定输入与证据；业务副作用回执与可失效的推理缓存分开保存。"""
-import hashlib,json
+import asyncio,hashlib,json
 from interview_backend.services.common import encode
 from interview_backend.errors import DomainError
 
@@ -25,7 +25,7 @@ class WorkLog:
     def valid(self,dependencies):
         from interview_backend.agent.tools import EvidenceService
         evidence=EvidenceService(self.database);changes=evidence.committed(self.ledger_id)
-        return all(evidence.valid(r) if r['resource_type']=='memory' else evidence.valid_after_changes(r,changes) for r in dependencies)
+        return evidence.valid_many(dependencies,changes)
 
     def effect(self,digest):
         cached=self.get('effect:'+digest)
@@ -58,22 +58,27 @@ class WorkLog:
 
     async def model(self,key,bound,messages,configuration=None,dependencies=(),emit=None):
         from langchain_core.messages import AIMessage
-        signature=hashlib.sha256(encode({'messages':[m.model_dump(mode='json') for m in messages],'configuration':configuration}).encode()).hexdigest()
-        cached=self.get(key)
+        def signature_for_input():
+            payload=encode({'messages':[m.model_dump(mode='json') for m in messages],'configuration':configuration}).encode()
+            if (configuration or {}).get('input_budget_bytes') and len(payload)>configuration['input_budget_bytes']:
+                raise DomainError('model_input_too_large','本批模型上下文超过处理上限，未发送请求；请缩小指令或选区后重新提问。',422)
+            return hashlib.sha256(payload).hexdigest(),len(payload)
+        signature,input_bytes=await asyncio.to_thread(signature_for_input)
+        cached=await asyncio.to_thread(self.get,key)
         if cached is not None:
             response=cached.get('response',cached)
-            self.preserve_legacy_effects(key,response)
-            if cached.get('input_hash')==signature and self.valid(cached.get('dependencies',[])):
+            await asyncio.to_thread(self.preserve_legacy_effects,key,response)
+            if cached.get('input_hash')==signature and await asyncio.to_thread(self.valid,cached.get('dependencies',[])):
                 value=AIMessage.model_validate(response)
                 if emit and not value.tool_calls:
                     from interview_backend.agent.streaming import answer_prefix, text_content
                     await emit('answer_start',{'block_id':self.run_id+':'+key})
                     await emit('answer_delta',{'block_id':self.run_id+':'+key,'text':answer_prefix(text_content(value))})
                 return value
-        if not self.valid(dependencies):raise DomainError('stale_source','模型步骤的证据依赖已变化，未发送过期内容。',409)
+        if not await asyncio.to_thread(self.valid,dependencies):raise DomainError('stale_source','模型步骤的证据依赖已变化，未发送过期内容。',409)
         from interview_backend.agent.streaming import invoke
         response=await invoke(bound,messages,emit,self.run_id+':'+key)
-        self.save(key,{'input_hash':signature,'dependencies':list(dependencies),'response':response.model_dump(mode='json')})
+        await asyncio.to_thread(self.save,key,{'input_hash':signature,'input_bytes':input_bytes,'dependencies':list(dependencies),'response':response.model_dump(mode='json')})
         return response
 
     def finalization(self):

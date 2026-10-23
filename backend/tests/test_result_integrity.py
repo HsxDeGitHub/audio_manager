@@ -143,4 +143,5 @@ def test_api_resume_recomputes_invalid_readonly_finalization_without_write_lock(
         pytest.fail('任务未结束')
     assert wait()['state']=='failed'
     assert client.post('/api/v1/agent/runs/'+identifier+'/resume').status_code==200
-    assert wait()['state']=='completed' and model.step==4
+    resumed=wait()
+    assert resumed['state']=='completed' and model.step==2+resumed['result']['coverage']['chunks']

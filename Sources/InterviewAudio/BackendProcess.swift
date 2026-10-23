@@ -11,6 +11,10 @@ final class BackendProcess: ObservableObject {
     private var lifeline: Pipe?
     private var connection: BackendConnection?
     private var monitor: Task<Void, Never>?
+    private var healthProbe: Task<Bool, Never>?
+    private var healthFailures = 0
+    private let healthConfiguration: URLSessionConfiguration
+    init(healthConfiguration: URLSessionConfiguration = .ephemeral) { self.healthConfiguration = healthConfiguration }
     var onUnavailable: ((String) -> Void)?
     var processIdentifier: Int32? { child?.isRunning == true ? child?.processIdentifier : nil }
 
@@ -21,22 +25,37 @@ final class BackendProcess: ObservableObject {
         onUnavailable?(message)
     }
 
+    func verifyConnection() async {
+        guard let connection, let process = child else { return }
+        guard process.isRunning else { becameUnavailable("本地服务已退出，请重试。未完成任务已保留。"); return }
+        // 多个业务请求同时失败时合并探测；单次超时不能使整个工作区下线。
+        if let healthProbe { _ = await healthProbe.value; return }
+        let probe = Task { () -> Bool in
+            do {
+                let client = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 8, configuration: healthConfiguration)
+                _ = try await client.health(); return true
+            } catch { return false }
+        }
+        healthProbe = probe
+        let healthy = await probe.value
+        guard child === process, self.connection?.token == connection.token else { return }
+        healthProbe = nil
+        healthFailures = healthy ? 0 : healthFailures + 1
+        if healthFailures >= 3 {
+            becameUnavailable("本地服务持续无响应，请重试连接。未完成任务已保留。")
+        }
+    }
+
     private func watch(_ process: Process, connection: BackendConnection) {
         monitor?.cancel()
         monitor = Task { [weak self] in
-            var failures = 0
-            guard let client = try? BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 1) else { return }
             while !Task.isCancelled {
                 do {
-                    try await Task.sleep(nanoseconds: 1_000_000_000)
-                    _ = try await client.status(); failures = 0
+                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                    guard let self, self.child === process, self.connection?.token == connection.token else { return }
+                    await self.verifyConnection()
                 } catch {
-                    if Task.isCancelled { return }
-                    failures += 1
-                    if failures >= 2, let self, self.child === process {
-                        self.becameUnavailable("本地服务连接已中断，请重试。未完成任务会保留恢复状态。")
-                        return
-                    }
+                    return
                 }
             }
         }
@@ -44,8 +63,8 @@ final class BackendProcess: ObservableObject {
 
     func start(dataDirectory: URL) async throws -> BackendConnection {
         if let connection, child?.isRunning == true {
-            let client = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 1)
-            if let status = try? await client.status(), status.supports("business_write") { return connection }
+            let client = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 8)
+            if (try? await client.health()) != nil { return connection }
             becameUnavailable("本地服务连接已失效，正在重新连接。")
         }
         stop(); state = "正在准备本地资料库…"; diagnostic = nil
@@ -106,6 +125,7 @@ final class BackendProcess: ObservableObject {
 
     func stop() {
         monitor?.cancel(); monitor = nil
+        healthProbe?.cancel(); healthProbe = nil; healthFailures = 0
         connection = nil
         try? lifeline?.fileHandleForWriting.close(); lifeline = nil
         if let process = child, process.isRunning {

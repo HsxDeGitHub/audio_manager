@@ -1,5 +1,5 @@
 """资料分块完整处理后才计入覆盖；保留精确范围和可恢复进度。"""
-import hashlib
+import asyncio,hashlib
 from interview_backend.services.common import encode
 
 
@@ -31,7 +31,7 @@ class Coverage:
 
     async def publish(self,emit):
         value=self.snapshot()
-        self.work.save('coverage_progress',{'signature':self.signature,'dependencies':self.dependencies,'coverage':value})
+        await asyncio.to_thread(self.work.save,'coverage_progress',{'signature':self.signature,'dependencies':self.dependencies,'coverage':value})
         if emit:await emit('coverage',value)
 
     async def begin(self,index,chunk,emit):
@@ -49,5 +49,5 @@ class Coverage:
         identifiers=[p['part_id'] for p in chunk]
         for identifier in identifiers:self.parts[identifier]['state']='completed'
         self.results[':'.join(identifiers)]={'part_ids':identifiers,'result':result,'context':context,'dependencies':dependencies}
-        self.work.save('part_results',{'signature':self.signature,'items':self.results})
+        await asyncio.to_thread(self.work.save,'part_results',{'signature':self.signature,'items':self.results})
         await self.publish(emit)

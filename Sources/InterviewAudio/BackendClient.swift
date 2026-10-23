@@ -374,8 +374,8 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
             if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
                 throw CancellationError()
             }
-            onTransportFailure?()
             if (error as? URLError)?.code == .timedOut { throw BackendClientError.timedOut }
+            onTransportFailure?()
             throw BackendClientError.unavailable
         }
         try Task.checkCancellation()

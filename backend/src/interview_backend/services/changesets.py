@@ -17,6 +17,11 @@ class ChangeTarget(BaseModel):
     fields: dict = Field(min_length=1)
 
 
+class ProposedTarget(ChangeTarget):
+    """模型只提出内容建议；真实事务的版本由已冻结范围绑定。"""
+    expected_revision: int | None = Field(default=None, ge=1)
+
+
 class NewDocument(BaseModel):
     model_config = ConfigDict(extra='forbid')
     id: str = Field(min_length=1)
@@ -158,7 +163,10 @@ class ChangeSetService:
             old = read_object(c, *key)
             revision = version(c, *key)
             if revision != target.expected_revision:
-                raise DomainError('version_conflict', '对象版本已变化，整次修改未提交。', 409)
+                error = DomainError('version_conflict', '对象版本已变化，整次修改未提交。', 409)
+                error.details = {'resource_type': key[0], 'resource_id': key[1],
+                                 'expected_revision': target.expected_revision, 'actual_revision': revision}
+                raise error
             updated = patch(target.resource_type, old, target.fields)
             if target.resource_type == 'segment' and 'speaker' in target.fields and updated['speaker'] is not None:
                 if not c.execute('SELECT 1 FROM speakers WHERE run_id=? AND speaker=?', (old['run_id'], updated['speaker'])).fetchone():
@@ -215,9 +223,10 @@ class ChangeSetService:
 
 class ChangePlan:
     """收集一条指令内的建议。预检使用短事务并回滚，绝不跨模型调用持锁。"""
-    def __init__(self, service, operation_id, allowed, field_limits=None):
+    def __init__(self, service, operation_id, allowed, field_limits=None, revisions=None):
         self.service, self.operation_id, self.allowed = service, operation_id, allowed
         self.field_limits = field_limits or {}
+        self.revisions = dict(revisions) if revisions is not None else None
         self.targets = {}
         self.documents = {}
         self.device_actions = {}
@@ -225,7 +234,16 @@ class ChangePlan:
 
     def stage(self, targets, allowed=None):
         candidate = {key: {**value, 'fields': dict(value['fields'])} for key, value in self.targets.items()}
-        try: values = [ChangeTarget.model_validate(t).model_dump() for t in targets]
+        try:
+            values = []
+            for t in targets:
+                target = ProposedTarget.model_validate(t).model_dump()
+                key = (target['resource_type'], target['resource_id'])
+                if self.revisions is not None:
+                    if key not in self.revisions:
+                        raise DomainError('scope_denied', '修改超出用户指定范围。', 403)
+                    target['expected_revision'] = self.revisions[key]
+                values.append(ChangeTarget.model_validate(target).model_dump())
         except ValidationError: raise DomainError('invalid_tool_arguments', '工具参数不合法。', 422) from None
         for target in values:
             key = (target['resource_type'], target['resource_id'])
@@ -258,5 +276,6 @@ class ChangePlan:
         identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, self.operation_id + ':' + digest))
         self.documents[identifier] = {'id': identifier, 'title': title, 'format': format, 'content': content}
         if self.allowed is not None: self.allowed = self.allowed | {('document', identifier)}
+        if self.revisions is not None: self.revisions[('document', identifier)] = 1
         self.stage([{'resource_type': 'document', 'resource_id': identifier, 'expected_revision': 1, 'fields': {'removed': False}}])
         return {**self.documents[identifier], 'revision': 2, 'duplicate': False, 'state': 'planned'}

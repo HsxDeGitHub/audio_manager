@@ -450,6 +450,51 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(result.partialResults?.first?.answer == "保留的分析")
     }
 
+    @Test func singleRequestTimeoutDoesNotDeclareTheBackendDisconnected() async throws {
+        final class Counter: @unchecked Sendable {
+            let lock = NSLock(); var value = 0
+            func increment() { lock.lock(); value += 1; lock.unlock() }
+        }
+        let failures = Counter()
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [BackendStubProtocol.self]
+        let c = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18765")!, token: token,
+                                  timeout: 1, configuration: config, onTransportFailure: { failures.increment() })
+        BackendStubProtocol.respond = { _ in throw URLError(.timedOut) }
+        do { _ = try await c.health(); Issue.record("应报告请求超时") }
+        catch let error as BackendClientError { #expect(error == .timedOut) }
+        #expect(failures.value == 0)
+        BackendStubProtocol.respond = { _ in throw URLError(.cannotConnectToHost) }
+        do { _ = try await c.health(); Issue.record("应报告连接失败") }
+        catch let error as BackendClientError { #expect(error == .unavailable) }
+        #expect(failures.value == 1)
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["INTERVIEW_BACKEND_CONTRACT_INTEGRATION"] == "1"))
+    @MainActor func slowLightweightHealthProbeAndTransientFailuresKeepTheWorkspaceConnected() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("health-probe-\(UUID().uuidString)")
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [BackendStubProtocol.self]
+        let backend = BackendProcess(healthConfiguration: config)
+        defer { backend.stop(); try? FileManager.default.removeItem(at: root) }
+        _ = try await backend.start(dataDirectory: root)
+        var unavailable = 0, calls = 0
+        backend.onUnavailable = { _ in unavailable += 1 }
+        BackendStubProtocol.respond = { request in
+            calls += 1
+            #expect(request.url?.path == "/health" && request.timeoutInterval == 8)
+            Thread.sleep(forTimeInterval: 1.2)
+            return (200, Data(#"{"status":"ok","service":"interview-audio-backend","version":"synthetic"}"#.utf8))
+        }
+        let first = Task { await backend.verifyConnection() }
+        try await Task.sleep(for: .milliseconds(50))
+        await backend.verifyConnection(); await first.value
+        #expect(calls == 1 && unavailable == 0 && backend.processIdentifier != nil)
+        BackendStubProtocol.respond = { _ in throw URLError(.cannotConnectToHost) }
+        await backend.verifyConnection(); await backend.verifyConnection()
+        #expect(unavailable == 0 && backend.state == "本地服务已连接")
+        await backend.verifyConnection()
+        #expect(unavailable == 1 && backend.state == "本地服务不可用")
+    }
+
     @Test @MainActor func deviceReceiptsSurviveBothKindsOfLostAcknowledgment() async throws {
         let c = try client()
         for committedBeforeLoss in [false, true] {

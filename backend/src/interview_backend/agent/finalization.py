@@ -1,5 +1,5 @@
 """内容事务与提交后设备步骤各自持久化，模型及设备等待不占用写事务。"""
-import copy
+import asyncio,copy
 from interview_backend.errors import DomainError
 from interview_backend.agent.work import WorkLog
 from interview_backend.agent.text_edits import text_only_targets, transcript_targets, validate_edit_claims
@@ -34,29 +34,29 @@ async def finalize(engine,run_id,result,context,plan,emit=None):
     payload={'result':result,'context':context,'allowed':[list(k) for k in plan.allowed] if plan.allowed is not None else None,
              'request':{'operation_id':plan.operation_id,'targets':list(plan.targets.values()),'new_documents':list(plan.documents.values())} if plan.targets else None,
              'preview':plan.preview,'steps':list(plan.device_actions.values())}
-    work.save('finalization',payload)
+    await asyncio.to_thread(work.save,'finalization',payload)
     return await resume(engine,run_id,payload,emit)
 
 
 async def resume(engine,run_id,payload,emit=None):
     evidence=engine.evidence; work=WorkLog(evidence.database,run_id)
     result=copy.deepcopy(payload['result']); context=payload['context']; request=payload['request']
-    changes=evidence.committed(run_id)
+    changes=await asyncio.to_thread(evidence.committed,run_id)
     prior=next((c for c in changes if request and c['id']==request['operation_id']),None)
     if prior and prior['state']=='reverted': raise DomainError('reverted_operation','本次修改已撤销，未重复提交或执行后续步骤。',409)
-    if any(not evidence.valid_after_changes(s,changes) for s in context.get('sources',[]) + context.get('speaker_catalog',[])):
+    if not await asyncio.to_thread(evidence.valid_many,context.get('sources',[]) + context.get('speaker_catalog',[]),changes):
         raise DomainError('stale_source','运行来源已有外部变化，请重新指定任务。',409)
-    validate_edit_claims(evidence,result,context,changes+([payload['preview']] if payload.get('preview') else []),request['targets'] if request else [])
+    await asyncio.to_thread(validate_edit_claims,evidence,result,context,changes+([payload['preview']] if payload.get('preview') else []),request['targets'] if request else [])
     if request and not prior:
-        evidence.validate_result(result,context,changes+([payload['preview']] if payload['preview'] else []))
+        await asyncio.to_thread(evidence.validate_result,result,context,changes+([payload['preview']] if payload['preview'] else []))
         call=ToolContext(request_id=run_id,operation_id=request['operation_id'],allowed_effects=frozenset({'write'}),
                          resource_scope=frozenset(tuple(k) for k in payload['allowed']) if payload['allowed'] is not None else None,
                          prepared_documents=tuple(request['new_documents']))
         await engine.registry.execute('changesets.apply',{'targets':request['targets']},call)
-        changes=evidence.committed(run_id)
+        changes=await asyncio.to_thread(evidence.committed,run_id)
         if emit:
             for change in changes: await emit('changeset',change)
-    evidence.validate_result(result,context,changes)
+    await asyncio.to_thread(evidence.validate_result,result,context,changes)
     if changes:
         result['changesets']=changes
         if len(changes)==1:result['changeset']=changes[0]

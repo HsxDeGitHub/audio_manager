@@ -44,7 +44,9 @@ class ReportService:
         frozen = parent.get('report_plan') or self.freeze(parent, instruction, as_of)
         plan = {k: v for k, v in frozen.items() if k != 'contexts'}
         allowed = frozenset((r['resource_type'], r['resource_id']) for r in parent.get('write_resources', []))
-        batch = ChangePlan(ChangeSetService(self.database), run_id + ':changes', allowed, field_limits=parent.get('write_field_limits'))
+        from interview_backend.agent.batching import bounded
+        batch = ChangePlan(ChangeSetService(self.database), run_id + ':changes', allowed, field_limits=parent.get('write_field_limits'),
+            revisions={(r['resource_type'],r['resource_id']):r['revision'] for r in parent.get('write_resources',[])} if bounded(parent) else None)
         items = []; claims = []; failed = []
         for recording in plan['targets']:
             if not recording['active_run'] or recording['state'] != 'completed':

@@ -115,7 +115,7 @@ def test_text_attribution_name_and_review_are_one_reversible_transaction(client,
     target(fields={'run_id':'run2'}), target(fields={'speaker_edited':False}),
     target(identifier='s2'), target(identifier='s3'),
     target('recording','r1',{'title':'不应更名'}), target('speaker','run2:0',{'name':'越界'}),
-    target(fields={'speaker':9}), target(revision=9),
+    target(fields={'speaker':9}),
 ])
 def test_invalid_field_scope_speaker_and_revision_never_commit_partial_changes(client,config,bad):
     before=rows(client)

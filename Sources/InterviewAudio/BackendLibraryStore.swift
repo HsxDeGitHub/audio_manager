@@ -62,7 +62,7 @@ final class BackendLibraryStore: @unchecked Sendable {
         let task = session.dataTask(with: request) { data, response, error in
             defer { semaphore.signal() }
             if let error {
-                if (error as? URLError)?.code != .cancelled { onFailure?() }
+                if ![URLError.Code.cancelled, .timedOut].contains((error as? URLError)?.code ?? .unknown) { onFailure?() }
                 box.set(.failure((error as? URLError)?.code == .timedOut ? BackendClientError.timedOut : BackendClientError.unavailable)); return
             }
             guard let response = response as? HTTPURLResponse, let data else { box.set(.failure(BackendClientError.invalidResponse)); return }

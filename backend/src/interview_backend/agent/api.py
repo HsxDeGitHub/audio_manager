@@ -307,6 +307,14 @@ class AgentAPI:
             self.require_session(c, row['session_id'])
             return [dict(r) for r in c.execute('SELECT * FROM events WHERE run_id=? AND seq>? ORDER BY seq', (identifier, after))]
 
+    def state(self, identifier):
+        """SSE只检查轻量状态，避免每200ms重建全部上下文、输出和恢复快照。"""
+        with self.database.transaction() as c:
+            row=c.execute('SELECT state,session_id FROM agent_runs WHERE id=?',(identifier,)).fetchone()
+            if row is None: raise DomainError('not_found','运行不存在。',404)
+            self.require_session(c,row['session_id'])
+            return row['state']
+
 
 def router(app):
     class ServiceProxy:
@@ -341,14 +349,19 @@ def router(app):
             if cursor < 0: raise ValueError()
         except ValueError:
             raise DomainError('invalid_cursor', '事件序号不合法。', 422) from None
-        service.get(identifier)
+        await asyncio.to_thread(service.state,identifier)
         async def stream():
             nonlocal cursor
             while True:
-                for event in service.events(identifier, cursor):
+                for event in await asyncio.to_thread(service.events,identifier,cursor):
                     cursor = event['seq']
                     yield f'id: {cursor}\nevent: {event["kind"]}\ndata: {event["payload"]}\n\n'
-                if service.get(identifier)['state'] not in {'queued','running'}: return
+                if await asyncio.to_thread(service.state,identifier) not in {'queued','running'}:
+                    # 状态可能在上一次读事件后终结，退出前补齐同一事务中的终态事件。
+                    for event in await asyncio.to_thread(service.events,identifier,cursor):
+                        cursor=event['seq']
+                        yield f'id: {cursor}\nevent: {event["kind"]}\ndata: {event["payload"]}\n\n'
+                    return
                 yield ': keepalive\n\n'
                 await asyncio.sleep(0.2)
         return StreamingResponse(stream(), media_type='text/event-stream', headers={'Cache-Control': 'no-cache'})

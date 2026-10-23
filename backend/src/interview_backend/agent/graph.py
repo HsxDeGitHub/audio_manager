@@ -93,9 +93,12 @@ class AgentEngine:
         if context.get('allow_device'): effects.add('device')
         if context.get('allow_external'): effects.add('external')
         from interview_backend.services.changesets import ChangePlan, ChangeSetService
+        from interview_backend.agent.batching import bounded, make_chunks, batch_scope, short_history, bounded_memories, MAX_INPUT_BYTES
+        compact = bounded(context)
         plan = change_plan or ChangePlan(ChangeSetService(self.evidence.database), run_id + ':changes',
                     frozenset((r['resource_type'], r['resource_id']) for r in context.get('write_resources', context['resources'])),
-                    field_limits=context.get('write_field_limits'))
+                    field_limits=context.get('write_field_limits'),
+                    revisions={(r['resource_type'],r['resource_id']):r['revision'] for r in context.get('write_resources',context['resources'])} if compact else None)
         read_context = ToolContext(request_id=run_id, allowed_effects=frozenset(effects),
                                    operation_id=run_id + ':tools', frozen_context=context, change_plan=plan,
                                    resource_scope=frozenset((r['resource_type'], r['resource_id'])
@@ -103,6 +106,7 @@ class AgentEngine:
         tools = framework_tools(self.registry, read_context)
         bound = model.bind_tools(tools) if tools else model
         configuration={'model':getattr(model,'model_name',type(model).__qualname__),'tools':[(t.name,t.args_schema.model_json_schema()) for t in tools]}
+        if compact: configuration['input_budget_bytes'] = MAX_INPUT_BYTES
         sources = context.get('sources', [])
         strategy = context.get('task_intent', {}).get('reading')
         full = strategy in {'selection', 'full', 'weekly'} if strategy else context.get('allow_write') or bool(re.search(r'全部|所有|本周|周报',instruction))
@@ -123,33 +127,26 @@ class AgentEngine:
         if not sources and not context.get('allow_document_import') and not context.get('allow_device'):
             reasons = '\n'.join(item['reason'] for item in context.get('excluded', []) if item.get('reason'))
             return {'answer': '当前范围没有可用正文，证据不足。' + ('\n' + reasons if reasons else ''), 'claims': [], 'coverage': {'total': 0, 'covered': 0, 'excluded': context.get('excluded', [])}}
-        if any(not self.evidence.valid_after_changes(s,self.evidence.committed(run_id)) for s in sources):
+        committed = await asyncio.to_thread(self.evidence.committed, run_id)
+        if not await asyncio.to_thread(self.evidence.valid_many, sources, committed):
             raise DomainError('stale_source','来源已变化，未发送过期内容。',409)
-        chunks = []; current = []; length = 0
-        for source in sources:
-            text = source['text']
-            for start in range(0, max(1, len(text)), 6000):
-                part = {**source, 'text': text[start:start+6000], 'char_start':source.get('char_start',0)+start,
-                        'char_end':source.get('char_start',0)+min(start+6000,len(text))}
-                if source['resource_type']=='document':part['line']=source.get('line',1)+text[:start].count('\n')
-                if current and length + len(part['text']) > 10000:
-                    chunks.append(current); current = []; length = 0
-                current.append(part); length += len(part['text'])
-        if current: chunks.append(current)
-        if not chunks: chunks = [[]]
+        chunks = make_chunks(sources, compact, context.get('allow_write',False))
         def live_memories():
             scopes=['global','session:'+context.get('session_id','')]+['recording:'+identifier for identifier in context.get('recording_ids',[])]
             scopes+=['document:'+r['resource_id'] for r in context.get('write_resources',context.get('resources',[])) if r['resource_type']=='document']
-            return self.memory_service.active(scopes) if hasattr(self,'memory_service') else []
+            items=self.memory_service.active(scopes) if hasattr(self,'memory_service') else []
+            return bounded_memories(items) if compact else items
         from interview_backend.agent.coverage import Coverage
         initial_dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources + context.get('speaker_catalog', [])]
-        initial_dependencies += [{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in live_memories()]
-        coverage=Coverage(work,chunks,context.get('excluded',[]),initial_dependencies,configuration)
+        initial_dependencies += [{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in await asyncio.to_thread(live_memories)]
+        coverage=await asyncio.to_thread(Coverage,work,chunks,context.get('excluded',[]),initial_dependencies,configuration)
         answers = []; claims = []; targets = []; covered = set(); model_questions = []; proposals = []
         all_questions = bool(re.search(r'全部.*问题|所有.*问题|问题.*汇总|列出.*问题|哪些问题', instruction))
         for i, chunk in enumerate(chunks):
             await coverage.begin(i,chunk,emit)
-            memory=live_memories()
+            if compact and emit:
+                await emit('task_stage',{'message':f'正在分析第 {i+1}/{len(chunks)} 批资料，完成后统一保存…' if context.get('allow_write') else f'正在分析第 {i+1}/{len(chunks)} 批资料…'})
+            memory=await asyncio.to_thread(live_memories)
             if memory:
                 known = {(r['resource_type'], r['resource_id'], r['revision']) for r in context['resources']}
                 for item in memory:
@@ -160,10 +157,28 @@ class AgentEngine:
                         key = (reference['resource_type'], reference['resource_id'], reference['revision'])
                         if key not in known:
                             context['resources'].append(reference); known.add(key)
-            current_scope=[r for r in context['resources'] if self.evidence.valid_after_changes(r,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []))]
+            scope, speakers = batch_scope(context,chunk) if compact else (context['resources'],context.get('speaker_catalog',[]))
+            committed = await asyncio.to_thread(self.evidence.committed,run_id)
+            pending_changes=committed+([plan.preview] if plan.preview else [])
+            if not await asyncio.to_thread(self.evidence.valid_many,scope,pending_changes):
+                raise DomainError('stale_source','本批资料或说话人版本已变化，请基于当前资料重新提问。',409)
+            current_scope=scope
+            batch_keys = frozenset((r['resource_type'],r['resource_id']) for r in current_scope)
+            batch_context={**context,'sources':chunk,'resources':current_scope,'speaker_catalog':speakers,'bounded_evidence':True} if compact else context
             dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources + context.get('speaker_catalog', [])]+[{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in memory]
             prompt = {'selected_proposal':context.get('selected_proposal'), 'pending_proposals':context.get('pending_proposals',[]), 'task_intent':context.get('task_intent'), 'conversation_history':context.get('conversation_history',[]), 'history_omitted':context.get('history_omitted',False), 'selected_quotes':context.get('quotes',[]), 'device_tasks':context.get('cancel_tasks',[]), 'speaker_catalog':context.get('speaker_catalog',[]), 'write_field_limits':context.get('write_field_limits',{}), 'current_valid_memories': memory, 'instruction': instruction, 'scope': current_scope, 'untrusted_evidence': chunk,
                       'allow_write': context.get('allow_write', False), 'transcript_organization': context.get('transcript_organization', False), 'chunk': i+1, 'chunks': len(chunks)}
+            if compact:
+                history=short_history(context.get('conversation_history',[]))
+                prompt.update(speaker_catalog=speakers,conversation_history=history,
+                    history_omitted=context.get('history_omitted',False) or len(history)<len(context.get('conversation_history',[])),
+                    pending_proposals=[],host_bound_revisions=True,
+                    selected_quotes=[q for q in context.get('quotes',[]) if any((r['resource_type'],r['resource_id']) in batch_keys for r in q.get('sources',[]))],
+                    adjacent_evidence=[{k:s[k] for k in ('text','speaker','speaker_name','start','end','run_id') if k in s}
+                        for s in ((chunks[i-1][-2:] if i else [])+(chunks[i+1][:2] if i+1<len(chunks) else []))],
+                    pending_speaker_names=[{'resource_id':t['resource_id'],'name':t['fields']['name']} for t in plan.targets.values() if t['resource_type']=='speaker' and 'name' in t['fields']])
+                if prompt.get('selected_proposal'):
+                    prompt['selected_proposal']={**prompt['selected_proposal'],'sources':[s for s in prompt['selected_proposal']['sources'] if (s['resource_type'],s['resource_id']) in batch_keys]}
             try:
                 messages = [SystemMessage(content=SYSTEM), HumanMessage(content=encode(prompt))]
                 model_key = f'chunk:{i}:model:0'
@@ -177,7 +192,8 @@ class AgentEngine:
                             raise DomainError('tool_not_allowed', '该工具在当前用户消息范围内不可用。', 403)
                         if emit: await emit('tool_start', {'tool': call['name']})
                         digest = hashlib.sha256(encode({'tool': call['name'], 'arguments': call['args']}).encode()).hexdigest()[:24]
-                        call_context = replace(read_context, operation_id=f'{run_id}:tool:{digest}', resource_scope=plan.allowed)
+                        call_scope=plan.allowed & (batch_keys | frozenset(('document',identifier) for identifier in plan.documents)) if compact else plan.allowed
+                        call_context = replace(read_context, operation_id=f'{run_id}:tool:{digest}', resource_scope=call_scope, frozen_context=batch_context)
                         # 模型只看到同源 Schema；执行仍经过统一执行器，保留参数及业务错误。
                         tool_id = next(t.tool_id for t in self.registry._tools.values() if t.framework_name == call['name'])
                         step_key = f'chunk:{i}:tool:{turn}:{digest}'
@@ -211,7 +227,12 @@ class AgentEngine:
                         if emit:
                             for change in self.evidence.committed(run_id):
                                 if change['id'] == call_context.operation_id: await emit('changeset', change)
-                        messages.append(ToolMessage(content=encode(output), tool_call_id=call['id']))
+                        model_output=output
+                        if compact and effect=='write' and isinstance(output.get('result'),dict) and 'items' in output['result']:
+                            receipt=output['result']
+                            model_output={'result':{k:receipt[k] for k in ('id','state','count') if k in receipt}}
+                            model_output['result']['message']='本批建议已登记，全部批次完成后统一提交；请勿重复登记。'
+                        messages.append(ToolMessage(content=encode(model_output), tool_call_id=call['id']))
                         if emit: await emit('tool_end', {'tool': call['name']})
                     model_key = f'chunk:{i}:model:{turn+1}'
                     response = await work.model(model_key,bound,messages,configuration,dependencies,emit=emit)
@@ -234,7 +255,8 @@ class AgentEngine:
             except asyncio.CancelledError:
                 await coverage.fail(chunk,'cancelled',emit)
                 raise
-            except DomainError:
+            except DomainError as error:
+                work.save('failure:'+model_key,{'code':error.code, 'details':getattr(error,'details',{})})
                 work.discard(model_key)
                 await coverage.fail(chunk,'failed',emit)
                 raise
@@ -254,7 +276,15 @@ class AgentEngine:
             if result.get('targets') and not context.get('allow_write'):
                 await coverage.fail(chunk,'failed',emit)
                 raise DomainError('write_not_authorized', '本轮要求只读或不修改，已阻止内容写入；需要应用修改时请直接说明要执行的任务。', 403)
-            targets += result.get('targets', [])
+            if compact and result.get('targets'):
+                try:
+                    await asyncio.to_thread(plan.stage,result['targets'],batch_keys | frozenset(('document',identifier) for identifier in plan.documents))
+                except DomainError as error:
+                    work.save('failure:'+model_key,{'code':error.code,'details':getattr(error,'details',{})})
+                    work.discard(model_key)
+                    await coverage.fail(chunk,'failed',emit)
+                    raise
+            else: targets += result.get('targets', [])
             if all_questions:
                 allowed = {(r['resource_type'], r['resource_id'], r['revision']) for r in context['resources']}
                 chunk_questions=[]
@@ -281,9 +311,8 @@ class AgentEngine:
             proposals += result.get('proposals') or []
             covered.update((s['resource_type'], s['resource_id']) for s in chunk)
             await coverage.complete(chunk,result,context,dependencies,emit)
-        for source in sources:
-            if not self.evidence.valid_after_changes(source, self.evidence.committed(run_id)):
-                raise DomainError('stale_source', '运行中资料发生变化，请基于当前版本重新执行。', 409)
+        if not await asyncio.to_thread(self.evidence.valid_many,sources,await asyncio.to_thread(self.evidence.committed,run_id)):
+            raise DomainError('stale_source', '运行中资料发生变化，请基于当前版本重新执行。', 409)
         result = {'answer': '\n\n'.join(answers), 'claims': claims, 'coverage':coverage.snapshot()}
         if proposals:
             from interview_backend.agent.proposals import prepare

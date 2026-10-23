@@ -175,7 +175,7 @@ final class AppModel: ObservableObject {
         let onFailure: @Sendable () -> Void = { [weak self] in
             Task { @MainActor in
                 guard let self, self.backendGeneration == generation else { return }
-                self.backendDisconnected("本地服务连接已中断，请重试；未完成任务可在重连后继续。")
+                await self.backendProcess.verifyConnection()
             }
         }
         do {

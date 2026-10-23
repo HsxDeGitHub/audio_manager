@@ -112,6 +112,12 @@ class EvidenceService:
         from interview_backend.services.source_validity import source_valid
         with self.database.transaction() as c: return source_valid(c, reference)
 
+    def valid_many(self, references, changes=()):
+        from interview_backend.services.source_validity import source_valid
+        with self.database.transaction() as c:
+            outdated = [r for r in references if not source_valid(c, r)]
+        return all(r['resource_type'] != 'memory' and self.valid_after_changes(r, changes) for r in outdated)
+
     def committed(self, run_id):
         """业务账本是提交事实；不依赖模型响应或另一个数据库的检查点。"""
         prefix = run_id + ':tool:'
@@ -219,10 +225,10 @@ class ResultEnvelope(BaseModel):
 
 
 def install_agent_tools(registry, changesets):
-    from interview_backend.services.changesets import ChangeTarget
+    from interview_backend.services.changesets import ProposedTarget
     class ApplyArguments(BaseModel):
         model_config = ConfigDict(extra='forbid')
-        targets: list[ChangeTarget]
+        targets: list[ProposedTarget]
     def apply(args, context):
         allowed = context.resource_scope
         if context.frozen_context is not None:
@@ -238,6 +244,9 @@ def install_agent_tools(registry, changesets):
     def read(args, context):
         if context.frozen_context is None:
             raise DomainError('scope_required', '需要先确定资料范围。', 409)
+        if context.frozen_context.get('bounded_evidence'):
+            return {'result': {'already_provided': True, 'source_count': len(context.frozen_context['sources']),
+                               'message': '本批证据已在untrusted_evidence中完整提供；请直接处理，不重复读取其他批次。'}}
         return {'result': {'sources': context.frozen_context['sources'], 'speaker_catalog': context.frozen_context.get('speaker_catalog', []), 'excluded': context.frozen_context.get('excluded', []), 'tasks':context.frozen_context.get('cancel_tasks',[])}}
     registry.register(ToolSpec(tool_id='evidence.read', version='1.0', title='读取固定范围证据',
         description=tool_description('evidence.read'), input_model=EmptyArguments, output_model=ResultEnvelope, handler=read))
@@ -252,7 +261,7 @@ def install_agent_tools(registry, changesets):
     class UpdateDocument(BaseModel):
         model_config = ConfigDict(extra='forbid')
         document_id: str = Field(min_length=1)
-        expected_revision: int = Field(ge=1)
+        expected_revision: int | None = Field(default=None, ge=1)
         fields: dict = Field(min_length=1)
     def import_document(args, context):
         if context.frozen_context is not None and not context.frozen_context.get('allow_document_import'):
@@ -261,7 +270,7 @@ def install_agent_tools(registry, changesets):
             return {'result': context.change_plan.import_document(args.title, args.format, args.content)}
         return {'result': documents.import_text(args.title, args.format, args.content, context.operation_id)}
     def update_document(args, context):
-        target = ChangeTarget(resource_type='document', resource_id=args.document_id,
+        target = ProposedTarget(resource_type='document', resource_id=args.document_id,
                               expected_revision=args.expected_revision, fields=args.fields)
         return apply(ApplyArguments(targets=[target]), context)
     registry.register(ToolSpec(tool_id='documents.import', version='1.0', title='导入个人材料',
@@ -283,7 +292,7 @@ class MetadataFields(BaseModel):
 class MetadataArguments(BaseModel):
     model_config = ConfigDict(extra='forbid')
     recording_id: str = Field(min_length=1)
-    expected_revision: int = Field(ge=1)
+    expected_revision: int | None = Field(default=None, ge=1)
     fields: MetadataFields
 
 
@@ -292,7 +301,7 @@ class SpeakerRenameArguments(BaseModel):
     run_id: str = Field(min_length=1)
     speaker: int = Field(ge=0)
     name: str = Field(min_length=1, max_length=200)
-    expected_revision: int = Field(ge=1)
+    expected_revision: int | None = Field(default=None, ge=1)
 
 
 class DeviceLocateArguments(BaseModel):
