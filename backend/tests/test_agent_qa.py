@@ -212,7 +212,7 @@ def test_memory_is_a_valid_scoped_source_across_sessions(client, config):
     from interview_backend.services.memory import MemoryService
     database = client.app.state.database
     with database.transaction(True) as c:
-        c.execute("INSERT INTO sessions VALUES('memory-session','合成记忆','{}',1)")
+        c.execute("INSERT INTO sessions(id,title,scope,created_at) VALUES('memory-session','合成记忆','{}',1)")
         c.execute("INSERT INTO messages VALUES('memory-m1','memory-session','user','我更希望先给结论。','{}',1)")
     memories = MemoryService(database, client.app.state.evidence)
     item = memories.add({'category': 'preference', 'content': '回答先给结论', 'topic': '表达偏好', 'scope': 'global',

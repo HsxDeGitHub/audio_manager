@@ -7,6 +7,10 @@ struct AssistantView: View {
     @ObservedObject var assistant: AssistantModel
     @UIState private var inputHeight: CGFloat = 54
     @UIState private var following = true
+    @UIState private var renamingSession: AssistantSession?
+    @UIState private var deletingSession: AssistantSession?
+    @UIState private var confirmingDeletion = false
+    @UIState private var deletionError: String?
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -19,6 +23,23 @@ struct AssistantView: View {
         .onChange(of: model.selectedID) { _, _ in assistant.contextChanged(model: model) }
         .onChange(of: model.selected?.activeRun) { _, _ in assistant.contextChanged(model: model) }
         .task { await assistant.reconnect(model: model) }
+        .sheet(item: $renamingSession) { session in
+            AssistantRenameSessionView(assistant: assistant, session: session)
+        }
+        .confirmationDialog("删除会话？", isPresented: $confirmingDeletion, titleVisibility: .visible, presenting: deletingSession) { session in
+            Button("删除会话", role: .destructive) {
+                Task { @MainActor in
+                    do { try await assistant.deleteSession(session.id) }
+                    catch { deletionError = error.localizedDescription }
+                }
+            }
+            Button("取消", role: .cancel) { }
+        } message: { session in
+            Text("将从列表中删除“\(session.title)”。录音、转写和已保存的资料修改会保留。")
+        }
+        .alert("删除失败", isPresented: Binding(get: { deletionError != nil }, set: { if !$0 { deletionError = nil } })) {
+            Button("好") { deletionError = nil }
+        } message: { Text(deletionError ?? "") }
     }
     private var header: some View {
         VStack(spacing: 12) {
@@ -37,13 +58,25 @@ struct AssistantView: View {
                     Button("工具与 MCP…") { model.showToolSettings = true }
                     Button("大模型配置…") { model.showAISettings = true }
                 } label: { Image(systemName: "ellipsis.circle") }.menuStyle(.borderlessButton).fixedSize().help("助手设置").accessibilityLabel("助手设置")
-                Button { Task { await assistant.createSession() } } label: { Image(systemName: "square.and.pencil") }.help("新对话").accessibilityLabel("新对话").disabled(assistant.sending)
+                Button { Task { await assistant.createSession() } } label: { Image(systemName: "square.and.pencil") }.help("新对话").accessibilityLabel("新对话").disabled(assistant.sending || assistant.managingSession)
                 Button { assistant.toggle() } label: { Image(systemName: "sidebar.right") }.help("收起助手 ⌘⇧A").accessibilityLabel("收起助手")
             }.buttonStyle(.plain)
-            Picker("会话", selection: Binding(get: { assistant.selectedSession ?? "" }, set: { id in Task { await assistant.select(id) } })) {
-                Text("新对话").tag("")
-                ForEach(assistant.sessions) { Text($0.title).tag($0.id) }
-            }.labelsHidden().accessibilityLabel("助手会话").disabled(assistant.sending)
+            HStack(spacing: 8) {
+                Picker("会话", selection: Binding(get: { assistant.selectedSession ?? "" }, set: { id in Task { await assistant.select(id) } })) {
+                    Text("新对话").tag("")
+                    ForEach(assistant.sessions) { Text($0.title).tag($0.id) }
+                }.labelsHidden().accessibilityLabel("助手会话").disabled(assistant.sending || assistant.managingSession)
+                Menu {
+                    Button { renamingSession = assistant.sessions.first { $0.id == assistant.selectedSession } } label: { Label("重命名话题…", systemImage: "pencil") }
+                    Divider()
+                    Button(role: .destructive) {
+                        deletingSession = assistant.sessions.first { $0.id == assistant.selectedSession }; confirmingDeletion = true
+                    } label: { Label("删除会话…", systemImage: "trash") }
+                        .disabled(!assistant.canDeleteSelectedSession)
+                } label: { Image(systemName: "ellipsis.circle") }
+                    .menuStyle(.borderlessButton).fixedSize().help("话题管理").accessibilityLabel("话题管理")
+                    .disabled(assistant.client == nil || assistant.sending || assistant.managingSession || !assistant.sessions.contains { $0.id == assistant.selectedSession })
+            }
         }.padding(14)
     }
     private var transcript: some View {
@@ -138,6 +171,45 @@ struct AssistantView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.secondary.opacity(0.20)))
             Text("原话、分析与建议分别标注 · 内容保存在本机").font(.caption2).foregroundStyle(.tertiary)
         }.padding(12)
+    }
+}
+
+private struct AssistantRenameSessionView: View {
+    @ObservedObject var assistant: AssistantModel
+    let session: AssistantSession
+    @Environment(\.dismiss) private var dismiss
+    @UIState private var title: String
+    @UIState private var saving = false
+    @UIState private var error: String?
+    @FocusState private var focused: Bool
+
+    init(assistant: AssistantModel, session: AssistantSession) {
+        self.assistant = assistant; self.session = session
+        _title = UIState(initialValue: session.title)
+    }
+    private var trimmedTitle: String { title.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var valid: Bool { !trimmedTitle.isEmpty && trimmedTitle.unicodeScalars.count <= 120 }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("重命名话题").font(.headline)
+            TextField("话题名称", text: $title).textFieldStyle(.roundedBorder).focused($focused).disabled(saving)
+            Text("名称最多 120 个字符").font(.caption).foregroundStyle(.secondary)
+            if let error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+            HStack {
+                Spacer()
+                if saving { ProgressView().controlSize(.small) }
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction).disabled(saving)
+                Button("保存") {
+                    saving = true; error = nil
+                    Task { @MainActor in
+                        defer { saving = false }
+                        do { try await assistant.renameSession(session.id, title: title); dismiss() }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }.keyboardShortcut(.defaultAction).disabled(!valid || saving)
+            }
+        }.padding(24).frame(width: 360).interactiveDismissDisabled(saving)
+            .onAppear { focused = true }
     }
 }
 

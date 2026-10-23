@@ -57,6 +57,106 @@ private final class ExperienceProtocol: URLProtocol, @unchecked Sendable {
 }
 
 @Suite(.serialized) struct AssistantSendingTests {
+    @MainActor @Test func deletingSelectedThenLastSessionKeepsOtherDraftAndReturnsToNewConversation() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ExperienceProtocol.self]
+        let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)
+        let model = AssistantModel(client: client)
+        defer { model.stop(); ExperienceProtocol.handler = nil }
+        model.sessions = [.init(id: "a", title: "甲"), .init(id: "b", title: "乙")]
+        model.activate("b"); model.input = "保留的草稿"
+        model.activate("a"); model.input = "将移除的草稿"
+        model.runs = [.init(id: "old", state: "completed", result: nil)]
+        ExperienceProtocol.handler = { request in
+            if request.httpMethod == "DELETE" {
+                let id = request.url!.lastPathComponent
+                return Data("{\"id\":\"\(id)\",\"deleted\":true}".utf8)
+            }
+            #expect(request.url?.path == "/api/v1/sessions/b")
+            return Data(#"{"items":[],"runs":[]}"#.utf8)
+        }
+        try await model.deleteSession("a")
+        #expect(model.selectedSession == "b"); #expect(model.sessions.count == 1)
+        #expect(model.input == "保留的草稿"); #expect(model.deletingSessionID == nil)
+        model.activate("a"); #expect(model.input.isEmpty); #expect(model.runs.isEmpty)
+        model.activate("b"); try await model.deleteSession("b")
+        #expect(model.selectedSession == nil); #expect(model.sessions.isEmpty)
+        #expect(model.input.isEmpty); #expect(!model.canDeleteSelectedSession)
+    }
+    @MainActor @Test func deletingAnotherSessionDoesNotChangeSelection() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ExperienceProtocol.self]
+        let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)
+        let model = AssistantModel(client: client)
+        defer { model.stop(); ExperienceProtocol.handler = nil }
+        model.sessions = [.init(id: "a", title: "甲"), .init(id: "b", title: "乙")]
+        model.activate("b"); model.input = "当前草稿"
+        ExperienceProtocol.handler = { request in
+            #expect(request.httpMethod == "DELETE"); #expect(request.url?.path == "/api/v1/sessions/a")
+            return Data(#"{"id":"a","deleted":true}"#.utf8)
+        }
+        try await model.deleteSession("a")
+        #expect(model.selectedSession == "b"); #expect(model.input == "当前草稿")
+    }
+    @MainActor @Test func failedDeletionKeepsHistoryAndSelection() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ExperienceProtocol.self]
+        let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)
+        let model = AssistantModel(client: client)
+        defer { model.stop(); ExperienceProtocol.handler = nil }
+        model.sessions = [.init(id: "a", title: "甲")]; model.activate("a"); model.input = "未发送草稿"
+        ExperienceProtocol.handler = { _ in throw URLError(.timedOut) }
+        do { try await model.deleteSession("a"); Issue.record("删除失败不应清理会话") }
+        catch { #expect(error as? BackendClientError == .timedOut) }
+        #expect(model.sessions.count == 1); #expect(model.selectedSession == "a")
+        #expect(model.input == "未发送草稿"); #expect(model.deletingSessionID == nil)
+    }
+    @MainActor @Test func renameUpdatesOnlyTargetAndKeepsConversationDrafts() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ExperienceProtocol.self]
+        let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)
+        let model = AssistantModel(client: client)
+        defer { model.stop(); ExperienceProtocol.handler = nil }
+        model.sessions = [.init(id: "a", title: "原话题"), .init(id: "b", title: "另一个话题")]
+        model.activate("a"); model.input = "甲的草稿"; model.allMaterials = true
+        model.activate("b"); model.input = "乙的草稿"
+        ExperienceProtocol.handler = { request in
+            #expect(request.httpMethod == "PATCH")
+            #expect(request.url?.path == "/api/v1/sessions/a")
+            var data = request.httpBody ?? Data()
+            if data.isEmpty, let stream = request.httpBodyStream {
+                stream.open(); defer { stream.close() }
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                while stream.hasBytesAvailable {
+                    let count = stream.read(&buffer, maxLength: buffer.count)
+                    if count <= 0 { break }; data.append(buffer, count: count)
+                }
+            }
+            let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: String])
+            #expect(body == ["title": "面试复盘 📚"])
+            return Data(#"{"id":"a","title":"面试复盘 📚"}"#.utf8)
+        }
+        try await model.renameSession("a", title: "  面试复盘 📚\n")
+        #expect(model.sessions.first?.title == "面试复盘 📚")
+        #expect(model.sessions.last?.title == "另一个话题")
+        #expect(model.selectedSession == "b"); #expect(model.input == "乙的草稿")
+        #expect(model.renamingSessionID == nil)
+        model.activate("a"); #expect(model.input == "甲的草稿"); #expect(model.allMaterials)
+    }
+    @MainActor @Test func renameFailureAndInvalidTitleKeepSavedName() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ExperienceProtocol.self]
+        let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)
+        let model = AssistantModel(client: client)
+        defer { model.stop(); ExperienceProtocol.handler = nil }
+        model.sessions = [.init(id: "a", title: "原话题")]; model.activate("a")
+        var requests = 0
+        ExperienceProtocol.handler = { _ in requests += 1; throw URLError(.timedOut) }
+        for title in [" \n ", String(repeating: "字", count: 121)] {
+            do { try await model.renameSession("a", title: title); Issue.record("无效名称不应保存") }
+            catch { #expect(error as? BackendClientError == .invalidRequest) }
+        }
+        #expect(requests == 0)
+        do { try await model.renameSession("a", title: "新名称"); Issue.record("请求失败不应保存") }
+        catch { #expect(error as? BackendClientError == .timedOut) }
+        #expect(requests == 1); #expect(model.sessions.first?.title == "原话题")
+        #expect(model.selectedSession == "a"); #expect(model.renamingSessionID == nil)
+    }
     @MainActor @Test func retryPreservesRequestIdentityAndDraft() async throws {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ExperienceProtocol.self]
         let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)

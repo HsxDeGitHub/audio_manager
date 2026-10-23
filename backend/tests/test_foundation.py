@@ -57,7 +57,7 @@ def test_invalid_pagination_is_localized_and_does_not_echo_input(client, query):
 def test_capabilities_are_honest_and_foreign_keys_are_enabled(client):
     from sqlalchemy import text
     result = client.get('/api/v1/system/status').json()
-    assert result['schema_revision'] == '0004_agent_work'
+    assert result['schema_revision'] == '0005_session_titles'
     assert result['legacy_imported'] is True
     assert result['counts']['recordings'] == 2
     assert result['capabilities']['library_read'] is True
@@ -83,10 +83,12 @@ def test_existing_application_database_upgrades_and_restarts_without_losing_cont
     with db.transaction(True) as c:
         c.execute("UPDATE segments SET edited='保留既有校对' WHERE id='s1'")
         c.execute('DROP TABLE agent_work')
+        c.execute('ALTER TABLE sessions DROP COLUMN title_edited')
+        c.execute('ALTER TABLE sessions DROP COLUMN deleted')
         c.execute("UPDATE alembic_version SET version_num='0002_application'")
     assert initialize_database(config).reused
     assert initialize_database(config).reused
     with db.transaction() as c:
         assert c.execute("SELECT edited FROM segments WHERE id='s1'").fetchone()[0]=='保留既有校对'
-        assert c.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0004_agent_work'
+        assert c.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0005_session_titles'
         assert c.execute('SELECT count(*) FROM agent_work').fetchone()[0]==0

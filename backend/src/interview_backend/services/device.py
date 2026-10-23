@@ -88,6 +88,8 @@ class DeviceService:
     @staticmethod
     def check_run(c, run_id):
         if not run_id: return
+        if c.execute('SELECT 1 FROM agent_runs r JOIN sessions s ON s.id=r.session_id WHERE r.id=? AND s.deleted=1', (run_id,)).fetchone():
+            raise DomainError('run_not_active', '所属会话已删除，设备命令不可执行。', 409)
         run = c.execute('SELECT state FROM agent_runs WHERE id=?', (run_id,)).fetchone()
         if run and run[0] not in {'queued', 'running', 'completed'}:
             raise DomainError('run_not_active', '助手运行已结束或中断，设备命令不可执行。', 409)

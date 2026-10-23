@@ -55,6 +55,7 @@ struct AssistantRun: Decodable, Identifiable {
 struct AssistantHistory: Decodable { let items: [AssistantMessage]; let runs: [AssistantRun] }
 struct AssistantItems<T: Decodable>: Decodable { let items: [T] }
 struct AssistantAcknowledgment: Decodable { let id: String; let state: String? }
+struct AssistantSessionDeletion: Decodable { let id: String; let deleted: Bool }
 
 struct AssistantOutput: Decodable {
     struct Block: Decodable { let blockID: String; var text: String; private enum CodingKeys: String, CodingKey { case blockID = "block_id", text } }
@@ -88,6 +89,8 @@ final class AssistantModel: ObservableObject {
     }
     @Published var sessions: [AssistantSession] = []
     @Published private(set) var selectedSession: String?
+    @Published private(set) var renamingSessionID: String?
+    @Published private(set) var deletingSessionID: String?
     @Published private var conversations: [String: Conversation] = [:]
     @Published private(set) var client: BackendClient?
     @Published var isVisible = UserDefaults.standard.bool(forKey: "assistant.visible") {
@@ -109,7 +112,9 @@ final class AssistantModel: ObservableObject {
     var activeRun: String? { current.activeRun }
     var sending: Bool { current.sending }
     var anyRunning: Bool { conversations.values.contains { $0.activeRun != nil || $0.sending } }
-    var canSend: Bool { client != nil && activeRun == nil && !sending && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && input.unicodeScalars.count <= 20000 }
+    var managingSession: Bool { renamingSessionID != nil || deletingSessionID != nil }
+    var canDeleteSelectedSession: Bool { client != nil && selectedSession != nil && activeRun == nil && !sending && !managingSession }
+    var canSend: Bool { client != nil && activeRun == nil && !sending && !managingSession && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && input.unicodeScalars.count <= 20000 }
     var changeToken: String { messages.map(\.id).joined() + runs.map { $0.id + $0.state }.joined() + current.outputs.keys.sorted().map { "\($0):\(current.outputs[$0]?.lastEventID ?? 0)" }.joined() }
     func output(_ id: String) -> String { current.outputs[id]?.text ?? "" }
     private func update(_ session: String?, _ body: (inout Conversation) -> Void) {
@@ -151,6 +156,38 @@ final class AssistantModel: ObservableObject {
             if old == nil, let draft = conversations[""] { conversations[response.id] = draft; conversations[""] = nil }
             activate(response.id); try await reloadSessions()
         } catch { update(selectedSession) { $0.error = error.localizedDescription } }
+    }
+    func renameSession(_ id: String, title: String) async throws {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, title.unicodeScalars.count <= 120 else { throw BackendClientError.invalidRequest }
+        guard let client else { throw BackendClientError.unavailable }
+        guard sessions.contains(where: { $0.id == id }) else { throw BackendClientError.notFound }
+        guard !managingSession else { throw BackendClientError.conflict }
+        renamingSessionID = id
+        defer { renamingSessionID = nil }
+        let session: AssistantSession = try await client.send("/api/v1/sessions/\(id)", method: "PATCH",
+            body: JSONSerialization.data(withJSONObject: ["title": title]))
+        guard session.id == id else { throw BackendClientError.invalidResponse }
+        if let index = sessions.firstIndex(where: { $0.id == id }) { sessions[index] = session }
+    }
+    func deleteSession(_ id: String) async throws {
+        guard let client else { throw BackendClientError.unavailable }
+        guard sessions.contains(where: { $0.id == id }) else { throw BackendClientError.notFound }
+        guard !managingSession, conversations[id]?.activeRun == nil, conversations[id]?.sending != true else { throw BackendClientError.conflict }
+        deletingSessionID = id
+        defer { deletingSessionID = nil }
+        let response: AssistantSessionDeletion = try await client.send("/api/v1/sessions/\(id)", method: "DELETE")
+        guard response.id == id, response.deleted else { throw BackendClientError.invalidResponse }
+        for run in conversations[id]?.runs ?? [] {
+            lifecycles[run.id] = nil; listeners.removeValue(forKey: run.id)?.cancel()
+        }
+        sessions.removeAll { $0.id == id }; conversations[id] = nil
+        if selectedSession == id {
+            if sessions.isEmpty { conversations[""] = nil }
+            activate(sessions.first?.id)
+            do { try await loadHistory() }
+            catch { update(selectedSession) { $0.error = error.localizedDescription } }
+        }
     }
     func loadHistory() async throws { if let selectedSession { try await refresh(selectedSession) } }
     private func refresh(_ id: String) async throws {

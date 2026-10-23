@@ -6,7 +6,7 @@ from interview_backend.errors import DomainError
 def seed(client):
     db = client.app.state.database
     with db.transaction(True) as c:
-        c.execute("INSERT INTO sessions VALUES('memory-session','合成','{}',1)")
+        c.execute("INSERT INTO sessions(id,title,scope,created_at) VALUES('memory-session','合成','{}',1)")
         c.execute("INSERT INTO messages VALUES('m1','memory-session','user','这是隔壁团队的事，我没有处理过。','{}',1)")
         c.execute("INSERT INTO messages VALUES('m2','memory-session','user','更正：这是我处理过的。','{}',2)")
     return MemoryService(db, client.app.state.evidence)
@@ -161,6 +161,8 @@ def test_upgrade_repairs_preexisting_memory_version_drift(client):
         c.execute("INSERT INTO memories VALUES('drift','analysis','保留内容','global','[]','版本','needs_review',NULL,5)")
         c.execute("INSERT INTO object_versions VALUES('memory','drift',1)")
         c.execute('DROP TABLE agent_work')
+        c.execute('ALTER TABLE sessions DROP COLUMN title_edited')
+        c.execute('ALTER TABLE sessions DROP COLUMN deleted')
         c.execute("UPDATE alembic_version SET version_num='0002_application'")
     upgrade_database(db.path)
     with db.transaction() as c:

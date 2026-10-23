@@ -8,7 +8,7 @@ from interview_backend.services.memory import MemoryService
 def memory_fixture(client):
     db=client.app.state.database
     with db.transaction(True) as c:
-        c.execute("INSERT INTO sessions VALUES('integrity-session','合成','{}',1)")
+        c.execute("INSERT INTO sessions(id,title,scope,created_at) VALUES('integrity-session','合成','{}',1)")
         c.execute("INSERT INTO messages VALUES('integrity-message','integrity-session','user','合成旧偏好唯一标记','{}',1)")
     service=MemoryService(db,client.app.state.evidence)
     item=service.add({'category':'preference','content':'合成旧偏好唯一标记','scope':'global','topic':'表达',

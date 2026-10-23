@@ -2,9 +2,10 @@ import asyncio
 import json
 import time
 import uuid
+from typing import Annotated
 from fastapi import APIRouter, Header
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from interview_backend.errors import DomainError
 from interview_backend.services.common import encode, require
 from interview_backend.agent.streaming import output_snapshot
@@ -13,6 +14,11 @@ from interview_backend.agent.streaming import output_snapshot
 class NewSession(BaseModel):
     title: str = '新对话'
     scope: dict = Field(default_factory=dict)
+
+
+class RenameSession(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
 
 
 class NewRun(BaseModel):
@@ -35,17 +41,43 @@ class AgentAPI:
 
     def sessions(self):
         with self.database.transaction() as c:
-            return {'items': [dict(r) for r in c.execute('SELECT * FROM sessions ORDER BY created_at DESC,id')]}
+            return {'items': [dict(r) for r in c.execute('SELECT * FROM sessions WHERE deleted=0 ORDER BY created_at DESC,id')]}
+
+    @staticmethod
+    def require_session(c, session_id):
+        row = require(c, 'sessions', session_id)
+        if row['deleted']:
+            raise DomainError('not_found', '该会话已删除。', 404)
+        return row
 
     def create_session(self, body: NewSession):
         identifier = str(uuid.uuid4())
         with self.database.transaction(True) as c:
-            c.execute('INSERT INTO sessions VALUES(?,?,?,?)', (identifier, body.title, encode(body.scope), time.time()))
+            c.execute('INSERT INTO sessions(id,title,scope,created_at) VALUES(?,?,?,?)', (identifier, body.title, encode(body.scope), time.time()))
         return {'id': identifier, 'title': body.title}
+
+    def rename_session(self, session_id: str, body: RenameSession):
+        with self.database.transaction(True) as c:
+            self.require_session(c, session_id)
+            c.execute('UPDATE sessions SET title=?,title_edited=1 WHERE id=?', (body.title, session_id))
+        return {'id': session_id, 'title': body.title}
+
+    def delete_session(self, session_id: str):
+        with self.database.transaction(True) as c:
+            row = require(c, 'sessions', session_id)
+            if row['deleted']:
+                return {'id': session_id, 'deleted': True}
+            if c.execute("SELECT 1 FROM agent_runs WHERE session_id=? AND state IN ('queued','running')", (session_id,)).fetchone():
+                raise DomainError('session_busy', '此会话仍在生成，请先停止或等待完成后再删除。', 409)
+            from interview_backend.services.device import DeviceService
+            for run in c.execute('SELECT id FROM agent_runs WHERE session_id=?', (session_id,)).fetchall():
+                DeviceService.cancel_run(c, run['id'])
+            c.execute('UPDATE sessions SET deleted=1 WHERE id=?', (session_id,))
+        return {'id': session_id, 'deleted': True}
 
     def history(self, session_id):
         with self.database.transaction() as c:
-            require(c, 'sessions', session_id)
+            self.require_session(c, session_id)
             return {'items': [{**dict(r), 'context': json.loads(r['context'])} for r in c.execute('SELECT * FROM messages WHERE session_id=? ORDER BY created_at,id', (session_id,))],
                     'runs': [{**dict(r), 'context': json.loads(r['context']), 'result': self.current_result(c,r), 'output':output_snapshot(c,r['id'])} for r in c.execute('SELECT * FROM agent_runs WHERE session_id=? ORDER BY created_at,id', (session_id,))]}
 
@@ -72,7 +104,7 @@ class AgentAPI:
     async def start(self, body):
         # 响应丢失后的幂等重试不能先重新冻结已由该运行修改的版本。
         with self.database.transaction() as c:
-            require(c,'sessions',body.session_id)
+            self.require_session(c,body.session_id)
             prior=c.execute('SELECT * FROM messages WHERE id=?',(body.message_id,)).fetchone()
             if prior:
                 original=json.loads(prior['context'])
@@ -90,7 +122,7 @@ class AgentAPI:
         context['session_id'] = body.session_id
         identifier = str(uuid.uuid4())
         with self.database.transaction(True) as c:
-            require(c, 'sessions', body.session_id)
+            self.require_session(c, body.session_id)
             prior = c.execute('SELECT * FROM messages WHERE id=?', (body.message_id,)).fetchone()
             if prior:
                 run = c.execute('SELECT id FROM agent_runs WHERE message_id=?', (body.message_id,)).fetchone()
@@ -102,7 +134,7 @@ class AgentAPI:
             c.execute("UPDATE agent_runs SET state='completed' WHERE session_id=? AND state='awaiting_input'", (body.session_id,))
             c.execute('INSERT INTO messages VALUES(?,?,?,?,?,?)', (body.message_id, body.session_id, 'user', body.instruction, encode(context), time.time()))
             c.execute('INSERT INTO agent_runs VALUES(?,?,?,?,?,?,?)', (identifier, body.session_id, body.message_id, 'queued', encode(context), None, time.time()))
-            c.execute("UPDATE sessions SET title=? WHERE id=? AND title='新对话'", (' '.join(body.instruction.split())[:24],body.session_id))
+            c.execute("UPDATE sessions SET title=? WHERE id=? AND title='新对话' AND title_edited=0", (' '.join(body.instruction.split())[:24],body.session_id))
         self.tasks[identifier] = asyncio.create_task(self._execute(identifier))
         return {'id': identifier, 'state': 'queued'}
 
@@ -192,11 +224,13 @@ class AgentAPI:
     def get(self, identifier):
         with self.database.transaction() as c:
             row = require(c, 'agent_runs', identifier)
+            self.require_session(c, row['session_id'])
             return {**row, 'context': json.loads(row['context']), 'result': self.current_result(c,row), 'output':output_snapshot(c,identifier)}
 
     async def cancel(self, identifier):
         with self.database.transaction(True) as c:
             run = require(c, 'agent_runs', identifier)
+            self.require_session(c, run['session_id'])
             if run['state'] in {'queued','running','awaiting_input'}:
                 c.execute("UPDATE agent_runs SET state='cancelled' WHERE id=?", (identifier,))
                 from interview_backend.services.device import DeviceService
@@ -214,6 +248,7 @@ class AgentAPI:
         from interview_backend.agent.work import WorkLog
         WorkLog(self.database,identifier).finalization()
         with self.database.transaction(True) as c:
+            self.require_session(c, run['session_id'])
             if require(c,'agent_runs',identifier)['state'] not in {'interrupted','failed','cancelled'}:
                 raise DomainError('not_resumable','当前运行已在恢复或已结束。',409)
             if c.execute("SELECT 1 FROM agent_runs WHERE session_id=? AND id<>? AND state IN ('queued','running')", (run['session_id'], identifier)).fetchone():
@@ -232,7 +267,8 @@ class AgentAPI:
 
     def events(self, identifier, after):
         with self.database.transaction() as c:
-            require(c, 'agent_runs', identifier)
+            row = require(c, 'agent_runs', identifier)
+            self.require_session(c, row['session_id'])
             return [dict(r) for r in c.execute('SELECT * FROM events WHERE run_id=? AND seq>? ORDER BY seq', (identifier, after))]
 
 
@@ -247,6 +283,10 @@ def router(app):
     def create_session(body: NewSession): return service.create_session(body)
     @api.get('/sessions/{session_id}')
     def history(session_id: str): return service.history(session_id)
+    @api.patch('/sessions/{session_id}')
+    def rename_session(session_id: str, body: RenameSession): return service.rename_session(session_id, body)
+    @api.delete('/sessions/{session_id}')
+    def delete_session(session_id: str): return service.delete_session(session_id)
     # 保留类型注解供 FastAPI 区分 JSON 请求体。
     @api.post('/agent/runs')
     async def start(body: NewRun): return await service.start(body)
