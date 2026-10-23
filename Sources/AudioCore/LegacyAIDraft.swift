@@ -120,4 +120,3 @@ public struct AIDraft: Codable, Identifiable, Sendable {
         return "\(heading)\(recordingTitle) · \(mode.title)\(status)\n\n\(body)\n"
     }
 }
-

@@ -43,4 +43,3 @@ public struct AISettings: Codable, Equatable, Sendable {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }
-
