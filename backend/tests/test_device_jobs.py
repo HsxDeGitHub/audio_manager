@@ -223,15 +223,14 @@ def test_cancel_pins_specific_task_and_tolerates_its_progress(client,monkeypatch
     import asyncio,json
     from interview_backend.services.common import bump
     device=client.app.state.device
-    with client.app.state.database.transaction(True) as c:
-        c.execute("INSERT INTO ai_drafts VALUES('running-draft','run1',2,?)",(json.dumps({'state':'running','chunks':[]}),))
-    ctx=device_context(client,'请取消 AI 整理任务')
-    with client.app.state.database.transaction(True) as c:bump(c,'draft','running-draft')
+    client.app.state.jobs.start({'jobID':'running-audio','recordingID':'r1','runID':'next'})
+    ctx=device_context(client,'请取消当前转写任务')
+    with client.app.state.database.transaction(True) as c:bump(c,'segment','s1')
     async def immediate(identifier,timeout=10):return device.get(identifier)
     monkeypatch.setattr(device,'wait',immediate)
     result=asyncio.run(client.app.state.tools.execute('jobs.cancel',{'recording_id':'r1'},ctx))
     command=device.get(result['data']['result']['command_id'])
-    assert command['arguments']['task_id']=='running-draft' and command['arguments']['task_type']=='organize'
+    assert command['arguments']['task_id']=='running-audio' and command['arguments']['task_type']=='audio'
     assert device.claim(command['id'],'owner')['state']=='running'
 
 
@@ -263,8 +262,7 @@ def test_new_device_marks_unowned_running_commands_unknown(client):
 
 
 def test_ambiguous_cancel_requires_task_choice(client):
-    import json
     client.app.state.jobs.start({'jobID':'worker','recordingID':'r1','runID':'next'},state='queued')
-    with client.app.state.database.transaction(True) as c:c.execute("INSERT INTO ai_drafts VALUES('active-ai','run1',2,?)",(json.dumps({'state':'running'}),))
+    client.app.state.jobs.start({'jobID':'worker-next','recordingID':'r1','runID':'next-2'},state='queued')
     assert client.app.state.evidence.freeze({'recording_id':'r1'},'请取消任务')['clarification']
     assert not client.app.state.evidence.freeze({'recording_id':'r1'},'请取消全部任务').get('clarification')

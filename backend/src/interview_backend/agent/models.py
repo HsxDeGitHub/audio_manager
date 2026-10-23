@@ -46,4 +46,4 @@ async def tool_call_self_test(settings):
             raise ValueError()
         return {'available': True, 'tool_calling': True}
     except Exception:
-        raise DomainError('model_tool_unavailable', '模型接口未通过工具调用测试；纯文本整理仍可独立使用。', 409) from None
+        raise DomainError('model_tool_unavailable', '模型接口未通过工具调用测试，请选择支持工具调用的模型。', 409) from None

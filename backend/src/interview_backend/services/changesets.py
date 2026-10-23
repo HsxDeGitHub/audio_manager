@@ -202,8 +202,9 @@ class ChangeSetService:
 
 class ChangePlan:
     """收集一条指令内的建议。预检使用短事务并回滚，绝不跨模型调用持锁。"""
-    def __init__(self, service, operation_id, allowed):
+    def __init__(self, service, operation_id, allowed, field_limits=None):
         self.service, self.operation_id, self.allowed = service, operation_id, allowed
+        self.field_limits = field_limits or {}
         self.targets = {}
         self.documents = {}
         self.device_actions = {}
@@ -217,6 +218,8 @@ class ChangePlan:
             key = (target['resource_type'], target['resource_id'])
             if (self.allowed is not None and key not in self.allowed) or (allowed is not None and key not in allowed):
                 raise DomainError('scope_denied', '修改超出用户指定范围。', 403)
+            if key[0] in self.field_limits and set(target['fields']) - set(self.field_limits[key[0]]):
+                raise DomainError('scope_denied', '正文整理只能修订文字，不能修改说话人或其他字段。', 403)
             prior = candidate.get(key)
             if prior:
                 if prior['expected_revision'] != target['expected_revision'] or any(k in prior['fields'] and prior['fields'][k] != v for k, v in target['fields'].items()):

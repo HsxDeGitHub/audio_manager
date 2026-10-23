@@ -7,7 +7,7 @@ import asyncio
 from interview_backend.errors import DomainError
 from interview_backend.services.common import encode, require, once
 
-KINDS = {'locate', 'clipboard', 'export', 'choose_file', 'transcribe', 'cancel', 'organize'}
+KINDS = {'locate', 'clipboard', 'export', 'choose_file', 'transcribe', 'cancel'}
 TERMINAL = {'completed', 'cancelled', 'failed', 'unknown'}
 
 
@@ -24,6 +24,8 @@ def _optional_text(value, field, maximum=20000):
 
 
 def validate_arguments(kind, arguments):
+    if kind == 'organize':
+        raise DomainError('organize_retired', '独立整理稿流程已停用，请让听阅助手直接整理正文。', 409)
     if not isinstance(arguments, dict) or kind not in KINDS:
         raise DomainError('invalid_device_command', '设备命令类型或参数不正确。', 422)
     value = dict(arguments)
@@ -66,12 +68,6 @@ def validate_arguments(kind, arguments):
                 'task_type':_optional_text(value.get('task_type'),'task_type')}
     if kind == 'transcribe':
         return {'recording_id': _text(value.get('recording_id'), 'recording_id')}
-    if kind == 'organize':
-        if value.get('mode', 'dialogue') not in {'dialogue', 'topics', 'summary'}:
-            raise DomainError('invalid_device_arguments', '整理模式不正确。', 422)
-        return {'recording_id': _text(value.get('recording_id'), 'recording_id'),
-                'mode': value.get('mode', 'dialogue'),
-                'instructions': _optional_text(value.get('instructions'), 'instructions', 2000) or ''}
     raise DomainError('invalid_device_command', '设备命令类型不正确。', 422)
 
 
@@ -85,6 +81,9 @@ def _decode(row):
 class DeviceService:
     def __init__(self, database):
         self.database = database
+        with database.transaction(True) as c:
+            c.execute("UPDATE device_commands SET state=CASE state WHEN 'pending' THEN 'failed' ELSE 'unknown' END,result=?,updated_at=? WHERE kind='organize' AND state IN ('pending','running')",
+                      (encode({'message':'独立整理稿流程已停用；旧结果不会重放，请直接整理正文。','retry_safe':False}), time.time()))
 
     @staticmethod
     def check_run(c, run_id):
@@ -106,6 +105,7 @@ class DeviceService:
         from interview_backend.services.device_targets import validate
         rows = c.execute("SELECT * FROM device_commands WHERE run_id=? AND state IN ('cancelled','failed')", (run_id,)).fetchall()
         for row in rows:
+            if row['kind'] == 'organize': continue
             result = json.loads(row['result']) if row['result'] else {}
             if row['state']=='failed' and not result.get('retry_safe'): continue
             if row['state']=='cancelled' and row['owner'] is None and result.get('reason') not in {'run_cancelled','restart'}: continue

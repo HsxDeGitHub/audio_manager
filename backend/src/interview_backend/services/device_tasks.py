@@ -13,14 +13,13 @@ def task(c,kind,identifier):
         return {'id':identifier,'task_type':kind,'recording_id':row['target'],'state':row['state']}
     if kind=='organize':
         row=require(c,'ai_drafts',identifier); run=require(c,'runs',row['run_id'])
-        return {'id':identifier,'task_type':kind,'recording_id':run['recording_id'],'state':json.loads(row['payload']).get('state','unknown')}
+        state=json.loads(row['payload']).get('state','unknown')
+        return {'id':identifier,'task_type':kind,'recording_id':run['recording_id'],'state':'interrupted' if state in ACTIVE else state}
     raise DomainError('invalid_task','任务类型不正确。',422)
 
 
 def active_tasks(c,recording_id):
     values=[task(c,'audio',r[0]) for r in c.execute("SELECT id FROM jobs WHERE kind='audio' AND target=? AND state IN ('queued','running')",(recording_id,))]
-    for row in c.execute('SELECT d.id,d.payload FROM ai_drafts d JOIN runs r ON r.id=d.run_id WHERE r.recording_id=?',(recording_id,)):
-        if json.loads(row['payload']).get('state') in ACTIVE:values.append(task(c,'organize',row['id']))
     return values
 
 
@@ -33,7 +32,7 @@ def prepare_cancel(c,args,context):
     if args.get('task_type'):values=[t for t in values if t['task_type']==args['task_type']]
     if args.get('task_id'):values=[t for t in values if t['id']==args['task_id']]
     if not values:raise DomainError('no_active_task','固定范围没有可取消的活动任务；目标可能已结束或被替换。',409)
-    if len(values)!=1:raise DomainError('ambiguous_task','存在多个任务，请指定转写 job 或整理 draft 标识。',409)
+    if len(values)!=1:raise DomainError('ambiguous_task','存在多个任务，请指定转写任务标识。',409)
     chosen=values[0]; current=task(c,chosen['task_type'],chosen['id'])
     if current['recording_id']!=identifier:raise DomainError('scope_denied','任务已不属于固定资料。',403)
     return {**args,'task_type':chosen['task_type'],'task_id':chosen['id'],

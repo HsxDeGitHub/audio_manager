@@ -25,7 +25,10 @@ conversation_history仅用于理解连续追问，不是当前证据或操作授
 目标和版本必须来自范围清单；不修改 original、音频时间、整理稿来源。没有明确修改指令时禁止输出 targets。
 修改只会在全部块分析完成后共同提交，不能宣称尚未提交的操作已经完成。
 写工具只登记 planned 修改建议；全部分析完成后统一提交。不要宣称 planned 已完成。
-用户明确要求定位、回听、导出、复制、选择文件、转写、取消或整理时，可调用对应的设备工具；
+transcript_organization 为 true 时，整理直接修订当前正文，只能逐个原片段输出 fields.text。
+保留事实、具体细节、说话人含义和原片段顺序，不跨片段搬移文字，不把分析或建议写入正文；无法保留音频定位的重排要求需澄清。
+不创建独立整理稿；只要求总结或整理建议时仅回答，不修改。正文修改沿用差异和撤销，识别原稿始终保留。
+用户明确要求定位、回听、导出、复制、选择文件、转写或取消时，可调用对应的设备工具；
 待处理、运行中、取消、失败或结果未知都必须如实报告，不能写成已完成。
 用户要求列出全部问题时，除 answer 外输出 questions 数组；每项含 text 和 source（resource_type、
 resource_id、revision）。只列证据中实际提出的问题，来源必须来自输入，不能编造。
@@ -80,7 +83,8 @@ class AgentEngine:
         if context.get('allow_external'): effects.add('external')
         from interview_backend.services.changesets import ChangePlan, ChangeSetService
         plan = change_plan or ChangePlan(ChangeSetService(self.evidence.database), run_id + ':changes',
-                    frozenset((r['resource_type'], r['resource_id']) for r in context.get('write_resources', context['resources'])))
+                    frozenset((r['resource_type'], r['resource_id']) for r in context.get('write_resources', context['resources'])),
+                    field_limits=context.get('write_field_limits'))
         read_context = ToolContext(request_id=run_id, allowed_effects=frozenset(effects),
                                    operation_id=run_id + ':tools', frozen_context=context, change_plan=plan,
                                    resource_scope=frozenset((r['resource_type'], r['resource_id'])
@@ -147,7 +151,7 @@ class AgentEngine:
             current_scope=[r for r in context['resources'] if self.evidence.valid_after_changes(r,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []))]
             dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources]+[{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in memory]
             prompt = {'conversation_history':context.get('conversation_history',[]), 'history_omitted':context.get('history_omitted',False), 'device_tasks':context.get('cancel_tasks',[]), 'current_valid_memories': memory, 'instruction': instruction, 'scope': current_scope, 'untrusted_evidence': chunk,
-                      'allow_write': context.get('allow_write', False), 'chunk': i+1, 'chunks': len(chunks)}
+                      'allow_write': context.get('allow_write', False), 'transcript_organization': context.get('transcript_organization', False), 'chunk': i+1, 'chunks': len(chunks)}
             try:
                 messages = [SystemMessage(content=SYSTEM), HumanMessage(content=encode(prompt))]
                 model_key = f'chunk:{i}:model:0'
@@ -179,7 +183,7 @@ class AgentEngine:
                             elif cached.get('legacy') or not work.valid(cached.get('dependencies',[])):
                                 output={'result':{'state':'completed','operation_id':call_context.operation_id,'message':'操作已完成；旧输出的证据依赖已失效，未重新注入，也未重复执行。'}}
                         else:
-                            deferred=effect=='device' and context.get('allow_write') and tool_id in {'device.export','device.copy','organize.start','jobs.transcribe'}
+                            deferred=effect=='device' and context.get('allow_write') and tool_id in {'device.export','device.copy','jobs.transcribe'}
                             if business and not deferred: work.reserve(slot,tool_id,digest)
                             if effect=='external' and work.started(digest):raise DomainError('external_result_unknown','外部工具结果未知，不能自动重复执行。',409)
                             if effect=='external':work.save('external_started:'+digest,{'state':'started'})

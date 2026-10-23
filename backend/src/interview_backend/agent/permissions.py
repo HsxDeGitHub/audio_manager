@@ -4,7 +4,7 @@ import re
 ACTION_VERBS = {
     'device.locate': r'定位|回听|播放', 'device.export': r'导出|保存为',
     'device.copy': r'复制|剪贴板', 'device.choose_file': r'选择文件|打开文件',
-    'jobs.transcribe': r'转写|重新识别', 'organize.start': r'整理',
+    'jobs.transcribe': r'转写(?!文字|文本|内容|结果|问题)|重新识别',
 }
 NEGATIVE = r'不要|勿|禁止|不准|不许|不允许|不能|不可|不必|无需|不需要|暂不|先不|(?<![识区分告级])别|只读'
 READONLY = r'(?:只|仅)(?:需要|需|要)?(?:分析|阅读|解释|总结|评估|检查|讨论|查看|告诉|提供建议)'
@@ -19,12 +19,26 @@ def command_text(instruction):
 
 def write_permissions(instruction):
     command = command_text(instruction)
+    if transcript_organization(instruction): return True, False
     verbs = r'修改|修正|替换|改成|改为|删除|忘记|停用|重命名|撤销|合并|设置|更正|导入|添加材料|记住|更改|改动|编辑|写入'
     if re.search(r'(?:'+NEGATIVE+r').{0,20}(?:'+verbs+r'|执行|操作)',command) or re.search(READONLY,command) or re.search(DISCUSSION,command):
         return False,False
     importing = bool(re.search(r'(?:帮我|请|把|将|直接).{0,40}(?:导入|添加材料)|^(?:导入|添加材料)',command))
     mutation = importing or bool(re.search(r'^(?:本周|这周)(?:只|仅)(?:'+verbs+r')|(?:帮我|请|把|将|直接).{0,40}(?:'+verbs+r')|^(?:'+verbs+r')',command))
     return mutation,importing
+
+
+def transcript_organization(instruction):
+    command = command_text(instruction)
+    verbs = r'整理|润色|优化|梳理'
+    if re.search(READONLY+'|'+DISCUSSION+r'|只读', command): return False
+    if re.search(r'建议|方案|示例|思路|清单|摘要|总结', command): return False
+    prohibited = r'执行|写入|提交|修改|改动|编辑|整理|润色|优化|梳理'
+    if re.search('(?:'+NEGATIVE+r').{0,8}(?:'+prohibited+r')(?!原意|含义|意思|事实|细节)', command): return False
+    target = r'原文|正文|转写文字|转写文本|转写内容|转写结果|当前资料|当前转写'
+    action = r'(?:(?:'+verbs+r').{0,12}(?:'+target+r')|(?:'+target+r').{0,12}(?:'+verbs+r'))'
+    return any(not re.search(NEGATIVE, clause) and bool(re.search(r'(?:帮我|请|把|将|直接).{0,30}'+action+r'|^'+action, clause.strip()))
+               for clause in re.split(r'[，,。；;\n]|但(?:是)?', command))
 
 
 def action_permissions(instruction):
@@ -36,6 +50,7 @@ def action_permissions(instruction):
         if re.search(cancel,clause):
             actions.add('jobs.cancel'); clause=re.sub(cancel,'',clause)
         for tool_id,verbs in ACTION_VERBS.items():
+            if tool_id == 'jobs.transcribe' and transcript_organization(clause) and not re.search(r'(?:请|帮我|开始|重新|再|然后|并|直接)转写|重新识别|转写成', clause): continue
             if re.search(r'(?:帮我|请|把|将|直接|并|然后|再).{0,40}(?:'+verbs+r')|^(?:'+verbs+r')',clause.strip()): actions.add(tool_id)
         if re.search(r'调用|执行|使用',clause): actions.update(re.findall(r'\bmcp\.[a-z0-9_.-]+',clause))
     return sorted(actions)

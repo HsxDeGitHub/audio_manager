@@ -5,7 +5,6 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from interview_backend.errors import DomainError
 from interview_backend.services.common import require, version, encode
-from interview_backend.services.draft_sources import draft_current
 from interview_backend.tools.registry import ToolSpec
 
 
@@ -19,7 +18,7 @@ class MessageContext(BaseModel):
     document_ids: list[str] = Field(default_factory=list)
 
 
-from interview_backend.agent.permissions import ACTION_VERBS, action_allowed, action_permissions, write_permissions
+from interview_backend.agent.permissions import ACTION_VERBS, action_allowed, action_permissions, write_permissions, transcript_organization
 
 
 class EvidenceService:
@@ -27,7 +26,10 @@ class EvidenceService:
 
     def freeze(self, context, instruction):
         context = MessageContext.model_validate(context)
+        if context.draft_id:
+            raise DomainError('draft_workflow_retired', '独立整理稿流程已停用，请选择转写正文；旧引用仍可回看。', 409)
         mutation, importing = write_permissions(instruction)
+        organizing = transcript_organization(instruction)
         if context.scope not in {'current', 'all'}:
             raise DomainError('invalid_scope', '资料范围不正确。', 422)
         with self.database.transaction() as c:
@@ -61,18 +63,6 @@ class EvidenceService:
                                     'text': row['edited'] if row['edited'] is not None else row['original'], 'kind': 'original_statement', 'speaker_confirmed': False})
                 for speaker in c.execute('SELECT speaker FROM speakers WHERE run_id=?', (run_id,)):
                     resources.append(self.ref(c, 'speaker', f"{run_id}:{speaker[0]}"))
-                drafts = c.execute('SELECT * FROM ai_drafts WHERE run_id=?', (run_id,)).fetchall()
-                for draft in drafts:
-                    if context.draft_id and context.draft_id != draft['id']:
-                        continue
-                    if not draft_current(c, draft):
-                        excluded.append({'id': draft['id'], 'code': 'stale_draft',
-                                         'reason': '整理稿来源已变化或缺少来源快照，已退出当前证据；请重新整理。'})
-                        continue
-                    ref = self.ref(c, 'draft', draft['id']); resources.append(ref)
-                    if context.draft_id:
-                        sources.append({**ref, 'recording_id': recording['id'], 'run_id': run_id,
-                                        'text': draft['payload'], 'kind': 'generated_draft', 'speaker_confirmed': False})
             document_rows = c.execute('SELECT * FROM documents WHERE removed=0 ORDER BY id').fetchall() if context.scope == 'all' else [require(c, 'documents', identifier) for identifier in context.document_ids]
             for row in document_rows:
                 if row['removed']: continue
@@ -86,9 +76,12 @@ class EvidenceService:
             command=command_text(instruction)
             if '整理' in command and not re.search('转写|识别',command):cancel_tasks=[t for t in cancel_tasks if t['task_type']=='organize']
             elif re.search('转写|识别',command) and '整理' not in command:cancel_tasks=[t for t in cancel_tasks if t['task_type']=='audio']
-            device = any(a.startswith(('device.', 'jobs.', 'organize.')) for a in actions)
+            device = any(a.startswith(('device.', 'jobs.')) for a in actions)
             external = any(a.startswith('mcp.') for a in actions)
-            frozen = {**context.model_dump(), 'resources': resources, 'write_resources': list(resources), 'sources': sources, 'excluded': excluded, 'allow_write': mutation,
+            frozen = {**context.model_dump(), 'resources': resources,
+                    'write_resources': [r for r in resources if r['resource_type'] == 'segment'] if organizing else list(resources),
+                    'transcript_organization': organizing, 'write_field_limits': {'segment': ['text']} if organizing else {},
+                    'sources': sources, 'excluded': excluded, 'allow_write': mutation,
                     'allow_device': device, 'allow_external': external, 'allowed_actions': actions,
                     'allow_document_import': importing,
                     'cancel_tasks':cancel_tasks, 'device_targets': device_targets, 'instruction': instruction, 'recording_ids': [r['id'] for r in recordings]}
@@ -322,15 +315,8 @@ class RecordingActionArguments(BaseModel):
 
 
 class CancelTaskArguments(RecordingActionArguments):
-    task_type: Literal['audio','organize'] | None = None
+    task_type: Literal['audio'] | None = None
     task_id: str | None = None
-
-
-class OrganizeArguments(BaseModel):
-    model_config = ConfigDict(extra='forbid')
-    recording_id: str = Field(min_length=1)
-    mode: Literal['dialogue', 'topics', 'summary'] = 'dialogue'
-    instructions: str = Field(default='', max_length=2000)
 
 
 class DeviceResult(BaseModel):
@@ -419,7 +405,7 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
             target = arguments.get('recording_id') or (target_builder(args) if target_builder else '')
             if target:
                 scope(context, target)
-            if context.change_plan is not None and context.frozen_context and context.frozen_context.get('allow_write') and kind in {'export','clipboard','organize','transcribe'}:
+            if context.change_plan is not None and context.frozen_context and context.frozen_context.get('allow_write') and kind in {'export','clipboard','transcribe'}:
                 context.change_plan.device_actions[context.operation_id]={'tool_id':tool_id,'arguments':request['arguments'],'operation_id':context.operation_id}
                 return {'result':{'state':'planned','step_id':context.operation_id,'message':'内容事务完成后执行此步骤，当前尚未执行。'}}
             return await run_device(kind, target, arguments, context, request)
@@ -433,11 +419,9 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
         DeviceClipboardArguments, 'clipboard', lambda a: a.model_dump(mode='json'))
     device_tool('device.choose_file', '选择本机文件', '在应用中打开文件选择器，用户取消时返回取消而不是成功。',
         DeviceChooseFileArguments, 'choose_file', lambda a: a.model_dump(mode='json'))
-    device_tool('device.export', '导出文字或整理稿', '在应用中让用户选择保存位置并导出，按真实保存或取消结果回报。',
+    device_tool('device.export', '导出文字', '在应用中让用户选择保存位置并导出，按真实保存或取消结果回报。',
         DeviceExportArguments, 'export', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id or '')
     device_tool('jobs.transcribe', '开始或重试转写', '把资料加入应用现有转写队列；完成情况以任务事件为准。',
         RecordingActionArguments, 'transcribe', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)
     device_tool('jobs.cancel', '取消后台任务', '取消应用正在处理的该资料任务，保留已完成部分。',
         CancelTaskArguments, 'cancel', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)
-    device_tool('organize.start', '开始 AI 整理', '使用应用现有整理流程生成独立整理稿；分块完成进度会持续保存。',
-        OrganizeArguments, 'organize', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)

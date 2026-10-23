@@ -79,15 +79,16 @@ def test_draft_source_hash_tracks_text_speakers_and_exits_search(client, config)
         c.execute("UPDATE ai_drafts SET payload=? WHERE id='draft1'", (json.dumps(payload),))
     index = RetrievalIndex(db, config.backend_dir)
     assert any(r['resource_type'] == 'draft' for r in index.search('独有术语'))
-    frozen = client.app.state.evidence.freeze({'recording_id': 'r1', 'draft_id': 'draft1'}, '分析整理稿')
-    assert any(s['resource_type'] == 'draft' for s in frozen['sources'])
+    frozen = client.app.state.evidence.freeze({'recording_id': 'r1'}, '分析原文')
+    assert not any(s['resource_type'] == 'draft' for s in frozen['sources'])
+    assert client.app.state.evidence.valid({'resource_type': 'draft', 'resource_id': 'draft1', 'revision': 1})
     client.app.state.changesets.submit({'operation_id': 'change-draft-origin', 'targets': [
         {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '原文变化'}}]})
     assert not client.app.state.evidence.valid({'resource_type': 'draft', 'resource_id': 'draft1', 'revision': 1})
     assert not any(r['resource_type'] == 'draft' for r in index.search('独有术语'))
-    frozen = client.app.state.evidence.freeze({'recording_id': 'r1', 'draft_id': 'draft1'}, '分析整理稿')
+    frozen = client.app.state.evidence.freeze({'recording_id': 'r1'}, '分析原文')
     assert not any(s['resource_type'] == 'draft' for s in frozen['sources'])
-    assert any(item['code'] == 'stale_draft' for item in frozen['excluded'])
+    assert not any(r['resource_type'] == 'draft' for r in frozen['resources'])
     with db.transaction(True) as c:
         payload['sourceHash'] = source_fingerprint(c, 'run1')
         c.execute("UPDATE ai_drafts SET payload=? WHERE id='draft1'", (json.dumps(payload),))
@@ -99,8 +100,8 @@ def test_draft_source_hash_tracks_text_speakers_and_exits_search(client, config)
 
 def test_draft_without_source_hash_is_excluded(client):
     assert not client.app.state.evidence.valid({'resource_type': 'draft', 'resource_id': 'draft1', 'revision': 1})
-    frozen = client.app.state.evidence.freeze({'recording_id': 'r1', 'draft_id': 'draft1'}, '分析整理稿')
-    assert frozen['excluded'][0]['code'] == 'stale_draft'
+    frozen = client.app.state.evidence.freeze({'recording_id': 'r1'}, '分析原文')
+    assert not any(r['resource_type'] == 'draft' for r in frozen['resources'])
 
 
 def test_draft_hash_matches_swift_unicode_slash_decimal_snapshot(client):

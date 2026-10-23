@@ -20,7 +20,7 @@ def prepare(c, kind, arguments, context=None):
     if kind=='cancel':
         from interview_backend.services.device_tasks import prepare_cancel
         return prepare_cancel(c,args,context)
-    if kind not in {'locate', 'export', 'transcribe', 'cancel', 'organize'}: return args
+    if kind not in {'locate', 'export', 'transcribe', 'cancel'}: return args
     recording_id, run_id = args.get('recording_id'), args.get('run_id')
     draft_id, segment_id = args.get('draft_id'), args.get('segment_id')
     if draft_id:
@@ -47,7 +47,7 @@ def prepare(c, kind, arguments, context=None):
     else:
         frozen = snapshot(c, recording_id, run_id or recording['active_run'])
     run_id = frozen['run_id']
-    if kind in {'locate', 'export', 'organize'} and not run_id:
+    if kind in {'locate', 'export'} and not run_id:
         raise DomainError('missing_transcript', '该资料没有可执行的转写版本。', 409)
     args.update(recording_id=recording_id, run_id=run_id, frozen_target=frozen)
     validate(c, args)

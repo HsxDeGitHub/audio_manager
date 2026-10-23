@@ -29,6 +29,8 @@ class ReportService:
             child = self.evidence.freeze({'recording_id': recording['id'], 'run_id': recording['active_run']}, '完整读取资料')
             child['write_resources'] = [r for r in child['resources'] if (r['resource_type'], r['resource_id']) in allowed]
             child['allow_write'] = bool(parent.get('allow_write') and child['write_resources'])
+            child['transcript_organization'] = parent.get('transcript_organization', False)
+            child['write_field_limits'] = parent.get('write_field_limits', {})
             child['allow_device'] = parent.get('allow_device', False) and recording['id'] in parent.get('recording_ids', [])
             child['allowed_actions'] = parent.get('allowed_actions', []) if child['allow_device'] else []
             child.update(report_subtask=True, defer_changes=True, instruction=instruction)
@@ -42,7 +44,7 @@ class ReportService:
         frozen = parent.get('report_plan') or self.freeze(parent, instruction, as_of)
         plan = {k: v for k, v in frozen.items() if k != 'contexts'}
         allowed = frozenset((r['resource_type'], r['resource_id']) for r in parent.get('write_resources', []))
-        batch = ChangePlan(ChangeSetService(self.database), run_id + ':changes', allowed)
+        batch = ChangePlan(ChangeSetService(self.database), run_id + ':changes', allowed, field_limits=parent.get('write_field_limits'))
         items = []; claims = []; failed = []
         for recording in plan['targets']:
             if not recording['active_run'] or recording['state'] != 'completed':

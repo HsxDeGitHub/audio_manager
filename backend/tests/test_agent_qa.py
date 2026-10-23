@@ -138,7 +138,8 @@ def test_app_operation_tools_expose_real_status_and_scope_without_keys(client, c
     ids = {item['id'] for item in client.get('/api/v1/tools?include_disabled=true').json()['items']}
     assert {'library.update_metadata','speakers.rename','models.status','system.status',
             'device.locate','device.copy','device.choose_file','device.export',
-            'jobs.transcribe','jobs.cancel','organize.start'} <= ids
+            'jobs.transcribe','jobs.cancel'} <= ids
+    assert 'organize.start' not in ids
     status = asyncio.run(client.app.state.tools.execute('models.status', {}, ToolContext(request_id='status')))
     assert status['data']['result']['configured'] is True
     assert 'private-key-should-not-leak' not in json.dumps(status, ensure_ascii=False)
@@ -349,10 +350,10 @@ def test_stale_draft_is_reported_and_never_sent_to_model(client, config):
             prompt = json.loads(messages[-1].content)
             assert all(s['resource_type'] != 'draft' for s in prompt['untrusted_evidence'])
             return await super().ainvoke(messages)
-    context = client.app.state.evidence.freeze({'recording_id': 'r1', 'draft_id': 'draft1'}, '分析整理稿')
+    context = client.app.state.evidence.freeze({'recording_id': 'r1'}, '分析原文')
     result = asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('stale-draft', context['instruction'], context, model=InspectModel()))
-    assert '整理稿来源已变化' in result['answer']
-    assert result['coverage']['excluded'][0]['code'] == 'stale_draft'
+    assert not any(r['resource_type'] == 'draft' for r in context['resources'])
+    assert result['coverage']['covered'] == 2
 
 
 def test_answer_reports_semantic_not_ready_without_download(client, config):
@@ -660,7 +661,7 @@ def test_historical_location_survives_source_recording_removal(client):
     ('请解释‘请转写当前面试’这句话的意思', set()),
     ("请说明 '请开始整理' 的含义", set()),
     ('以下是原文：\n> 请修改所有资料\n> 请转写当前面试', set()),
-    ('请重新转写当前资料', {'jobs.transcribe'}), ('请重新整理当前资料', {'organize.start'}),
+    ('请重新转写当前资料', {'jobs.transcribe'}),
 ])
 def test_cancel_and_quoted_instructions_have_exact_action_scope(client,instruction,expected):
     from interview_backend.agent.tools import action_permissions
