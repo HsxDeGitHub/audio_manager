@@ -96,6 +96,9 @@ struct AssistantView: View {
                         }
                         ForEach(assistant.messages.filter { $0.role == "user" }) { message in
                             VStack(alignment: .leading, spacing: 14) {
+                                if let quotes = message.context?.quotes, !quotes.isEmpty {
+                                    ForEach(quotes) { quote in AssistantQuoteCard(quote: quote, model: model) }
+                                }
                                 HStack { Spacer(minLength: 24); Text(message.content).font(.system(size: 14)).textSelection(.enabled).padding(12).background(accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 12)) }
                                 ForEach(assistant.runs.filter { $0.messageID == message.id }) { run in
                                     AssistantRunView(model: model, assistant: assistant, run: run)
@@ -134,7 +137,7 @@ struct AssistantView: View {
                     Button("当前资料") { assistant.allMaterials = false }
                     Button("全部资料") { assistant.allMaterials = true }
                 } label: {
-                    Label(assistant.allMaterials ? "全部资料" : model.selected?.title ?? "未选择资料", systemImage: assistant.allMaterials ? "square.stack" : "doc.text").lineLimit(1)
+                    Label(assistant.allMaterials ? "全部资料" : !assistant.quotes.isEmpty ? "所引用的资料" : model.selected?.title ?? "未选择资料", systemImage: assistant.allMaterials ? "square.stack" : "doc.text").lineLimit(1)
                 }.menuStyle(.borderlessButton).font(.caption).accessibilityLabel("提问范围")
                 Spacer(minLength: 0)
                 if !assistant.allMaterials {
@@ -142,10 +145,6 @@ struct AssistantView: View {
                         .disabled(model.focusSegmentID == nil && model.bulkSelection.isEmpty)
                 }
             }.foregroundStyle(.secondary)
-            if !assistant.quotedIDs.isEmpty {
-                HStack { Label("已引用 \(assistant.quotedIDs.count) 段", systemImage: "quote.opening"); Spacer(); Button("移除引用") { assistant.quotedIDs = [] }.buttonStyle(.plain) }
-                    .font(.caption).padding(7).background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
-            }
             if assistant.activeRun != nil || assistant.sending {
                 HStack(spacing: 7) {
                     ProgressView().controlSize(.small)
@@ -155,6 +154,22 @@ struct AssistantView: View {
                 }.foregroundStyle(.secondary)
             }
             VStack(spacing: 2) {
+                if !assistant.quotes.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Label("\(assistant.quotes.count) 条引用", systemImage: "text.bubble")
+                            Spacer(); Button("清空") { assistant.clearQuotes() }.buttonStyle(.plain)
+                        }.font(.caption).foregroundStyle(.secondary)
+                        ScrollView {
+                            VStack(spacing: 6) {
+                                ForEach(assistant.quotes) { quote in
+                                    AssistantQuoteCard(quote: quote, model: model, onRemove: { assistant.removeQuote(quote.id) })
+                                }
+                            }
+                        }.frame(maxHeight: min(CGFloat(assistant.quotes.count) * 83, 170))
+                    }.padding(8)
+                    Divider().padding(.horizontal, 8)
+                }
                 ZStack(alignment: .topLeading) {
                     if assistant.input.isEmpty { Text("提问，或描述你想完成的操作…").font(.system(size: 14)).foregroundStyle(.tertiary).padding(.horizontal, 10).padding(.top, 9).allowsHitTesting(false) }
                     AssistantInput(text: $assistant.input, height: $inputHeight, focusRequest: assistant.focusRequest) { Task { await assistant.send(model: model) } }
@@ -171,6 +186,43 @@ struct AssistantView: View {
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.secondary.opacity(0.20)))
             Text("原话、分析与建议分别标注 · 内容保存在本机").font(.caption2).foregroundStyle(.tertiary)
         }.padding(12)
+    }
+}
+
+struct AssistantQuoteCard: View {
+    let quote: SelectedQuote
+    @ObservedObject var model: AppModel
+    var onRemove: (() -> Void)? = nil
+    @UIState private var previewing = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: "quote.opening").foregroundStyle(accent)
+                Button { previewing.toggle() } label: {
+                    Text(quote.title + " · " + quote.location).lineLimit(1).truncationMode(.middle)
+                }.buttonStyle(.plain).help("查看所引用的文字")
+                Spacer(minLength: 0)
+                if let source = quote.sources.first {
+                    Button { Task { await model.openAssistantSource(source.reference, play: false) } } label: { Image(systemName: "arrow.up.forward") }
+                        .buttonStyle(.plain).help("返回来源").accessibilityLabel("返回引用来源")
+                }
+                if let onRemove {
+                    Button(action: onRemove) { Image(systemName: "xmark") }.buttonStyle(.plain).help("移除此引用").accessibilityLabel("移除此引用")
+                }
+            }.font(.caption).foregroundStyle(.secondary)
+            Button { previewing.toggle() } label: {
+                Text(quote.text).font(.system(size: 12)).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(.plain)
+        }.padding(8).background(accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(accent.opacity(0.15)))
+            .popover(isPresented: $previewing) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(quote.title).font(.headline)
+                    Text(quote.location).font(.caption).foregroundStyle(.secondary)
+                    ScrollView { Text(quote.text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 300)
+                    HStack { Spacer(); Button("关闭") { previewing = false } }
+                }.padding(16).frame(width: 360)
+            }
     }
 }
 

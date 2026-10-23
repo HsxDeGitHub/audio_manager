@@ -75,23 +75,13 @@ struct DocumentsView: View {
                         HStack {
                             Text(item.title).font(.headline)
                             Spacer()
+                            Button("引用全文") { attach(item, range: NSRange(location: 0, length: (item.content as NSString).length)) }
                             Button("编辑") { editing = item }.disabled(model.busy)
                             Button("移除…", role: .destructive) { removing = item }.disabled(model.busy)
                         }
-                        ScrollViewReader { proxy in
-                            ScrollView {
-                                LazyVStack(alignment: .leading, spacing: 5) {
-                                    ForEach(Array(item.content.components(separatedBy: "\n").enumerated()), id: \.offset) { index, line in
-                                        HStack(alignment: .top) {
-                                            Text("\(index + 1)").font(.caption.monospaced()).foregroundStyle(.secondary).frame(width: 35, alignment: .trailing)
-                                            Text(line.isEmpty ? " " : line).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                                        }.padding(4).background(app.documentSourceID == item.id && app.documentSourceLine == index + 1 ? Color.accentColor.opacity(0.14) : Color.clear).id(index + 1)
-                                    }
-                                }
-                            }
-                            .task(id: item.id) { proxy.scrollTo(app.documentSourceID == item.id ? app.documentSourceLine : 1, anchor: .center) }
-                            .onChange(of: app.documentSourceLine) { _, line in proxy.scrollTo(line, anchor: .center) }
-                        }
+                        Text("选中文字，点击“添加到对话”，可跨行引用。").font(.caption).foregroundStyle(.secondary)
+                        DocumentSelectionText(text: item.content, line: app.documentSourceID == item.id ? app.documentSourceLine : 1) { range in attach(item, range: range) }
+                            .id(item.id)
                     } else { Text("导入或选择一份个人材料。").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
                 }.padding(12).frame(minWidth: 420)
             }
@@ -112,6 +102,11 @@ struct DocumentsView: View {
                 removing = nil
             }
         } message: { Text("材料将退出当前检索，已有旧引用失效。") }
+    }
+    private func attach(_ item: BackendDocument, range: NSRange) {
+        guard let quote = SelectedQuote.document(item, range: range) else { return }
+        if app.assistant.addQuote(quote) { dismiss() }
+        else { model.error = app.assistant.error }
     }
     private func importFile() {
         let panel = NSOpenPanel()

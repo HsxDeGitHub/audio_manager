@@ -57,6 +57,49 @@ private final class ExperienceProtocol: URLProtocol, @unchecked Sendable {
 }
 
 @Suite(.serialized) struct AssistantSendingTests {
+    @MainActor @Test func quoteRetryKeepsAttachmentsAndChangedSelectionGetsNewMessageIdentity() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ExperienceProtocol.self]
+        let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)
+        let model = AssistantModel(client: client)
+        defer { model.stop(); ExperienceProtocol.handler = nil }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let app = AppModel(dataDirectoryOverride: directory)
+        let first = SelectedQuote(text: "第一处选区🙂", title: "合成材料", location: "第 2 行", sources: [.init(resourceType: "document", resourceID: "doc", revision: 1, line: 2)])
+        let second = SelectedQuote(text: "第二处选区", title: "合成材料", location: "第 3 行", sources: [.init(resourceType: "document", resourceID: "doc", revision: 1, line: 3)])
+        var bodies: [[String: Any]] = []
+        ExperienceProtocol.handler = { request in
+            if request.httpMethod == "POST" {
+                var data = request.httpBody ?? Data()
+                if data.isEmpty, let stream = request.httpBodyStream {
+                    stream.open(); defer { stream.close() }; var buffer = [UInt8](repeating: 0, count: 4096)
+                    while stream.hasBytesAvailable { let count = stream.read(&buffer, maxLength: buffer.count); if count <= 0 { break }; data.append(buffer, count: count) }
+                }
+                let body = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                let context = try #require(body["context"] as? [String: Any])
+                #expect(body["instruction"] as? String == "解释这里")
+                #expect(context["document_ids"] as? [String] == ["doc"])
+                #expect(context["recording_id"] is NSNull)
+                bodies.append(body)
+                if bodies.count < 3 { throw URLError(.timedOut) }
+                #expect((context["quotes"] as? [[String: Any]])?.first?["text"] as? String == second.text)
+                return Data(#"{"id":"run","state":"completed"}"#.utf8)
+            }
+            if request.url!.path.hasSuffix("/events") { return Data("id: 1\nevent: completed\ndata: {}\n\n".utf8) }
+            if request.url!.path == "/api/v1/agent/runs/run" { return Data(#"{"id":"run","state":"completed"}"#.utf8) }
+            if request.url!.path == "/api/v1/sessions/s" { return Data(#"{"items":[],"runs":[]}"#.utf8) }
+            return Data(#"{"items":[]}"#.utf8)
+        }
+        model.activate("s"); model.input = "解释这里"; model.addQuote(first)
+        await model.send(model: app); #expect(model.quotes == [first]); #expect(model.input == "解释这里")
+        await model.send(model: app)
+        #expect(bodies[0]["message_id"] as? String == bodies[1]["message_id"] as? String)
+        model.removeQuote(first.id); model.addQuote(second)
+        await model.send(model: app)
+        #expect(bodies[2]["message_id"] as? String != bodies[0]["message_id"] as? String)
+        #expect(model.quotes.isEmpty); #expect(model.input.isEmpty)
+        await Task.yield()
+    }
     @MainActor @Test func deletingSelectedThenLastSessionKeepsOtherDraftAndReturnsToNewConversation() async throws {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ExperienceProtocol.self]
         let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)

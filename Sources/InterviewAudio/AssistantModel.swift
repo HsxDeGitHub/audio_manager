@@ -2,7 +2,7 @@ import Foundation
 import AudioCore
 
 struct AssistantSession: Decodable, Identifiable { let id: String; let title: String }
-struct AssistantMessageContext: Decodable { let runID: String?; private enum CodingKeys: String, CodingKey { case runID = "run_id" } }
+struct AssistantMessageContext: Decodable { let runID: String?; let quotes: [SelectedQuote]?; private enum CodingKeys: String, CodingKey { case runID = "run_id", quotes } }
 struct AssistantMessage: Decodable, Identifiable { let id: String; let role: String; let content: String; var context: AssistantMessageContext? = nil }
 struct AssistantReference: Decodable, Hashable {
     let resourceType: String; let resourceID: String; let revision: Int
@@ -81,10 +81,11 @@ struct AssistantOutput: Decodable {
 final class AssistantModel: ObservableObject {
     struct Conversation {
         var messages: [AssistantMessage] = []; var runs: [AssistantRun] = []
-        var input = ""; var allMaterials = false; var quotedIDs: [String] = []; var quoteScope: String?
+        var input = ""; var allMaterials = false; var quotes: [SelectedQuote] = []
         var progress = ""; var error: String?; var activeRun: String?; var sending = false
         var outputs: [String: AssistantOutput] = [:]
         var pendingInstruction: String?; var pendingBody: Data?
+        var pendingContext: Data?
         var historyVersion = 0
     }
     @Published var sessions: [AssistantSession] = []
@@ -105,8 +106,8 @@ final class AssistantModel: ObservableObject {
     var messages: [AssistantMessage] { current.messages }
     var runs: [AssistantRun] { get { current.runs } set { update(selectedSession) { $0.runs = newValue } } }
     var input: String { get { current.input } set { update(selectedSession) { $0.input = newValue } } }
-    var allMaterials: Bool { get { current.allMaterials } set { update(selectedSession) { $0.allMaterials = newValue; $0.quotedIDs = []; $0.quoteScope = nil } } }
-    var quotedIDs: [String] { get { current.quotedIDs } set { update(selectedSession) { $0.quotedIDs = newValue; if newValue.isEmpty { $0.quoteScope = nil } } } }
+    var allMaterials: Bool { get { current.allMaterials } set { update(selectedSession) { $0.allMaterials = newValue } } }
+    var quotes: [SelectedQuote] { current.quotes }
     var progress: String { current.progress }
     var error: String? { current.error }
     var activeRun: String? { current.activeRun }
@@ -125,15 +126,38 @@ final class AssistantModel: ObservableObject {
     func bind(_ model: AppModel) { app = model }
     func toggle() { isVisible.toggle(); if isVisible { focusRequest = UUID() } }
     func quote(model: AppModel) {
-        quotedIDs = model.bulkSelection.isEmpty ? model.focusSegmentID.map { [$0] } ?? [] : Array(model.bulkSelection).sorted()
-        update(selectedSession) { $0.quoteScope = scopeKey(model) }
-        isVisible = true; focusRequest = UUID()
+        let ids = model.bulkSelection.isEmpty ? Set(model.focusSegmentID.map { [$0] } ?? []) : model.bulkSelection
+        let segments = model.segments.filter { ids.contains($0.id) }
+        let joined = ReadingTranscript(segments: segments, punctuate: model.readingPunctuation, overrides: model.readingOverrides)
+        quoteTranscript(text: joined.text, range: NSRange(location: 0, length: (joined.text as NSString).length), ranges: joined.ranges, segments: segments, model: model)
     }
-    private func scopeKey(_ model: AppModel) -> String { [model.selectedID ?? "", model.selected?.activeRun ?? ""].joined(separator: ":") }
+    func quoteTranscript(text: String, range: NSRange, ranges: [String: NSRange], segments: [TranscriptSegment], model: AppModel) {
+        guard let recording = model.selected, let run = recording.activeRun,
+              let quote = SelectedQuote.transcript(text: text, range: range, ranges: ranges, segments: segments, title: recording.title, recordingID: recording.id, runID: run,
+                                                  revision: { model.store?.contentRevision("segment", id: $0) ?? 1 }) else { return }
+        addQuote(quote)
+    }
+    @discardableResult func addQuote(_ quote: SelectedQuote) -> Bool {
+        isVisible = true; focusRequest = UUID()
+        if quotes.contains(where: { $0.text == quote.text && $0.sources == quote.sources }) { return true }
+        guard !quote.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard quotes.count < 20, quote.text.unicodeScalars.count <= 12000,
+              quotes.reduce(quote.text.unicodeScalars.count, { $0 + $1.text.unicodeScalars.count }) <= 20000 else {
+            update(selectedSession) { $0.error = "最多附加 20 条引用，总计 20000 字；请缩小选区后重试。" }; return false
+        }
+        update(selectedSession) { $0.quotes.append(quote); $0.allMaterials = false; $0.error = nil }
+        return true
+    }
+    func removeQuote(_ id: String) { update(selectedSession) { $0.quotes.removeAll { $0.id == id } } }
+    func clearQuotes() { update(selectedSession) { $0.quotes = [] } }
     func contextChanged(model: AppModel) {
-        let key = scopeKey(model)
-        for session in Array(conversations.keys) where conversations[session]?.quoteScope != nil && conversations[session]?.quoteScope != key {
-            update(session) { $0.quotedIDs = []; $0.quoteScope = nil; $0.error = "阅读资料或版本已切换，旧引用已移除，草稿已保留。" }
+        for session in Array(conversations.keys) {
+            update(session) { value in
+                guard !value.allMaterials else { return }
+                let before = value.quotes.count
+                value.quotes.removeAll { $0.recordingID != nil && ($0.recordingID != model.selectedID || $0.runID != model.selected?.activeRun) }
+                if before != value.quotes.count { value.error = "阅读资料或版本已切换，对应的正文引用已移除，草稿已保留。" }
+            }
         }
     }
     func attach(_ connection: BackendConnection, onTransportFailure: (@Sendable () -> Void)? = nil) async throws {
@@ -219,16 +243,22 @@ final class AssistantModel: ObservableObject {
         let instruction = conversations[id]?.input ?? ""
         let value = conversations[id] ?? Conversation()
         do {
+            let quoteObjects = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value.quotes))
+            let segments = Array(Set(value.quotes.flatMap(\.sources).filter { $0.resourceType == "segment" }.map(\.resourceID))).sorted()
+            let documents = Array(Set(value.quotes.flatMap(\.sources).filter { $0.resourceType == "document" }.map(\.resourceID))).sorted()
+            let documentOnly = !documents.isEmpty && segments.isEmpty
+            let context: [String: Any] = ["scope": value.allMaterials ? "all" : "current", "recording_id": value.allMaterials || documentOnly ? NSNull() : model.selectedID as Any? ?? NSNull(),
+                "run_id": value.allMaterials || documentOnly ? NSNull() : model.selected?.activeRun as Any? ?? NSNull(), "segment_ids": value.allMaterials ? [] : segments,
+                "document_ids": documents, "quotes": quoteObjects]
+            let contextData = try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys])
             let body: Data
-            if value.pendingInstruction == instruction, let saved = value.pendingBody { body = saved }
+            if value.pendingInstruction == instruction, value.pendingContext == contextData, let saved = value.pendingBody { body = saved }
             else {
-                let context: [String: Any] = ["scope": value.allMaterials ? "all" : "current", "recording_id": value.allMaterials ? NSNull() : model.selectedID as Any? ?? NSNull(),
-                    "run_id": value.allMaterials ? NSNull() : model.selected?.activeRun as Any? ?? NSNull(), "segment_ids": value.allMaterials ? [] : value.quotedIDs]
                 body = try JSONSerialization.data(withJSONObject: ["session_id": id, "message_id": UUID().uuidString, "instruction": instruction, "context": context])
-                update(id) { $0.pendingInstruction = instruction; $0.pendingBody = body }
+                update(id) { $0.pendingInstruction = instruction; $0.pendingBody = body; $0.pendingContext = contextData }
             }
             let result: AssistantAcknowledgment = try await client.send("/api/v1/agent/runs", method: "POST", body: body)
-            update(id) { if $0.input == instruction { $0.input = "" }; $0.quotedIDs = []; $0.quoteScope = nil; $0.pendingBody = nil; $0.pendingInstruction = nil }
+            update(id) { if $0.input == instruction { $0.input = "" }; $0.quotes.removeAll { quote in value.quotes.contains { $0.id == quote.id } }; $0.pendingBody = nil; $0.pendingInstruction = nil; $0.pendingContext = nil }
             // 先绑定运行，历史加载失败也不会丢失刚创建的运行。
             follow(result.id, session: id, model: model)
             try await refresh(id)

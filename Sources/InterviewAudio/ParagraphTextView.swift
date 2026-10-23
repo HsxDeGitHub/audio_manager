@@ -18,6 +18,7 @@ struct ParagraphTextView: NSViewRepresentable {
     let paragraphBreaks: Bool
     var onPlay: (String) -> Void
     var onEdit: (String) -> Void
+    var onQuote: ((String, NSRange, [String: NSRange]) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSTextView {
@@ -30,7 +31,7 @@ struct ParagraphTextView: NSViewRepresentable {
         view.textContainer?.heightTracksTextView = false
         view.linkTextAttributes = [.foregroundColor: NSColor.labelColor, .underlineStyle: 0]
         view.delegate = context.coordinator; view.coordinator = context.coordinator
-        view.setAccessibilityHelp("点击句子回听；右键可校对或复制。")
+        view.setAccessibilityHelp("点击句子回听；选中文字可添加到对话；右键可校对或复制。")
         context.coordinator.view = view
         return view
     }
@@ -43,8 +44,10 @@ struct ParagraphTextView: NSViewRepresentable {
                             punctuate: punctuate, paragraphBreaks: paragraphBreaks, density: density, overrides: overrides)
         let activeChanged = coordinator.renderKey?.active != active
         coordinator.onPlay = onPlay; coordinator.onEdit = onEdit
+        (view as? QuoteSelectionTextView)?.onQuote = onQuote.map { callback in { range in callback(joined.text, range, joined.ranges) } }
         coordinator.segments = Dictionary(uniqueKeysWithValues: segments.map { ($0.id, $0) })
         if coordinator.renderKey != key {
+            if view.string != joined.text { (view as? QuoteSelectionTextView)?.dismissQuote() }
             (view as? ParagraphNativeTextView)?.clearHover()
             let paragraph = NSMutableParagraphStyle()
             paragraph.lineSpacing = 7; paragraph.lineBreakMode = .byWordWrapping; paragraph.paragraphSpacing = fontSize * 0.55
@@ -127,7 +130,7 @@ struct ParagraphTextView: NSViewRepresentable {
     }
 }
 
-private final class ParagraphNativeTextView: NSTextView {
+private final class ParagraphNativeTextView: QuoteSelectionTextView {
     weak var coordinator: ParagraphTextView.Coordinator?
     private var tracking: NSTrackingArea?
     private var hovered: String?
@@ -165,6 +168,7 @@ private final class ParagraphNativeTextView: NSTextView {
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let id = sentence(at: event), let coordinator else { return super.menu(for: event) }
         let menu = NSMenu()
+        addQuoteItem(to: menu)
         for (title, action) in [("回听这句话", #selector(ParagraphTextView.Coordinator.play(_:))),
                                 ("校对这句话…", #selector(ParagraphTextView.Coordinator.edit(_:))),
                                 ("复制这句话", #selector(ParagraphTextView.Coordinator.copySentence(_:)))] {

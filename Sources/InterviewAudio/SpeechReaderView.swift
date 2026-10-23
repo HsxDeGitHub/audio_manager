@@ -190,7 +190,8 @@ struct SpeechBlock: View {
                               followPlayback: followPlayback, playing: player.playing,
                               punctuate: model.readingPunctuation, overrides: model.readingOverrides, density: model.readingDensity, paragraphBreaks: model.readingParagraphBreaks,
                               onPlay: { id in if let sentence = utterance.segments.first(where: { $0.id == id }) { model.playSegment(sentence) } },
-                              onEdit: { id in editingSentence = utterance.segments.first(where: { $0.id == id }) })
+                              onEdit: { id in editingSentence = utterance.segments.first(where: { $0.id == id }) },
+                              onQuote: { text, range, ranges in model.assistant.quoteTranscript(text: text, range: range, ranges: ranges, segments: utterance.segments, model: model) })
                 .fixedSize(horizontal: false, vertical: true)
             Divider().padding(.top, 6).opacity(0.55)
         }.padding(.vertical, 12)

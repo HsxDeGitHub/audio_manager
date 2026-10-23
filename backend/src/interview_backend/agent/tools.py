@@ -7,6 +7,7 @@ from interview_backend.errors import DomainError
 from interview_backend.prompt_catalog import tool_description
 from interview_backend.services.common import require, version, encode
 from interview_backend.tools.registry import ToolSpec
+from interview_backend.agent.selections import SelectedQuote, validate_quotes
 
 
 class MessageContext(BaseModel):
@@ -17,6 +18,7 @@ class MessageContext(BaseModel):
     segment_ids: list[str] = Field(default_factory=list)
     draft_id: str | None = None
     document_ids: list[str] = Field(default_factory=list)
+    quotes: list[SelectedQuote] = Field(default_factory=list, max_length=20)
 
 
 from interview_backend.agent.permissions import ACTION_VERBS, action_allowed, action_permissions, write_permissions, transcript_organization
@@ -69,7 +71,8 @@ class EvidenceService:
                 if row['removed']: continue
                 ref = self.ref(c, 'document', row['id']); resources.append(ref)
                 sources.append({**ref, 'title': row['title'], 'text': row['content'], 'kind': 'personal_document', 'line': 1})
-            if re.search(r'这段|这一段|这句话', instruction) and not context.segment_ids and not context.draft_id and len(sources) > 1:
+            validate_quotes(context.quotes, resources, sources)
+            if re.search(r'这段|这一段|这句话', instruction) and not context.segment_ids and not context.quotes and not context.draft_id and len(sources) > 1:
                 return {**context.model_dump(), 'resources': resources, 'sources': sources, 'excluded': excluded, 'allow_write': False, 'clarification': '请引用要处理的段落，避免误改其他内容。'}
             # 内容编辑默认可用，显式只读关闭；设备动作仍单独判断。资料正文不参与判断。
             actions = action_permissions(instruction)

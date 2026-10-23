@@ -136,7 +136,7 @@ class AgentEngine:
                             context['resources'].append(reference); known.add(key)
             current_scope=[r for r in context['resources'] if self.evidence.valid_after_changes(r,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []))]
             dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources]+[{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in memory]
-            prompt = {'conversation_history':context.get('conversation_history',[]), 'history_omitted':context.get('history_omitted',False), 'device_tasks':context.get('cancel_tasks',[]), 'current_valid_memories': memory, 'instruction': instruction, 'scope': current_scope, 'untrusted_evidence': chunk,
+            prompt = {'conversation_history':context.get('conversation_history',[]), 'history_omitted':context.get('history_omitted',False), 'selected_quotes':context.get('quotes',[]), 'device_tasks':context.get('cancel_tasks',[]), 'current_valid_memories': memory, 'instruction': instruction, 'scope': current_scope, 'untrusted_evidence': chunk,
                       'allow_write': context.get('allow_write', False), 'transcript_organization': context.get('transcript_organization', False), 'chunk': i+1, 'chunks': len(chunks)}
             try:
                 messages = [SystemMessage(content=SYSTEM), HumanMessage(content=encode(prompt))]

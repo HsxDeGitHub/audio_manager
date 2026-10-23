@@ -84,12 +84,14 @@ class AgentAPI:
     def conversation(self, session_id):
         rounds=[]; remaining=16000; omitted=False
         with self.database.transaction() as c:
-            rows=c.execute("SELECT m.content,r.result FROM agent_runs r JOIN messages m ON m.id=r.message_id WHERE r.session_id=? AND r.state IN ('completed','awaiting_input') ORDER BY r.created_at DESC,r.id DESC LIMIT 7",(session_id,)).fetchall()
+            rows=c.execute("SELECT m.content,m.context,r.result FROM agent_runs r JOIN messages m ON m.id=r.message_id WHERE r.session_id=? AND r.state IN ('completed','awaiting_input') ORDER BY r.created_at DESC,r.id DESC LIMIT 7",(session_id,)).fetchall()
         for row in rows[:6]:
             result=json.loads(row['result']) if row['result'] else {}
             question=row['content']; answer=result.get('answer','')
             if not answer:continue
-            if len(question)+len(answer)>remaining:
+            quotes=json.loads(row['context']).get('quotes',[])
+            quote_length=len(encode(quotes)) if quotes else 0
+            if len(question)+len(answer)+quote_length>remaining:
                 omitted=True
                 if rounds:break
                 # 超长最近轮次保留带标记的首尾；不把节选伪装为完整历史。
@@ -97,8 +99,11 @@ class AgentAPI:
                 def excerpt(value):
                     return value if len(value)<=budget else value[:budget//2]+'\n[较早内容已省略]\n'+value[-budget//2:]
                 question,answer=excerpt(question),excerpt(answer)
-            remaining-=len(question)+len(answer)
-            rounds.insert(0,[{'role':'user','content':question},{'role':'assistant','content':answer}])
+                quotes=[]; quote_length=0
+            remaining-=len(question)+len(answer)+quote_length
+            user={'role':'user','content':question}
+            if quotes:user['selected_quotes']=quotes
+            rounds.insert(0,[user,{'role':'assistant','content':answer}])
         return [message for pair in rounds for message in pair], omitted or len(rows)>6
 
     async def start(self, body):
