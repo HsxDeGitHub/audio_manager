@@ -10,6 +10,11 @@ struct AISettingsView: View {
     @UIState private var testing = false
     @UIState private var message = ""
     @UIState private var testTask: Task<Void, Never>?
+    @UIState private var checks: [ModelCapability] = []
+    private struct ModelCapability: Decodable, Identifiable {
+        let id: String; let title: String; let supported: Bool; let message: String
+    }
+    private struct CapabilityReport: Decodable { let checks: [ModelCapability]; let message: String }
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("大模型配置").font(.title2.weight(.semibold))
@@ -33,8 +38,15 @@ struct AISettingsView: View {
             Text(model.aiConfigurationURL.path).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
             Button("打开配置目录") { NSWorkspace.shared.open(model.dataDirectory) }.font(.caption)
             if !message.isEmpty { Text(message).font(.callout).textSelection(.enabled) }
+            ForEach(checks) { check in
+                HStack {
+                    Label(check.title, systemImage: check.supported ? "checkmark.circle.fill" : "exclamationmark.circle")
+                        .foregroundStyle(check.supported ? accent : .orange)
+                    Spacer(); Text(check.message).foregroundStyle(.secondary)
+                }.font(.caption)
+            }
             HStack {
-                Button(testing ? "测试中…" : "测试连接") { testConnection() }.disabled(testing)
+                Button(testing ? "检测中…" : "检测模型能力") { testConnection() }.disabled(testing)
                 if testing { ProgressView().controlSize(.small); Button("取消测试") { testTask?.cancel() } }
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -48,11 +60,16 @@ struct AISettingsView: View {
         .onDisappear { testTask?.cancel() }
     }
     private func testConnection() {
-        testing = true; message = "仅发送一条连接测试消息。"
+        testing = true; checks = []; message = "仅发送合成消息，检测文本、结构化结果、工具及流式协议；每项最多等待一分钟。"
         let configuration = settings
         testTask = Task {
             defer { testing = false }
-            do { try await model.aiConnectionClient.test(settings: configuration); message = "连接成功，可以保存配置。" }
+            do {
+                try configuration.validate()
+                guard let client = model.backendClient else { throw BackendClientError.unavailable }
+                let report: CapabilityReport = try await client.withTimeout(260).send("/api/v1/models/test-capabilities", method: "POST", body: JSONEncoder().encode(configuration))
+                checks = report.checks; message = report.message
+            }
             catch { message = Task.isCancelled ? "已取消测试。" : error.localizedDescription }
         }
     }

@@ -58,7 +58,7 @@ def record_edit(c, run, label, execute):
 
 
 class LibraryService:
-    reads = {'recordings', 'runs', 'segments', 'speakerNames', 'historyLabel', 'readingCache', 'aiDrafts', 'versions'}
+    reads = {'workspace', 'recordings', 'runs', 'segments', 'speakerNames', 'historyLabel', 'readingCache', 'aiDrafts', 'versions'}
     writes = {'save', 'remove', 'addTranscript', 'saveCorrection', 'editTexts', 'editSpeakers', 'markReviewed',
               'mergeSpeakers', 'restoreEdit', 'applySpeakers', 'renameSpeaker', 'saveReadingCache', 'saveAIDraft'}
 
@@ -89,6 +89,16 @@ class LibraryService:
             require(c, 'recordings', a['recordingID'])
         if action in {'segments', 'speakerNames', 'historyLabel', 'readingCache', 'aiDrafts', 'mergeSpeakers', 'restoreEdit', 'applySpeakers', 'renameSpeaker', 'saveReadingCache'}:
             require(c, 'runs', run)
+        if action == 'workspace':
+            recordings = self._execute(c, 'recordings', {})
+            recording = next((r for r in recordings if r['id'] == a.get('recordingID')), None)
+            current = {'runID': recording['activeRun']} if recording and recording['activeRun'] else None
+            return {'recordings': recordings,
+                    'runs': self._execute(c, 'runs', {'recordingID':recording['id']}) if recording else [],
+                    'segments': self._execute(c, 'segments', current) if current else [],
+                    'names': self._execute(c, 'speakerNames', current) if current else {},
+                    'undo': self._execute(c, 'historyLabel', current) if current else None,
+                    'redo': self._execute(c, 'historyLabel', {**current, 'redo':True}) if current else None}
         if action == 'versions':
             return None
         if action == 'recordings':

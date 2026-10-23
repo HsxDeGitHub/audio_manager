@@ -166,6 +166,9 @@ final class BackendClient: Sendable, CustomStringConvertible, CustomDebugStringC
     private let timeout: TimeInterval
     private let session: URLSession
     private let onTransportFailure: (@Sendable () -> Void)?
+    func withTimeout(_ seconds: TimeInterval) throws -> BackendClient {
+        try BackendClient(baseURL: baseURL, token: token, timeout: seconds, configuration: session.configuration)
+    }
     var description: String { "BackendClient（本机业务服务）" }
     var debugDescription: String { description }
 

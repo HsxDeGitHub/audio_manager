@@ -66,6 +66,9 @@ def action_permissions(instruction):
 
 def action_allowed(tool_id, frozen):
     granted=set(frozen.get('allowed_actions',[]))
+    if frozen.get('intent_policy') == 'semantic-v1' and frozen.get('task_intent'):
+        # 新运行使用服务端校验并持久化的语义结果；不再用关键词把自然表达二次否决。
+        return tool_id in granted and tool_id in frozen['task_intent']['actions']
     # 持久化的旧上下文也必须服从当前授权规则。
     if frozen.get('instruction'): granted &= set(action_permissions(frozen['instruction']))
     return tool_id in granted

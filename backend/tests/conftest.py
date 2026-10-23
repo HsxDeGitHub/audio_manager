@@ -68,4 +68,23 @@ def client(config):
     make_legacy(config.data_dir / 'library.sqlite')
     with TestClient(create_app(config)) as test_client:
         test_client.headers['Authorization'] = 'Bearer synthetic-test-token'
+        # 业务事务/恢复用例隔离模型理解阶段，保持原有故障注入位置和调用计数。
+        # 真实语义准备入口另由 test_semantic_intent.py 注入独立的结构化模型验证。
+        import json
+        from langchain_core.messages import AIMessage
+        from interview_backend.agent.permissions import write_permissions, transcript_organization, action_permissions
+        class SyntheticIntent:
+            async def ainvoke(self, messages):
+                instruction = json.loads(messages[-1].content)['instruction']
+                write, importing = write_permissions(instruction)
+                return AIMessage(content=json.dumps({'mode':'edit' if write else 'read','reading':'full',
+                    'edit_target':('transcript' if transcript_organization(instruction) else 'content') if write else 'none',
+                    'import_documents':importing,'actions':action_permissions(instruction),'constraints':[],'clarification':''}))
+        class SyntheticSummary:
+            async def ainvoke(self, messages):
+                parts = json.loads(messages[-1].content)['untrusted_parts']
+                return AIMessage(content=json.dumps({'answer':'\n\n'.join(p['answer'] for p in parts),
+                    'claims':[claim for p in parts for claim in p['claims']]}))
+        test_client.app.state.agent.engine.intent_model = SyntheticIntent()
+        test_client.app.state.agent.engine.synthesis_model = SyntheticSummary()
         yield test_client

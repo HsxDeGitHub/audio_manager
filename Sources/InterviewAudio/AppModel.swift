@@ -4,10 +4,13 @@ import AVFoundation
 import UniformTypeIdentifiers
 import AudioCore
 
+enum LibrarySection { case audio, documents }
+
 private struct QueuedJob { let request: WorkerRequest; var recordingID: String { request.recordingID }; var speakersOnly: Bool { request.speakersOnly } }
 
 @MainActor
 final class AppModel: ObservableObject {
+    @Published var librarySection: LibrarySection = .audio
     @Published var recordings: [Recording] = []
     @Published var selectedID: String?
     @Published var segments: [TranscriptSegment] = []
@@ -90,6 +93,7 @@ final class AppModel: ObservableObject {
     private var queue: [QueuedJob] = []
     private var worker: Process?
     private var request: WorkerRequest?
+    private var workerEvents: Task<Void, Never>?
     private var logHandle: FileHandle?
     private var cancelledJob = false
     private var lastSavedPosition = Date.distantPast
@@ -97,6 +101,14 @@ final class AppModel: ObservableObject {
     private var segmentToUtterance: [String: String] = [:]
     private var lastRecordingID: String?
     private var prepared = false
+    private var loadGeneration = UUID()
+    private var pendingEnqueue: Set<String> = []
+    private var cancelledEnqueues: Set<String> = []
+    private var selectionGeneration = UUID()
+    @Published var libraryLoading = false
+    @Published var searchLoading = false
+    @Published var searchHasMore = false
+    private var searchOffset = 0
     var selected: Recording? { recordings.first { $0.id == selectedID } }
     var ready: Bool { installer.ready }
     func queuePosition(_ id: String) -> Int? { queue.firstIndex { $0.recordingID == id }.map { $0 + 1 } }
@@ -105,7 +117,10 @@ final class AppModel: ObservableObject {
     func utteranceID(for segmentID: String?) -> String? { segmentID.flatMap { segmentToUtterance[$0] } }
 
     init(dataDirectoryOverride: URL? = nil) {
-        let override = ProcessInfo.processInfo.environment["INTERVIEW_AUDIO_DATA_DIR"]
+        // 验收副本可在自身签名配置中固定目录，Launch Services 启动也不会丢失隔离。
+        let override = (Bundle.main.object(forInfoDictionaryKey: "InterviewAudioDataDirectory") as? String)
+            ?? ProcessInfo.processInfo.environment["INTERVIEW_AUDIO_DATA_DIR"]
+        precondition(override == nil || override!.hasPrefix("/"), "应用数据目录必须是绝对路径，已停止启动以避免回落到其他资料库。")
         dataDirectory = dataDirectoryOverride ?? override.map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("InterviewAudio", isDirectory: true)
         let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -132,7 +147,7 @@ final class AppModel: ObservableObject {
         catch { alert = "大模型配置文件无法读取，请在大模型设置中检查。" }
         player.onPosition = { [weak self] position in
             guard let self, Date().timeIntervalSince(self.lastSavedPosition) > 3 else { return }
-            self.savePosition(position)
+            Task { await self.savePosition(position) }
         }
     }
 
@@ -143,7 +158,7 @@ final class AppModel: ObservableObject {
         let restored = recordings.first(where: { $0.id == lastRecordingID }) ?? recordings.first
         if let restored { await select(restored.id) }
         await validation
-        loadTranscript()
+        await loadTranscript()
         if !installer.ready { showSettings = true }
     }
     func backendDisconnected(_ message: String) {
@@ -168,7 +183,7 @@ final class AppModel: ObservableObject {
             store = BackendLibraryStore(connection: connection, onTransportFailure: onFailure)
             backendClient = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 30, onTransportFailure: onFailure)
             changeHistory.client = backendClient
-            assistant.bind(self)
+            await assistant.bind(self)
             try await assistant.attach(connection, onTransportFailure: onFailure)
             deviceBridge?.stop()
             deviceBridge = nil
@@ -177,7 +192,7 @@ final class AppModel: ObservableObject {
                 let bridge = DeviceBridge(app: self, client: backendClient, journal: deviceReceiptJournal!)
                 bridge.start(); deviceBridge = bridge
             }
-            backendUnavailable = false; backendState = "本地服务已连接"; reload()
+            backendUnavailable = false; backendState = "本地服务已连接"; await reload()
         } catch {
             backendDisconnected(backendProcess.diagnostic ?? "服务不可用，请重试。")
         }
@@ -189,10 +204,11 @@ final class AppModel: ObservableObject {
             if resolved.historical == true || resolved.draftID != nil {
                 await openReadOnlySource(resolved, play: play)
             } else if source.resourceType == "document" {
-                documentSourceID = source.resourceID; documentSourceLine = resolved.line ?? 1; showDocuments = true
+                documentSourceID = source.resourceID; documentSourceLine = resolved.line ?? 1; librarySection = .documents
             } else if let recordingID = resolved.recordingID {
                 await select(recordingID)
-                if let run = resolved.runID, selected?.activeRun != run { switchRun(run) }
+                guard selectedID == recordingID else { return }
+                if let run = resolved.runID, selected?.activeRun != run { await switchRun(run) }
                 reviewFilter = .all; focusSegmentID = resolved.segmentID; focusRequestID = UUID()
                 if play, let start = resolved.start { player.seek(max(0, start - preRoll), play: true) }
             } else { notice = resolved.text }
@@ -210,12 +226,25 @@ final class AppModel: ObservableObject {
             _ = try await player.seekVerified(max(0,start-preRoll), play: true)
         } catch { alert = error.localizedDescription }
     }
-    func reload() {
+    func reload() async {
+        guard let store else { return }
+        let generation = UUID(); loadGeneration = generation
+        let selected = selectedID; libraryLoading = true
+        defer { if loadGeneration == generation { libraryLoading = false } }
         do {
-            recordings = try store?.recordings() ?? []
-            loadTranscript()
-            refreshSearch()
-        } catch { alert = error.localizedDescription }
+            let snapshot = try await store.perform { try $0.workspace(recordingID: selected) }
+            guard loadGeneration == generation, selectedID == selected, self.store === store else { return }
+            recordings = snapshot.recordings
+            runs = snapshot.runs.map { TranscriptRun(id: $0.id, createdAt: $0.createdAt, hasEdits: $0.hasEdits) }
+            segments = snapshot.segments
+            names = Dictionary(uniqueKeysWithValues: snapshot.names.compactMap { k, v in Int(k).map { ($0, v) } })
+            undoLabel = snapshot.undo; redoLabel = snapshot.redo
+            bulkSelection.formIntersection(Set(segments.map(\.id)))
+            utterances = UtteranceGrouping.make(segments)
+            segmentToUtterance = Dictionary(uniqueKeysWithValues: utterances.flatMap { group in group.segments.map { ($0.id, group.id) } })
+            await preparePunctuation(); refreshSearch()
+        } catch is CancellationError { }
+        catch { if loadGeneration == generation { alert = error.localizedDescription } }
     }
     /// 界面与助手共用同一业务修改接口；版本冲突由后端统一返回 409。
     func recordingMetadata(_ id: String) async throws -> BackendRecording {
@@ -228,36 +257,21 @@ final class AppModel: ObservableObject {
                                                                "expected_revision": revision, "fields": fields])
         let receipt: AssistantChange = try await backendClient.send("/api/v1/recordings/\(id)", method: "PATCH", body: body)
         changeHistory.record(receipt); notice = "资料信息已保存，可在修改记录中查看与撤销。"
-        reload()
+        await reload()
     }
-    private func loadTranscript() {
-        do {
-            runs = try selectedID.map { try store?.runs(recordingID: $0) ?? [] } ?? []
-            if let run = selected?.activeRun {
-                segments = try store?.segments(runID: run) ?? []
-                names = try store?.speakerNames(runID: run) ?? [:]
-            } else { segments = []; names = [:] }
-            undoLabel = try selected?.activeRun.flatMap { try store?.historyLabel(runID: $0) }
-            redoLabel = try selected?.activeRun.flatMap { try store?.historyLabel(runID: $0, redo: true) }
-            bulkSelection.formIntersection(Set(segments.map(\.id)))
-            utterances = UtteranceGrouping.make(segments)
-            segmentToUtterance = Dictionary(uniqueKeysWithValues: utterances.flatMap { utterance in
-                utterance.segments.map { ($0.id, utterance.id) }
-            })
-            preparePunctuation()
-        } catch { alert = error.localizedDescription }
-    }
-    func savePosition(_ value: Double? = nil) {
+    private func loadTranscript() async { await reload() }
+    func savePosition(_ value: Double? = nil) async {
         guard player.available, var recording = selected else { return }
         recording.playPosition = min(max(0, value ?? player.position), max(recording.duration, player.duration))
+        lastSavedPosition = Date()
         do {
-            try store?.save(recording)
+            try await store?.perform { try $0.save(recording) }
             if let index = recordings.firstIndex(where: { $0.id == recording.id }) { recordings[index] = recording }
             lastSavedPosition = Date()
         } catch { alert = error.localizedDescription }
     }
-    private func save(_ recording: Recording) {
-        do { try store?.save(recording); reload() } catch { alert = error.localizedDescription }
+    private func save(_ recording: Recording) async {
+        do { try await store?.perform { try $0.save(recording) }; await reload() } catch { alert = error.localizedDescription }
     }
     func resolve(_ recording: Recording) -> URL {
         if let bookmark = recording.bookmark {
@@ -268,15 +282,22 @@ final class AppModel: ObservableObject {
         return URL(fileURLWithPath: recording.path)
     }
     func select(_ id: String?) async {
+        librarySection = .audio
+        let generation = UUID(); selectionGeneration = generation
         // Save the old selection before changing it (selection is kept separately from the List binding).
-        if selectedID != id { savePosition(); selectedID = id; reviewFilter = .all; bulkSelection = []; selectionMode = false; sampleSpeaker = nil }
+        if selectedID != id {
+            await savePosition()
+            guard selectionGeneration == generation else { return }
+            selectedID = id; reviewFilter = .all; bulkSelection = []; selectionMode = false; sampleSpeaker = nil
+        }
         lastRecordingID = id; savePreferences()
-        focusSegmentID = nil; loadTranscript(); refreshSearch()
+        focusSegmentID = nil; await loadTranscript(); refreshSearch()
+        guard selectionGeneration == generation else { return }
         guard let recording = selected else { player.unload(); return }
         await player.load(url: resolve(recording), fingerprint: recording.fingerprint, position: recording.playPosition)
-        guard selectedID == recording.id else { return }
+        guard selectedID == recording.id, selectionGeneration == generation else { return }
         if player.available, abs(recording.duration - player.duration) > 0.2 {
-            var updated = recording; updated.duration = player.duration; save(updated)
+            var updated = recording; updated.duration = player.duration; await save(updated)
         }
     }
     func pickFiles() {
@@ -308,17 +329,21 @@ final class AppModel: ObservableObject {
                 let bookmark = try url.bookmarkData(options: [.minimalBookmark], includingResourceValuesForKeys: nil, relativeTo: nil)
                 let recording = Recording(title: url.deletingPathExtension().lastPathComponent, path: url.path,
                                           bookmark: bookmark, fingerprint: fingerprint, duration: length)
-                try store?.save(recording); reload(); imported += 1
+                try await store?.perform { try $0.save(recording) }; await reload(); imported += 1
                 if selectedID == nil { await select(recording.id) }
-                if ready { enqueue(recording.id) }
+                if ready { await enqueue(recording.id) }
             } catch { failures.append("\(url.lastPathComponent)：\(error.localizedDescription)") }
         }
         notice = "已导入 \(imported) 份录音" + (duplicates > 0 ? "，\(duplicates) 份已在资料库中" : "")
         if !failures.isEmpty { alert = failures.joined(separator: "\n") }
         if !ready, imported > 0 { showSettings = true }
     }
-    @discardableResult func enqueue(_ id: String, speakersOnly: Bool = false) -> String? {
+    @discardableResult func enqueue(_ id: String, speakersOnly: Bool = false) async -> String? {
+        guard !shuttingDown else { return nil }
         guard ready else { showSettings = true; alert = "处理资源尚未就绪。"; return nil }
+        guard !pendingEnqueue.contains(id) else { return nil }
+        pendingEnqueue.insert(id); defer { pendingEnqueue.remove(id) }
+        cancelledEnqueues.remove(id)
         guard let store, activeRecordingID != id, !queue.contains(where: { $0.recordingID == id }), var recording = recordings.first(where: { $0.id == id }) else { return nil }
         guard !speakersOnly || recording.activeRun != nil else { return nil }
         guard FileManager.default.fileExists(atPath: resolve(recording).path) else { alert = "原音频不可用。"; return nil }
@@ -328,17 +353,20 @@ final class AppModel: ObservableObject {
                                     temporaryDirectory: dataDirectory.appendingPathComponent("Temporary").path,
                                     speakerCount: recording.speakerCount, speakersOnly: speakersOnly)
         do {
-            try store.queueWorker(request)
-            recording.state = .queued; recording.error = nil; try store.save(recording); reload()
-        } catch { try? store.stopWorker(request.jobID, state: "failed"); alert = error.localizedDescription; return nil }
-        queue.append(QueuedJob(request: request)); startNext()
+            try await store.perform { try $0.queueWorker(request) }
+            recording.state = .queued; recording.error = nil; try await store.perform { try $0.save(recording) }; await reload()
+        } catch { try? await store.perform { try $0.stopWorker(request.jobID, state: "failed") }; alert = error.localizedDescription; return nil }
+        if shuttingDown || cancelledEnqueues.contains(id) {
+            try? await store.perform { try $0.stopWorker(request.jobID, state: "cancelled") }; return nil
+        }
+        queue.append(QueuedJob(request: request)); await startNext()
         return activeJobID == request.jobID || queue.contains(where: { $0.request.jobID == request.jobID }) ? request.jobID : nil
     }
-    func enqueuePending() { for recording in recordings where recording.state == .idle { enqueue(recording.id) } }
-    private func startNext() {
-        guard worker == nil, !queue.isEmpty, ready else { return }
+    func enqueuePending() async { for recording in recordings where recording.state == .idle { await enqueue(recording.id) } }
+    private func startNext() async {
+        guard !shuttingDown, worker == nil, activeJobID == nil, !queue.isEmpty, ready else { return }
         let job = queue.removeFirst()
-        guard let recording = recordings.first(where: { $0.id == job.recordingID }) else { startNext(); return }
+        guard let recording = recordings.first(where: { $0.id == job.recordingID }) else { await startNext(); return }
         let request = job.request
         self.request = request; activeJobID = request.jobID; activeRecordingID = recording.id
         cancelledJob = false; progress = nil; phaseMessage = "准备处理"
@@ -356,7 +384,13 @@ final class AppModel: ObservableObject {
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
             let handle = try FileHandle(forWritingTo: logURL); logHandle = handle
             child.standardError = handle; child.standardInput = FileHandle.nullDevice
-            try store?.startWorker(request)
+            try await store?.perform { try $0.startWorker(request) }
+            if cancelledJob || shuttingDown {
+                try? handle.close(); logHandle = nil
+                try? FileManager.default.removeItem(at: requestURL); try? FileManager.default.removeItem(at: logURL)
+                activeJobID = nil; activeRecordingID = nil; self.request = nil
+                await startNext(); return
+            }
             worker = child; try child.run()
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 var buffer = Data()
@@ -367,63 +401,74 @@ final class AppModel: ObservableObject {
                     while let newline = buffer.firstIndex(of: 10) {
                         let line = Data(buffer[..<newline]); buffer.removeSubrange(...newline)
                         if let event = try? JSONDecoder().decode(WorkerEvent.self, from: line) {
-                            DispatchQueue.main.async { self?.handle(event, request: request) }
+                            DispatchQueue.main.async { self?.scheduleWorkerEvent(event, request: request) }
                         }
                     }
                 }
                 child.waitUntilExit()
-                DispatchQueue.main.async { self?.finish(status: child.terminationStatus, requestURL: requestURL, logURL: logURL) }
+                DispatchQueue.main.async { self?.scheduleWorkerExit(status: child.terminationStatus, requestURL: requestURL, logURL: logURL) }
             }
         } catch {
-            try? store?.stopWorker(request.jobID, state: "failed")
-            worker = nil; activeJobID = nil; activeRecordingID = nil
-            var updated = recording; updated.state = .failed; updated.error = error.localizedDescription; save(updated)
-            startNext()
+            try? await store?.perform { try $0.stopWorker(request.jobID, state: "failed") }
+            worker = nil; activeJobID = nil; activeRecordingID = nil; self.request = nil
+            var updated = recording; updated.state = .failed; updated.error = error.localizedDescription; await save(updated)
+            await startNext()
         }
     }
-    private func handle(_ event: WorkerEvent, request: WorkerRequest) {
+    private func scheduleWorkerEvent(_ event: WorkerEvent, request: WorkerRequest) {
+        let previous = workerEvents
+        workerEvents = Task { await previous?.value; await handle(event, request: request) }
+    }
+    private func scheduleWorkerExit(status: Int32, requestURL: URL, logURL: URL) {
+        let previous = workerEvents
+        workerEvents = Task { await previous?.value; await finish(status: status, requestURL: requestURL, logURL: logURL) }
+    }
+    private func handle(_ event: WorkerEvent, request: WorkerRequest) async {
         guard event.jobID == activeJobID, let recording = recordings.first(where: { $0.id == request.recordingID }) else { return }
         do {
-            let activated = try store?.ingestWorker(event, request: request)
+            let activated = try await store?.perform { try $0.ingestWorker(event, request: request) }
             if activated == false { notice = "新转写已存为历史版本，当前人工纠错版本保持不变。" }
             if event.kind == "stage" {
                 if let message = event.message { phaseMessage = message; progress = nil }
                 if let value = event.progress { progress = value }
             }
-            reload()
+            await reload()
         } catch {
-            alert = "保存处理结果失败：\(error.localizedDescription)"; cancel(recording.id)
+            alert = "保存处理结果失败：\(error.localizedDescription)"; await cancel(recording.id)
         }
     }
-    private func finish(status: Int32, requestURL: URL, logURL: URL) {
+    private func finish(status: Int32, requestURL: URL, logURL: URL) async {
         if let id = activeRecordingID, var recording = recordings.first(where: { $0.id == id }), recording.state.isRunning || recording.state == .queued {
             recording.state = cancelledJob ? .cancelled : .failed
             recording.error = cancelledJob ? nil : "后台任务意外退出（\(status)），可重试。"
-            save(recording)
+            await save(recording)
         }
         try? logHandle?.close(); logHandle = nil
         try? FileManager.default.removeItem(at: requestURL); try? FileManager.default.removeItem(at: logURL)
         worker = nil; request = nil; activeJobID = nil; activeRecordingID = nil; progress = nil; phaseMessage = ""
-        startNext()
+        await startNext()
     }
-    func cancelAudioTask(recordingID: String, taskID: String) -> Bool {
+    func cancelAudioTask(recordingID: String, taskID: String) async -> Bool {
         guard (activeRecordingID == recordingID && activeJobID == taskID) || queue.contains(where: { $0.recordingID == recordingID && $0.request.jobID == taskID }) else { return false }
-        cancel(recordingID); return true
+        await cancel(recordingID); return true
     }
-    func cancel(_ id: String) {
-        for queued in queue where queued.recordingID == id { try? store?.stopWorker(queued.request.jobID, state: "cancelled") }
+    func cancel(_ id: String) async {
+        cancelledEnqueues.insert(id)
+        if activeRecordingID == id { cancelledJob = true; worker?.terminate(); phaseMessage = "正在取消并清理临时文件…" }
+        for queued in queue where queued.recordingID == id { try? await store?.perform { try $0.stopWorker(queued.request.jobID, state: "cancelled") } }
         queue.removeAll { $0.recordingID == id }
-        if activeRecordingID == id { if let job = activeJobID { try? store?.stopWorker(job, state: "cancelled") }; cancelledJob = true; worker?.terminate(); phaseMessage = "正在取消并清理临时文件…" }
-        if var recording = recordings.first(where: { $0.id == id }) { recording.state = .cancelled; recording.error = nil; save(recording) }
+        if activeRecordingID == id { if let job = activeJobID { try? await store?.perform { try $0.stopWorker(job, state: "cancelled") } }; cancelledJob = true; worker?.terminate(); phaseMessage = "正在取消并清理临时文件…" }
+        if var recording = recordings.first(where: { $0.id == id }) { recording.state = .cancelled; recording.error = nil; await save(recording) }
     }
-    func changeSpeakerCount(_ count: Int?) { guard var r = selected else { return }; r.speakerCount = count; save(r) }
-    func switchRun(_ id: String) { guard var r = selected else { return }; r.activeRun = id; save(r) }
-    func setSmartPunctuation(_ value: Bool) { smartPunctuation = value; savePreferences(); preparePunctuation(); refreshSearch() }
-    func refreshPunctuation() { preparePunctuation() }
-    private func preparePunctuation() {
+    func changeSpeakerCount(_ count: Int?) async { guard var r = selected else { return }; r.speakerCount = count; await save(r) }
+    func switchRun(_ id: String) async { guard var r = selected else { return }; r.activeRun = id; await save(r) }
+    func setSmartPunctuation(_ value: Bool) async { smartPunctuation = value; savePreferences(); await preparePunctuation(); refreshSearch() }
+    func refreshPunctuation() async { await preparePunctuation() }
+    private func preparePunctuation() async {
         punctuationTask?.cancel(); punctuationProcessor.cancel(); punctuationBusy = false; readingOverrides = [:]; punctuationMessage = ""
         guard smartPunctuation, let run = selected?.activeRun, let store else { return }
-        let cache = (try? store.readingCache(runID: run)) ?? [:]
+        let cache = (try? await store.perform { try $0.readingCache(runID: run) }) ?? [:]
+        guard selected?.activeRun == run, self.store === store else { return }
         let groups = utterances
         for group in groups {
             if let saved = cache[PunctuationProjection.key(group.segments)] { readingOverrides.merge(saved) { _,new in new } }
@@ -443,7 +488,7 @@ final class AppModel: ObservableObject {
                 do {
                     if let result = try await punctuationProcessor.render(group.segments, executable: executable, model: model) {
                         guard !Task.isCancelled, selected?.activeRun == run else { return }
-                        try store.saveReadingCache(runID: run, key: PunctuationProjection.key(group.segments), rendered: result)
+                        try await store.perform { try $0.saveReadingCache(runID: run, key: PunctuationProjection.key(group.segments), rendered: result) }
                         readingOverrides.merge(result) { _,new in new }
                     }
                 } catch { punctuationMessage = error.localizedDescription; break }
@@ -454,21 +499,22 @@ final class AppModel: ObservableObject {
     func setLibrarySort(_ value: LibrarySort) { librarySort = value; savePreferences() }
     func setLibraryFilter(_ value: LibraryFilter) { libraryFilter = value; savePreferences() }
     func setReadingDensity(_ value: ReadingDensity) { readingDensity = value; savePreferences(); refreshSearch() }
-    func undoEdit(redo: Bool = false) {
+    func undoEdit(redo: Bool = false) async {
         guard let run = selected?.activeRun else { return }
-        do { if try store?.restoreEdit(runID: run, redo: redo) == true { loadTranscript(); refreshSearch() } }
+        do { if try await store?.perform({ try $0.restoreEdit(runID: run, redo: redo) }) == true { await loadTranscript(); refreshSearch() } }
         catch { alert = error.localizedDescription }
     }
-    func markReviewed(_ ids: [String], reviewed: Bool = true) {
-        do { try store?.markReviewed(segmentIDs: ids, reviewed: reviewed); loadTranscript() } catch { alert = error.localizedDescription }
+    func markReviewed(_ ids: [String], reviewed: Bool = true) async {
+        do { try await store?.perform { try $0.markReviewed(segmentIDs: ids, reviewed: reviewed) }; await loadTranscript() } catch { alert = error.localizedDescription }
     }
-    func mergeSpeakers(_ sources: Set<Int>, into target: Int) {
+    func mergeSpeakers(_ sources: Set<Int>, into target: Int) async {
         guard let run = selected?.activeRun else { return }
-        do { try store?.mergeSpeakers(runID: run, sources: sources, target: target); loadTranscript(); refreshSearch(); notice = "已合并说话人，可通过撤销恢复。" }
+        do { try await store?.perform { try $0.mergeSpeakers(runID: run, sources: sources, target: target) }; await loadTranscript(); refreshSearch(); notice = "已合并说话人，可通过撤销恢复。" }
         catch { alert = error.localizedDescription }
     }
-    func setBulkSpeaker(_ speaker: Int?) {
-        do { try store?.editSpeakers(segmentIDs: Array(bulkSelection), speaker: speaker); loadTranscript(); refreshSearch(); bulkSelection = [] }
+    func setBulkSpeaker(_ speaker: Int?) async {
+        let ids = Array(bulkSelection)
+        do { try await store?.perform { try $0.editSpeakers(segmentIDs: ids, speaker: speaker) }; await loadTranscript(); refreshSearch(); bulkSelection = [] }
         catch { alert = error.localizedDescription }
     }
     func toggleSelection(_ utterance: SpeechUtterance) {
@@ -485,33 +531,33 @@ final class AppModel: ObservableObject {
         player.playExcerpt(start: sentence.start, end: min(sentence.end, sentence.start + 8))
         notice = "试听 \(speakerName(speaker)) · 第 \((sampleIndex - 1) % samples.count + 1) / \(samples.count) 段"
     }
-    func saveCorrection(_ id: String, text: String?, reviewed: Bool) {
-        do { try store?.saveCorrection(segmentID: id, text: text, markReviewed: reviewed); loadTranscript(); refreshSearch() }
-        catch { alert = error.localizedDescription }
+    @discardableResult func saveCorrection(_ id: String, text: String?, reviewed: Bool) async -> Bool {
+        do { guard let store else { throw BackendClientError.unavailable }; try await store.perform { try $0.saveCorrection(segmentID: id, text: text, markReviewed: reviewed) }; await loadTranscript(); refreshSearch(); return true }
+        catch { alert = error.localizedDescription; return false }
     }
-    func editText(_ id: String, text: String) {
-        do { try store?.editText(segmentID: id, text: text); loadTranscript(); refreshSearch() } catch { alert = error.localizedDescription }
+    func editText(_ id: String, text: String) async {
+        do { try await store?.perform { try $0.editText(segmentID: id, text: text) }; await loadTranscript(); refreshSearch() } catch { alert = error.localizedDescription }
     }
-    func editTexts(_ edits: [String: String]) {
-        do { try store?.editTexts(edits); loadTranscript(); refreshSearch() } catch { alert = error.localizedDescription }
+    @discardableResult func editTexts(_ edits: [String: String]) async -> Bool {
+        do { guard let store else { throw BackendClientError.unavailable }; try await store.perform { try $0.editTexts(edits) }; await loadTranscript(); refreshSearch(); return true } catch { alert = error.localizedDescription; return false }
     }
-    func editUtteranceSpeaker(_ utterance: SpeechUtterance, speaker: Int?) {
+    func editUtteranceSpeaker(_ utterance: SpeechUtterance, speaker: Int?) async {
         do {
-            try store?.editSpeakers(segmentIDs: utterance.segments.map(\.id), speaker: speaker)
-            loadTranscript(); refreshSearch()
+            try await store?.perform { try $0.editSpeakers(segmentIDs: utterance.segments.map(\.id), speaker: speaker) }
+            await loadTranscript(); refreshSearch()
         } catch { alert = error.localizedDescription }
     }
-    func renameRecording(_ id: String, name: String) {
+    @discardableResult func renameRecording(_ id: String, name: String) async -> Bool {
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, var recording = recordings.first(where: { $0.id == id }) else { return }
+        guard !title.isEmpty, var recording = recordings.first(where: { $0.id == id }) else { return false }
         recording.title = title
-        do { guard let store else { throw BackendClientError.unavailable }; try store.save(recording); reload(); notice = "名称已保存，可在修改记录中查看与撤销。" }
-        catch { alert = error.localizedDescription }
+        do { guard let store else { throw BackendClientError.unavailable }; try await store.perform { try $0.save(recording) }; await reload(); notice = "名称已保存，可在修改记录中查看与撤销。"; return true }
+        catch { alert = error.localizedDescription; return false }
     }
     func copyText(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
     func setReaderFontSize(_ size: Double) { readerFontSize = min(22, max(14, size)); savePreferences() }
     func setPreRoll(_ seconds: Double) { preRoll = min(2, max(0, seconds)); savePreferences() }
-    func setReadingPunctuation(_ value: Bool) { readingPunctuation = value; savePreferences(); preparePunctuation(); refreshSearch() }
+    func setReadingPunctuation(_ value: Bool) async { readingPunctuation = value; savePreferences(); await preparePunctuation(); refreshSearch() }
     func setReadingParagraphBreaks(_ value: Bool) { readingParagraphBreaks = value; savePreferences(); refreshSearch() }
     func readingText(_ utterance: SpeechUtterance) -> String {
         ReadingTranscript(segments: utterance.segments, punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks, density: readingDensity, overrides: readingOverrides).text
@@ -534,30 +580,57 @@ final class AppModel: ObservableObject {
             try JSONEncoder().encode(preferences).write(to: dataDirectory.appendingPathComponent("settings.json"), options: .atomic)
         } catch { alert = error.localizedDescription }
     }
-    func editSpeaker(_ id: String, speaker: Int?) {
-        do { try store?.editSpeaker(segmentID: id, speaker: speaker); loadTranscript(); refreshSearch() } catch { alert = error.localizedDescription }
+    func editSpeaker(_ id: String, speaker: Int?) async {
+        do { try await store?.perform { try $0.editSpeaker(segmentID: id, speaker: speaker) }; await loadTranscript(); refreshSearch() } catch { alert = error.localizedDescription }
     }
-    func renameSpeaker(_ id: Int, name: String) {
+    func renameSpeaker(_ id: Int, name: String) async {
         guard let run = selected?.activeRun else { return }
-        do { try store?.renameSpeaker(runID: run, speaker: id, name: name); loadTranscript(); refreshSearch() } catch { alert = error.localizedDescription }
+        do { try await store?.perform { try $0.renameSpeaker(runID: run, speaker: id, name: name) }; await loadTranscript(); refreshSearch() } catch { alert = error.localizedDescription }
     }
     func speakerName(_ id: Int?) -> String { id.flatMap { names[$0] } ?? SpeakerMatcher.defaultName(id) }
     func refreshSearch() {
         searchTask?.cancel()
         let key = searchText + "\u{0}" + (searchAll ? "all" : selectedID ?? "")
         if searchQueryKey != key { hits = []; activeHitID = nil; searchQueryKey = key }
+        searchOffset = 0; searchHasMore = false
         if !searchText.isEmpty && !searchSession {
             searchOrigin = SearchOrigin(recordingID: selectedID, position: player.position, focusedID: focusSegmentID, playing: player.playing)
             hasSearchOrigin = searchOrigin?.recordingID != nil; searchSession = true
         }
-        guard !searchText.isEmpty else { hits = []; activeHitID = nil; searchSession = false; return }
+        guard !searchText.isEmpty else { hits = []; activeHitID = nil; searchSession = false; searchLoading = false; return }
+        let term = searchText, recording = searchAll ? nil : selectedID ?? ""
+        let punctuate = readingPunctuation, breaks = readingParagraphBreaks, density = readingDensity, smart = smartPunctuation
+        searchLoading = true
         searchTask = Task {
+            defer { if searchQueryKey == key { searchLoading = false } }
             try? await Task.sleep(nanoseconds: 180_000_000)
             guard !Task.isCancelled else { return }
-            do { hits = try store?.search(searchText, recordingID: searchAll ? nil : selectedID ?? "",
-                                         punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks, density: readingDensity, smartPunctuation: smartPunctuation) ?? [] }
+            do {
+                guard let store else { throw BackendClientError.unavailable }
+                let result = try await store.perform { store in
+                    var page = try store.searchPage(term, recordingID: recording, punctuate: punctuate, paragraphBreaks: breaks, density: density, smartPunctuation: smart)
+                    while page.hits.isEmpty && page.hasMore {
+                        page = try store.searchPage(term, recordingID: recording, offset: page.nextOffset, punctuate: punctuate, paragraphBreaks: breaks, density: density, smartPunctuation: smart)
+                    }
+                    return page
+                }
+                guard !Task.isCancelled, searchQueryKey == key else { return }
+                hits = result.hits; searchOffset = result.nextOffset; searchHasMore = result.hasMore
+            } catch is CancellationError { }
             catch { alert = error.localizedDescription }
         }
+    }
+    func loadMoreSearch() async {
+        guard searchHasMore, !searchLoading, let store else { return }
+        let key = searchQueryKey, term = searchText, recording = searchAll ? nil : selectedID ?? "", offset = searchOffset
+        let punctuate = readingPunctuation, breaks = readingParagraphBreaks, density = readingDensity, smart = smartPunctuation
+        searchLoading = true; defer { if searchQueryKey == key { searchLoading = false } }
+        do {
+            let page = try await store.perform { try $0.searchPage(term, recordingID: recording, offset: offset, punctuate: punctuate, paragraphBreaks: breaks, density: density, smartPunctuation: smart) }
+            guard searchQueryKey == key else { return }
+            let existing = Set(hits.map(\.id)); hits += page.hits.filter { !existing.contains($0.id) }
+            searchOffset = page.nextOffset; searchHasMore = page.hasMore
+        } catch { if searchQueryKey == key { alert = error.localizedDescription } }
     }
     func openHit(_ hit: SearchHit) async {
         activeHitID = hit.id; reviewFilter = .all
@@ -594,17 +667,17 @@ final class AppModel: ObservableObject {
             try await Task.detached(priority: .utility) { try FileFingerprint.verify(url, expected: recording.fingerprint) }.value
             var updated = recording; updated.path = url.path
             updated.bookmark = try url.bookmarkData(options: [.minimalBookmark], includingResourceValuesForKeys: nil, relativeTo: nil)
-            save(updated); await select(recording.id)
+            await save(updated); await select(recording.id)
             notice = "已重新定位原音频，转写和纠错均已保留。"
         } catch { alert = error.localizedDescription }
     }
-    func remove(_ id: String) {
+    func remove(_ id: String) async {
         guard activeRecordingID != id else { alert = "请先取消当前任务，等待清理完成后再移除。"; return }
         queue.removeAll { $0.recordingID == id }
         do {
-            try store?.remove(id)
+            try await store?.perform { try $0.remove(id) }
             if selectedID == id { player.unload(); selectedID = nil }
-            reload(); if selectedID == nil, let first = recordings.first { Task { await select(first.id) } }
+            await reload(); if selectedID == nil, let first = recordings.first { Task { await select(first.id) } }
         } catch { alert = error.localizedDescription }
     }
     func export(srt: Bool, plainDialogue: Bool = false) {
@@ -628,16 +701,16 @@ final class AppModel: ObservableObject {
         savePreferences()
         await installer.validate(directory: url)
     }
-    func shutdown() {
+    func shutdown() async {
         shuttingDown = true; backendGeneration = UUID()
-        if let job = activeJobID { try? store?.stopWorker(job, state: "interrupted") }
-        savePosition(); installer.cancel(); punctuationTask?.cancel(); punctuationProcessor.cancel()
+        if let job = activeJobID { try? await store?.perform { try $0.stopWorker(job, state: "interrupted") } }
+        await savePosition(); installer.cancel(); punctuationTask?.cancel(); punctuationProcessor.cancel()
         for job in queue {
-            if var r = recordings.first(where: { $0.id == job.recordingID }) { r.state = .interrupted; try? store?.save(r) }
+            if var r = recordings.first(where: { $0.id == job.recordingID }) { r.state = .interrupted; try? await store?.perform { try $0.save(r) } }
         }
         queue = []
-        if let id = activeRecordingID, var r = recordings.first(where: { $0.id == id }) { r.state = .interrupted; try? store?.save(r) }
+        if let id = activeRecordingID, var r = recordings.first(where: { $0.id == id }) { r.state = .interrupted; try? await store?.perform { try $0.save(r) } }
         cancelledJob = true; worker?.terminate(); player.pause()
-        assistant.stop(); deviceBridge?.stop(); deviceBridge = nil; store = nil; backendProcess.stop()
+        await assistant.flushDrafts(); assistant.stop(); deviceBridge?.stop(); deviceBridge = nil; store = nil; backendProcess.stop()
     }
 }

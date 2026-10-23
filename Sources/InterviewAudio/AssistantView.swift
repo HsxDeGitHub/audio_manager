@@ -5,6 +5,7 @@ import AudioCore
 struct AssistantView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var assistant: AssistantModel
+    @AppStorage("assistant.expanded") private var expanded = false
     @UIState private var inputHeight: CGFloat = 54
     @UIState private var following = true
     @UIState private var renamingSession: AssistantSession?
@@ -20,8 +21,6 @@ struct AssistantView: View {
             composer
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .onChange(of: model.selectedID) { _, _ in assistant.contextChanged(model: model) }
-        .onChange(of: model.selected?.activeRun) { _, _ in assistant.contextChanged(model: model) }
         .task { await assistant.reconnect(model: model) }
         .sheet(item: $renamingSession) { session in
             AssistantRenameSessionView(assistant: assistant, session: session)
@@ -59,6 +58,7 @@ struct AssistantView: View {
                     Button("大模型配置…") { model.showAISettings = true }
                 } label: { Image(systemName: "ellipsis.circle") }.menuStyle(.borderlessButton).fixedSize().help("助手设置").accessibilityLabel("助手设置")
                 Button { Task { await assistant.createSession() } } label: { Image(systemName: "square.and.pencil") }.help("新对话").accessibilityLabel("新对话").disabled(assistant.sending || assistant.managingSession)
+                Button { expanded.toggle() } label: { Image(systemName: expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") }.help(expanded ? "恢复侧栏" : "展开回答阅读区").accessibilityLabel("展开或还原助手")
                 Button { assistant.toggle() } label: { Image(systemName: "sidebar.right") }.help("收起助手 ⌘⇧A").accessibilityLabel("收起助手")
             }.buttonStyle(.plain)
             HStack(spacing: 8) {
@@ -84,6 +84,10 @@ struct AssistantView: View {
             ZStack(alignment: .bottom) {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 20) {
+                        if assistant.hasMoreHistory {
+                            Button(assistant.loadingHistory ? "正在加载…" : "查看更早的对话") { following = false; Task { await assistant.loadOlderHistory() } }
+                                .disabled(assistant.loadingHistory).font(.caption)
+                        }
                         if assistant.messages.isEmpty && !assistant.sending {
                             VStack(alignment: .leading, spacing: 14) {
                                 Image(systemName: "quote.bubble").font(.system(size: 28)).foregroundStyle(accent)
@@ -269,6 +273,7 @@ private struct AssistantRunView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var assistant: AssistantModel
     let run: AssistantRun
+    @UIState private var questionsExpanded = true
     private var running: Bool { assistant.activeRun == run.id }
     private var answer: String {
         if ["completed", "awaiting_input"].contains(run.state), let answer = run.result?.answer { return answer }
@@ -285,6 +290,7 @@ private struct AssistantRunView: View {
                 if !answer.isEmpty { Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(answer, forType: .string) } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.plain).help("复制回答").accessibilityLabel("复制回答") }
             }.font(.caption)
             if run.context?.historyOmitted == true { Text("历史较长，本次仅参考最近的部分对话。").font(.caption).foregroundStyle(.secondary) }
+            if let scope = run.context?.scopeTitle { Label(scope, systemImage: "doc.text").font(.caption).foregroundStyle(.secondary).lineLimit(2) }
             if !answer.isEmpty {
                 if running || !["completed", "awaiting_input"].contains(run.state) { Text(answer).font(.system(size: 14)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true) }
                 else { AssistantMarkdown(text: answer) }
@@ -320,11 +326,20 @@ private struct AssistantRunView: View {
             DisclosureGroup("已保留的分块分析（\(partial.count)）") { ForEach(Array(partial.enumerated()), id: \.offset) { _, item in Text(item.answer).textSelection(.enabled) } }.font(.caption)
         }
         if let questions = result.questions, !questions.isEmpty {
-            DisclosureGroup("问题清单与来源（\(questions.count)）") {
+            DisclosureGroup("问题清单与来源（\(questions.count)）", isExpanded: $questionsExpanded) {
                 ForEach(Array(questions.enumerated()), id: \.element.id) { index, question in
-                    VStack(alignment: .leading, spacing: 5) { Text("\(index + 1). \(question.text)").textSelection(.enabled); sourceButtons(question.source) }.padding(.vertical, 5)
+                    VStack(alignment: .leading, spacing: 5) { Text("\(index + 1). \(question.text)").textSelection(.enabled); sourceButtons(question.source, start: question.start) }.padding(.vertical, 5)
                 }
             }.font(.caption)
+        }
+        if let proposals = result.proposals, !proposals.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("可执行方案").font(.caption.weight(.semibold))
+                ForEach(proposals) { proposal in
+                    Button { assistant.chooseProposal(proposal) } label: { Label(proposal.title, systemImage: "text.badge.checkmark") }
+                        .disabled(assistant.activeRun != nil).help("填入输入框，发送后执行；届时会校验资料版本")
+                }
+            }
         }
         if let claims = result.claims, !claims.isEmpty {
             DisclosureGroup("依据与分析（\(claims.count)）") {
@@ -339,14 +354,15 @@ private struct AssistantRunView: View {
         ForEach(result.allChanges, id: \.id) { change in
             VStack(alignment: .leading, spacing: 7) {
                 Label("修改 \(change.count) 项 · \(change.state == "reverted" ? "已撤销" : "已提交")", systemImage: "checkmark.circle")
-                if let items = change.items { DisclosureGroup("前后差异") { ForEach(Array(items.enumerated()), id: \.offset) { _, item in Text(ChangeDifference.describe(item)).textSelection(.enabled) } } }
+                if let items = change.items { DisclosureGroup("前后差异") { ForEach(Array(items.enumerated()), id: \.offset) { _, item in ChangeDifferenceView(item: item) { source in Task { await model.openAssistantSource(source, play: false) } } } } }
                 Button("撤销整次修改") { Task { await assistant.revert(change.id, model: model) } }.disabled(assistant.activeRun != nil || change.state == "reverted")
             }.font(.caption).padding(10).background(accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
         }
     }
-    private func sourceButtons(_ source: AssistantReference) -> some View {
+    private func sourceButtons(_ source: AssistantReference, start: Double? = nil) -> some View {
         HStack {
             if source.historical == true { Text("历史引用").foregroundStyle(.secondary) }
+            if let start { Text(TimeFormat.clock(start)).monospacedDigit().foregroundStyle(.secondary) }
             Button("查看来源") { Task { await model.openAssistantSource(source, play: false) } }
             if source.resourceType == "segment" { Button("回听") { Task { await model.openAssistantSource(source, play: true) } } }
         }.buttonStyle(.link)

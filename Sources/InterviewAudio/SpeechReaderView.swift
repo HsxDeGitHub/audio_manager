@@ -50,7 +50,7 @@ struct TranscriptView: View {
                     Text(recording.state.isRunning ? "正在整理文字，完成后自动显示" : "开始转写，就能边读边听").font(.headline).foregroundStyle(.secondary)
                     Text("后台处理时，可以继续查看其他音频。").font(.caption).foregroundStyle(.secondary)
                     if !recording.state.isRunning && recording.state != .queued {
-                        Button("开始转写") { model.enqueue(recording.id) }.buttonStyle(.borderedProminent)
+                        Button("开始转写") { Task { await model.enqueue(recording.id) } }.buttonStyle(.borderedProminent)
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -76,12 +76,12 @@ struct TranscriptView: View {
                     Button("导出带时间轴的字幕 SRT…") { model.export(srt: true) }
                 } label: { Label("导出", systemImage: "square.and.arrow.up") }.menuStyle(.borderlessButton).fixedSize().disabled(model.segments.isEmpty)
                 Menu {
-                    Button("重新转写，保留已有版本") { model.enqueue(recording.id) }.disabled(recording.state.isRunning || recording.state == .queued)
+                    Button("重新转写，保留已有版本") { Task { await model.enqueue(recording.id) } }.disabled(recording.state.isRunning || recording.state == .queued)
                     Button("重新定位原音频…") { Task { await model.relocate() } }
                     if !model.segments.isEmpty { Button("复制全部文字") { model.copyText(model.exportText(srt: false)) } }
                     if model.runs.count > 1 {
                         Divider()
-                        Picker("转写版本", selection: Binding(get: { recording.activeRun ?? "" }, set: { model.switchRun($0) })) {
+                        Picker("转写版本", selection: Binding(get: { recording.activeRun ?? "" }, set: { value in Task { await model.switchRun(value) } })) {
                             ForEach(model.runs) { run in Text(runLabel(run)).tag(run.id) }
                         }
                     }
@@ -92,7 +92,7 @@ struct TranscriptView: View {
                     Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
                     Text(error).font(.caption).lineLimit(4).textSelection(.enabled)
                     Spacer()
-                    Button("重试") { model.enqueue(recording.id, speakersOnly: !model.segments.isEmpty) }
+                    Button("重试") { Task { await model.enqueue(recording.id, speakersOnly: !model.segments.isEmpty) } }
                 }.padding(10).background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
             }
             if model.activeRecordingID == recording.id {
@@ -100,10 +100,10 @@ struct TranscriptView: View {
                     if let progress = model.progress { ProgressView(value: progress).frame(width: 120); Text("\(Int(progress * 100))%").monospacedDigit() }
                     else { ProgressView().controlSize(.small) }
                     Text(model.phaseMessage.isEmpty ? recording.state.title : model.phaseMessage).foregroundStyle(.secondary)
-                    Spacer(); Button("取消") { model.cancel(recording.id) }
+                    Spacer(); Button("取消") { Task { await model.cancel(recording.id) } }
                 }.font(.caption)
             } else if recording.state == .queued {
-                HStack { Text("排队第 \(model.queuePosition(recording.id) ?? 1) 位").font(.caption).foregroundStyle(.secondary); Spacer(); Button("取消排队") { model.cancel(recording.id) } }
+                HStack { Text("排队第 \(model.queuePosition(recording.id) ?? 1) 位").font(.caption).foregroundStyle(.secondary); Spacer(); Button("取消排队") { Task { await model.cancel(recording.id) } } }
             }
         }.padding(.horizontal, 26).padding(.vertical, 20)
     }
@@ -118,9 +118,9 @@ struct TranscriptView: View {
             Button { showSpeakers.toggle() } label: { if compact { Image(systemName: "person.2") } else { Label("说话人", systemImage: "person.2") } }.help("说话人").accessibilityLabel("说话人")
                 .popover(isPresented: $showSpeakers) { SpeakerSettingsView(model: model).padding(20).frame(width: 470) }
             Menu {
-                Toggle("智能标点（本地）", isOn: Binding(get: { model.smartPunctuation }, set: { model.setSmartPunctuation($0) }))
+                Toggle("智能标点（本地）", isOn: Binding(get: { model.smartPunctuation }, set: { value in Task { await model.setSmartPunctuation(value) } }))
                 if !model.installer.valid.contains(ModelSpec.punctuation.id) { Button("准备智能标点模型…") { model.showSettings = true } }
-                Toggle("自动补标点", isOn: Binding(get: { model.readingPunctuation }, set: { model.setReadingPunctuation($0) }))
+                Toggle("自动补标点", isOn: Binding(get: { model.readingPunctuation }, set: { value in Task { await model.setReadingPunctuation(value) } }))
                 Toggle("长发言适当换行", isOn: Binding(get: { model.readingParagraphBreaks }, set: { model.setReadingParagraphBreaks($0) }))
                 Picker("阅读密度", selection: Binding(get: { model.readingDensity }, set: { model.setReadingDensity($0) })) {
                     ForEach(ReadingDensity.allCases, id: \.self) { Text($0.title).tag($0) }
@@ -135,8 +135,8 @@ struct TranscriptView: View {
             }.labelsHidden().frame(width: 112)
             Button { model.selectionMode.toggle(); if !model.selectionMode { model.bulkSelection = [] } } label: { Image(systemName: model.selectionMode ? "checkmark.circle.fill" : "checklist") }.help("批量选择发言")
             Menu {
-                Button(model.undoLabel.map { "撤销：" + $0 } ?? "没有可撤销的修改") { model.undoEdit() }.disabled(model.undoLabel == nil)
-                Button(model.redoLabel.map { "重做：" + $0 } ?? "没有可重做的修改") { model.undoEdit(redo: true) }.disabled(model.redoLabel == nil)
+                Button(model.undoLabel.map { "撤销：" + $0 } ?? "没有可撤销的修改") { Task { await model.undoEdit() } }.disabled(model.undoLabel == nil)
+                Button(model.redoLabel.map { "重做：" + $0 } ?? "没有可重做的修改") { Task { await model.undoEdit(redo: true) } }.disabled(model.redoLabel == nil)
             } label: { Image(systemName: "arrow.uturn.backward") }.menuStyle(.borderlessButton).fixedSize().help("校对修改历史")
             if model.punctuationBusy { ProgressView().controlSize(.mini).help("正在本机优化阅读标点") }
             else if !model.punctuationMessage.isEmpty { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).help(model.punctuationMessage) }
@@ -176,8 +176,8 @@ struct SpeechBlock: View {
                 if utterance.hasEdits { Text("已校对").font(.system(size: 10)).foregroundStyle(.secondary) }
                 if utterance.reviewCount > 0 { Text("\(utterance.reviewCount) 句待核对").font(.system(size: 10)).foregroundStyle(.orange) }
                 Menu {
-                    Button("标记整段已核对") { model.markReviewed(utterance.segments.map(\.id)) }
-                    Button("重新标为待核对") { model.markReviewed(utterance.segments.map(\.id), reviewed: false) }
+                    Button("标记整段已核对") { Task { await model.markReviewed(utterance.segments.map(\.id)) } }
+                    Button("重新标为待核对") { Task { await model.markReviewed(utterance.segments.map(\.id), reviewed: false) } }
                     Divider()
                     Button("逐句校对这次发言…") { editingUtterance = true }
                     Button("复制这次发言") { model.copyText(model.readingText(utterance)) }
@@ -202,11 +202,11 @@ struct SpeechBlock: View {
     private var speakerMenu: some View {
         Menu {
             ForEach(Array(Set(model.segments.compactMap(\.speaker)).union(Set(model.names.keys))).sorted(), id: \.self) { speaker in
-                Button(model.speakerName(speaker)) { model.editUtteranceSpeaker(utterance, speaker: speaker) }
+                Button(model.speakerName(speaker)) { Task { await model.editUtteranceSpeaker(utterance, speaker: speaker) } }
             }
             Divider()
-            Button("未识别") { model.editUtteranceSpeaker(utterance, speaker: nil) }
-            Button("新增说话人") { model.editUtteranceSpeaker(utterance, speaker: (model.segments.compactMap(\.speaker).max() ?? -1) + 1) }
+            Button("未识别") { Task { await model.editUtteranceSpeaker(utterance, speaker: nil) } }
+            Button("新增说话人") { Task { await model.editUtteranceSpeaker(utterance, speaker: (model.segments.compactMap(\.speaker).max() ?? -1) + 1) } }
         } label: { Text(model.speakerName(utterance.speaker)).font(.system(size: 12, weight: .semibold)) }
         .menuStyle(.borderlessButton).fixedSize().help("调整整段发言的说话人")
     }
@@ -223,6 +223,7 @@ struct SentenceEditor: View {
     @UIState private var initialDraft = ""
     @UIState private var looping = false
     @UIState private var markDone = true
+    @StateObject private var saveState = EditorSaveState()
     private var current: TranscriptSegment { model.segments.first { $0.id == currentID } ?? sentence }
     private var next: TranscriptSegment? {
         guard let index = model.segments.firstIndex(where: { $0.id == current.id }), index + 1 < model.segments.count else { return nil }
@@ -245,7 +246,7 @@ struct SentenceEditor: View {
             }.font(.caption).foregroundStyle(.secondary)
             TextEditor(text: $draft).font(.system(size: 16)).frame(height: 170).padding(8).background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
             HStack {
-                Picker("说话人", selection: Binding(get: { current.speaker ?? -1 }, set: { model.editSpeaker(current.id, speaker: $0 < 0 ? nil : $0) })) {
+                Picker("说话人", selection: Binding(get: { current.speaker ?? -1 }, set: { value in Task { await model.editSpeaker(current.id, speaker: value < 0 ? nil : value) } })) {
                     Text("未识别").tag(-1)
                     ForEach(Array(Set(model.segments.compactMap(\.speaker))).sorted(), id: \.self) { Text(model.speakerName($0)).tag($0) }
                 }.frame(width: 220)
@@ -255,9 +256,10 @@ struct SentenceEditor: View {
             HStack {
                 Button("恢复原稿") { draft = current.original }; Spacer()
                 Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("保存并下一句") { save(); if let next { load(next); if looping { startLoop() } } }.disabled(next == nil)
-                Button("保存") { save(); dismiss() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                Button("保存并下一句") { Task { if await save(), let next { load(next); if looping { startLoop() } } } }.disabled(next == nil || saveState.saving)
+                Button(saveState.saving ? "保存中…" : "保存") { Task { if await save() { dismiss() } } }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(saveState.saving)
             }
+            if let error = saveState.error { Text(error).font(.caption).foregroundStyle(.orange) }
         }.padding(24).frame(width: 660)
             .onAppear { load(sentence) }
             .onChange(of: looping) { _, enabled in if enabled { startLoop() } else { model.player.stopLoop() } }
@@ -268,8 +270,10 @@ struct SentenceEditor: View {
         model.focusSegmentID = segment.id; model.focusRequestID = UUID()
     }
     private func startLoop() { model.player.startLoop(start: max(0,current.start - model.preRoll), end: current.end) }
-    private func save() {
-        model.saveCorrection(current.id, text: draft != initialDraft ? draft : nil, reviewed: markDone)
+    private func save() async -> Bool {
+        await saveState.commit {
+            guard await model.saveCorrection(current.id, text: draft != initialDraft ? draft : nil, reviewed: markDone) else { throw AudioError.message(model.alert ?? "保存失败，输入已保留。") }
+        }
     }
 }
 
@@ -280,6 +284,7 @@ struct UtteranceEditor: View {
     @UIState private var drafts: [String: String] = [:]
     @UIState private var initialDrafts: [String: String] = [:]
     @UIState private var loopID: String?
+    @StateObject private var saveState = EditorSaveState()
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("逐句校对这次发言").font(.headline)
@@ -300,9 +305,12 @@ struct UtteranceEditor: View {
                 Spacer(); Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("保存全部") {
                     let changed = drafts.filter { id, text in initialDrafts[id] != text }
-                    model.editTexts(changed); dismiss()
-                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                    Task {
+                        if await saveState.commit({ guard await model.editTexts(changed) else { throw AudioError.message(model.alert ?? "保存失败，输入已保留。") } }) { dismiss() }
+                    }
+                }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(saveState.saving)
             }
+            if let error = saveState.error { Text(error).font(.caption).foregroundStyle(.orange) }
         }.padding(24).frame(width: 650).onAppear {
             initialDrafts = Dictionary(uniqueKeysWithValues: utterance.segments.map { ($0.id, model.readingSentence($0)) })
             drafts = initialDrafts
@@ -320,11 +328,11 @@ struct BulkReviewBar: View {
             Spacer()
             Menu("修改说话人") {
                 ForEach(Array(Set(model.segments.compactMap(\.speaker))).sorted(), id: \.self) { speaker in
-                    Button(model.speakerName(speaker)) { model.setBulkSpeaker(speaker) }
+                    Button(model.speakerName(speaker)) { Task { await model.setBulkSpeaker(speaker) } }
                 }
-                Button("未识别") { model.setBulkSpeaker(nil) }
+                Button("未识别") { Task { await model.setBulkSpeaker(nil) } }
             }.menuStyle(.borderlessButton).fixedSize().disabled(model.bulkSelection.isEmpty)
-            Button("标记已核对") { model.markReviewed(Array(model.bulkSelection)); model.bulkSelection = [] }.disabled(model.bulkSelection.isEmpty)
+            Button("标记已核对") { Task { await model.markReviewed(Array(model.bulkSelection)) }; model.bulkSelection = [] }.disabled(model.bulkSelection.isEmpty)
         }.font(.caption).padding(.horizontal, 26).padding(.vertical, 10).background(accent.opacity(0.07))
     }
 }
@@ -355,17 +363,17 @@ struct SpeakerSettingsView: View {
                     Text("选择目标说话人").tag(-1)
                     ForEach(speakers, id: \.self) { Text(model.speakerName($0)).tag($0) }
                 }
-                Button("合并所选") { model.mergeSpeakers(sources, into: target); sources = [] }
+                Button("合并所选") { Task { await model.mergeSpeakers(sources, into: target) }; sources = [] }
                     .disabled(target < 0 || sources.subtracting([target]).isEmpty)
             }
             Text("合并仅改变归属，文字与时间轴保持原样。可撤销。名称按目标说话人保留。").font(.caption2).foregroundStyle(.secondary)
             Divider()
             if let recording = model.selected {
-                Picker("实际人数", selection: Binding(get: { recording.speakerCount ?? 0 }, set: { model.changeSpeakerCount($0 == 0 ? nil : $0) })) {
+                Picker("实际人数", selection: Binding(get: { recording.speakerCount ?? 0 }, set: { value in Task { await model.changeSpeakerCount(value == 0 ? nil : value) } })) {
                     Text("自动判断").tag(0)
                     ForEach(1...12, id: \.self) { Text("\($0) 人").tag($0) }
                 }.disabled(recording.state.isRunning || recording.state == .queued)
-                Button("重新区分说话人") { model.enqueue(recording.id, speakersOnly: true) }.disabled(recording.state.isRunning || recording.state == .queued)
+                Button("重新区分说话人") { Task { await model.enqueue(recording.id, speakersOnly: true) } }.disabled(recording.state.isRunning || recording.state == .queued)
                 Text("重新区分会保留人工归属与名称，并重新开始修改历史。").font(.caption2).foregroundStyle(.secondary)
             }
         }.onChange(of: model.selectedID) { _, _ in sources = []; target = -1 }

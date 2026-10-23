@@ -58,6 +58,14 @@ def test_selection_followup_applies_one_edit_preserves_original_and_undoes(clien
 
     service = client.app.state.agent
     service.engine = Engine(config, client.app.state.tools, client.app.state.evidence)
+    class IntentModel:
+        async def ainvoke(self, messages):
+            prompt = json.loads(messages[-1].content)
+            edit = prompt['instruction'] == '第一点'
+            return AIMessage(content=json.dumps({'mode':'edit' if edit else 'read', 'reading':'full',
+                'edit_target':'transcript' if edit else 'none','import_documents':False,
+                'actions':[],'constraints':[],'clarification':''}))
+    service.engine.intent_model = IntentModel()
     session = client.post('/api/v1/sessions', json={}).json()['id']
     def send(message_id, instruction):
         body = {'session_id': session, 'message_id': message_id, 'instruction': instruction, 'context': {'recording_id': 'r1'}}

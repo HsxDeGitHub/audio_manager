@@ -3,7 +3,7 @@ import json
 import time
 import uuid
 from typing import Annotated
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from interview_backend.errors import DomainError
@@ -75,11 +75,29 @@ class AgentAPI:
             c.execute('UPDATE sessions SET deleted=1 WHERE id=?', (session_id,))
         return {'id': session_id, 'deleted': True}
 
-    def history(self, session_id):
+    def history(self, session_id, before=None, limit=50):
         with self.database.transaction() as c:
             self.require_session(c, session_id)
-            return {'items': [{**dict(r), 'context': json.loads(r['context'])} for r in c.execute('SELECT * FROM messages WHERE session_id=? ORDER BY created_at,id', (session_id,))],
-                    'runs': [{**dict(r), 'context': json.loads(r['context']), 'result': self.current_result(c,r), 'output':output_snapshot(c,r['id'])} for r in c.execute('SELECT * FROM agent_runs WHERE session_id=? ORDER BY created_at,id', (session_id,))]}
+            clause = ''; parameters = [session_id]
+            if before:
+                cursor = require(c, 'agent_runs', before)
+                if cursor['session_id'] != session_id:
+                    raise DomainError('invalid_cursor','历史位置不属于当前会话。',422)
+                clause = ' AND (created_at<? OR (created_at=? AND id<?))'
+                parameters += [cursor['created_at'],cursor['created_at'],cursor['id']]
+            rows = c.execute('SELECT * FROM agent_runs WHERE session_id=?'+clause+' ORDER BY created_at DESC,id DESC LIMIT ?',parameters+[limit+1]).fetchall()
+            page = rows[:limit]
+            message_ids = {r['message_id'] for r in page}; run_ids = {r['id'] for r in page}
+            # 用 SQL 限定本页消息，避免加载整个会话后在内存切片。
+            items = []
+            if page:
+                placeholders = ','.join('?' for _ in page)
+                items = [{**dict(r),'context':json.loads(r['context'])} for r in c.execute(
+                    f"SELECT * FROM messages WHERE session_id=? AND (id IN ({placeholders}) OR (role='assistant' AND json_extract(context,'$.run_id') IN ({placeholders}))) ORDER BY created_at,id",
+                    [session_id]+sorted(message_ids)+sorted(run_ids))]
+            return {'items':items,
+                    'runs':[{**dict(r),'context':json.loads(r['context']),'result':self.current_result(c,r),'output':output_snapshot(c,r['id'])} for r in reversed(page)],
+                    'has_more':len(rows)>limit,'before':page[-1]['id'] if page else None}
 
     def conversation(self, session_id):
         rounds=[]; remaining=16000; omitted=False
@@ -117,14 +135,22 @@ class AgentAPI:
                     raise DomainError('message_conflict','消息标识已用于不同指令或范围。',409)
                 run=c.execute('SELECT id,state FROM agent_runs WHERE message_id=?',(body.message_id,)).fetchone()
                 return {'id':run['id'],'state':run['state']}
-        context = self.evidence.freeze(body.context, body.instruction)
+        semantic = hasattr(self.engine, 'prepare_context')
+        context = self.evidence.freeze(body.context, body.instruction, semantic=True) if semantic else self.evidence.freeze(body.context, body.instruction)
         context['request_context']=body.context
         context['conversation_history'],context['history_omitted']=self.conversation(body.session_id)
-        if hasattr(self.engine, 'reports') and __import__('re').search(r'本周|这周|周报', body.instruction):
+        if not hasattr(self.engine, 'prepare_context') and hasattr(self.engine, 'reports') and __import__('re').search(r'本周|这周|周报', body.instruction):
             context['report_plan'] = self.engine.reports.freeze(context, body.instruction)
         context['instruction'] = body.instruction
         context['message_id'] = body.message_id
         context['session_id'] = body.session_id
+        from interview_backend.agent.proposals import pending
+        with self.database.transaction() as c:
+            context['pending_proposals'] = pending(c, context)
+        if hasattr(self.engine, 'prepare_context'):
+            context['intent_policy'] = 'semantic-v1'
+            # 周报由语义分类决定；不因资料或主题里出现“本周”而重选目标。
+            context.pop('report_plan', None)
         identifier = str(uuid.uuid4())
         with self.database.transaction(True) as c:
             self.require_session(c, body.session_id)
@@ -165,6 +191,11 @@ class AgentAPI:
             async def emit(kind,payload):
                 if kind in {'answer_start','answer_delta'}:payload={**payload,'attempt_id':attempt}
                 await self.emit(identifier,kind,payload)
+            if context.get('intent_policy') == 'semantic-v1' and not context.get('task_intent'):
+                context = await self.engine.prepare_context(identifier, context, emit)
+                with self.database.transaction(True) as c:
+                    c.execute('UPDATE agent_runs SET context=? WHERE id=?', (encode(context), identifier))
+                    c.execute('UPDATE messages SET context=? WHERE id=?', (encode(context), run['message_id']))
             result = await self.engine.execute(identifier, context['instruction'], context, emit=emit)
             if hasattr(self.engine, 'automatic_memory') and not result.get('clarification'):
                 try: result['memories'] = await self.engine.automatic_memory.extract(context, result=result)
@@ -287,7 +318,7 @@ def router(app):
     @api.post('/sessions')
     def create_session(body: NewSession): return service.create_session(body)
     @api.get('/sessions/{session_id}')
-    def history(session_id: str): return service.history(session_id)
+    def history(session_id: str, before: str | None = None, limit: int = Query(50, ge=1, le=100)): return service.history(session_id, before, limit)
     @api.patch('/sessions/{session_id}')
     def rename_session(session_id: str, body: RenameSession): return service.rename_session(session_id, body)
     @api.delete('/sessions/{session_id}')

@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import AudioCore
 
 // 长期记忆与助手共用同一后端记录；界面不推断说话人身份，也不从删除项重建。
 struct MemoryItem: Decodable, Identifiable {
@@ -44,15 +45,15 @@ final class MemoryModel: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
-    func update(_ item: MemoryItem, fields: [String: Any]) async {
+    @discardableResult func update(_ item: MemoryItem, fields: [String: Any]) async -> Bool {
         busy = true; defer { busy = false }
         do {
             let body = try JSONSerialization.data(withJSONObject: ["operation_id": UUID().uuidString,
                                                                    "expected_revision": item.revision, "fields": fields])
             let receipt: AssistantChange = try await client.send("/api/v1/memories/\(item.id)", method: "PATCH", body: body)
             history?.record(receipt)
-            await load()
-        } catch { let message = error.localizedDescription; await load(); self.error = message }
+            await load(); return true
+        } catch { let message = error.localizedDescription; await load(); self.error = message; return false }
     }
 }
 
@@ -105,10 +106,10 @@ struct MemoryView: View {
         }
         .padding(24).frame(minWidth: 640, minHeight: 480)
         .task { await model.load() }
-        .sheet(isPresented: $showHistory) { ChangeHistoryView(model: app.changeHistory, onChange: { Task { await model.load() }; app.reload() }) }
+        .sheet(isPresented: $showHistory) { ChangeHistoryView(model: app.changeHistory, onChange: { Task { await model.load(); await app.reload() } }) }
         .sheet(item: $editing) { item in
             MemoryEditor(item: item) { text in
-                Task { await model.update(item, fields: ["content": text]) }
+                guard await model.update(item, fields: ["content": text]) else { throw AudioError.message(model.error ?? "保存失败，输入已保留。") }
             }
         }
         .confirmationDialog("删除这条记忆？", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
@@ -167,10 +168,11 @@ struct MemoryView: View {
 
 private struct MemoryEditor: View {
     let item: MemoryItem
-    let save: (String) -> Void
+    let save: (String) async throws -> Void
+    @StateObject private var state = EditorSaveState()
     @UIState private var text: String
     @Environment(\.dismiss) private var dismiss
-    init(item: MemoryItem, save: @escaping (String) -> Void) {
+    init(item: MemoryItem, save: @escaping (String) async throws -> Void) {
         self.item = item; self.save = save
         _text = UIState(initialValue: item.content)
     }
@@ -180,12 +182,14 @@ private struct MemoryEditor: View {
             Text("修改内容不会改变记忆类型和来源；明确纠正请由助手生成新的记忆。")
                 .font(.caption).foregroundStyle(.secondary)
             TextEditor(text: $text).frame(minHeight: 120).border(Color.secondary.opacity(0.25))
+                .disabled(state.saving)
+            if let error = state.error { Text(error).font(.caption).foregroundStyle(.orange) }
             HStack {
                 Spacer()
-                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
-                Button("保存") { save(text.trimmingCharacters(in: .whitespacesAndNewlines)); dismiss() }
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction).disabled(state.saving)
+                Button(state.saving ? "保存中…" : "保存") { Task { if await state.commit({ try await save(text.trimmingCharacters(in: .whitespacesAndNewlines)) }) { dismiss() } } }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(state.saving || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }.padding(22).frame(width: 520)
     }

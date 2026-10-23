@@ -48,3 +48,39 @@ async def tool_call_self_test(settings):
         return {'available': True, 'tool_calling': True}
     except Exception:
         raise DomainError('model_tool_unavailable', '模型接口未通过工具调用测试，请选择支持工具调用的模型。', 409) from None
+
+
+async def capability_self_test(settings):
+    """仅使用固定合成消息，逐项报告，失败不回显上游正文或密钥。"""
+    import asyncio
+    import json
+    from langchain_core.messages import HumanMessage, SystemMessage
+    checks = []
+    client = settings.client()
+    async def check(identifier, title, operation):
+        try:
+            await asyncio.wait_for(operation(), timeout=60)
+            checks.append({'id':identifier,'title':title,'supported':True,'message':'已通过合成检测'})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            checks.append({'id':identifier,'title':title,'supported':False,'message':'未通过，请检查模型能力、接口或额度'})
+    messages = [SystemMessage(content=load_text('connection/text-system.md')),
+                HumanMessage(content=load_text('connection/text-user.md'))]
+    async def text():
+        response = await client.ainvoke(messages)
+        if not isinstance(response.content,str) or not response.content.strip(): raise ValueError()
+    async def structured():
+        response = await client.ainvoke([HumanMessage(content=load_text('connection/structured-user.md'))])
+        if json.loads(response.content) != {'ok':True}: raise ValueError()
+    async def tools():
+        await tool_call_self_test(settings)
+    async def streaming():
+        received = False
+        async for chunk in client.astream(messages):
+            if isinstance(chunk.content,str) and chunk.content: received = True
+        if not received: raise ValueError()
+    for args in [('text','文本生成',text),('structured','结构化 JSON',structured),
+                 ('tools','工具调用',tools),('streaming','流式输出协议',streaming)]:
+        await check(*args)
+    return {'checks':checks,'message':'检测仅使用合成消息；流式协议通过不代表实际网络始终逐字到达。'}

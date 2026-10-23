@@ -141,6 +141,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def status():
         return app.state.repository.status()
 
+    @app.get('/api/v1/library/reader-search')
+    def reader_search(q: str = Query(min_length=1, max_length=20000), recording_id: str | None = None,
+                      offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)):
+        from interview_backend.services.reader_search import search
+        return search(app.state.database, q, recording_id, offset, limit)
+
     @app.get('/api/v1/tools')
     def tools(include_disabled: bool = False):
         return {'items': app.state.tools.list(include_disabled)}
@@ -294,6 +300,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def test_tools():
         from interview_backend.agent.models import ModelSettings, tool_call_self_test
         return await tool_call_self_test(ModelSettings.load(settings.data_dir))
+
+    from interview_backend.agent.models import ModelSettings
+    @app.post('/api/v1/models/test-capabilities')
+    async def test_capabilities(body: ModelSettings):
+        from urllib.parse import urlsplit
+        from interview_backend.agent.models import capability_self_test
+        parsed = urlsplit(body.base_url.strip())
+        if parsed.scheme not in {'http','https'} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or not body.model.strip():
+            raise DomainError('invalid_request','请输入有效的模型接口与名称。',422)
+        return await capability_self_test(body)
 
     @app.get('/api/v1/sources/{kind}/{identifier}')
     def resolve_source(kind: str, identifier: str, revision: int = Query(..., ge=1), line: int = Query(1, ge=1), historical: bool = False, block_id: str | None = None):

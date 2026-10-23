@@ -49,7 +49,7 @@ struct ChangeHistoryView: View {
                                     .disabled(model.busy || change.state != "committed")
                             }
                             ForEach(Array((change.items ?? []).enumerated()), id: \.offset) { _, item in
-                                Text(ChangeDifference.describe(item)).font(.caption).textSelection(.enabled)
+                                ChangeDifferenceView(item: item)
                             }
                         }.padding(12).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
                     }
@@ -58,6 +58,52 @@ struct ChangeHistoryView: View {
             }
             if let error = model.error { Text(error).foregroundStyle(.red).font(.caption) }
         }.padding(22).frame(minWidth: 620, minHeight: 440).task { await model.load() }
+    }
+}
+
+struct TextChangeSpan: Equatable {
+    let prefix: String; let removed: String; let inserted: String; let suffix: String
+    init(before: String, after: String) {
+        let a = Array(before), b = Array(after)
+        var leading = 0
+        while leading < min(a.count, b.count), a[leading] == b[leading] { leading += 1 }
+        var trailing = 0
+        while trailing < min(a.count, b.count) - leading, a[a.count-1-trailing] == b[b.count-1-trailing] { trailing += 1 }
+        prefix = String(a.prefix(leading)); suffix = String(a.suffix(trailing))
+        removed = String(a[leading..<(a.count-trailing)])
+        inserted = String(b[leading..<(b.count-trailing)])
+    }
+}
+
+struct ChangeDifferenceView: View {
+    let item: BackendJSONValue
+    var onOpen: ((AssistantReference) -> Void)? = nil
+    private var textChange: (String, String)? {
+        guard case .object(let row) = item, case .object(let before) = row["before"], case .object(let after) = row["after"] else { return nil }
+        for key in ["edited", "content", "title"] where before[key] != after[key] {
+            let a = (before[key] == .null ? nil : before[key]?.stringValue) ?? (key == "edited" ? before["original"]?.stringValue : nil) ?? ""
+            let b = (after[key] == .null ? nil : after[key]?.stringValue) ?? (key == "edited" ? after["original"]?.stringValue : nil) ?? ""
+            return (a, b)
+        }
+        return nil
+    }
+    private var reference: AssistantReference? {
+        guard case .object(let row) = item, let kind = row["resource_type"]?.stringValue,
+              let id = row["resource_id"]?.stringValue, let revision = row["after_revision"]?.doubleValue else { return nil }
+        return .init(resourceType: kind, resourceID: id, revision: Int(revision), line: nil, historical: nil, blockID: nil)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let (before, after) = textChange {
+                let span = TextChangeSpan(before: before, after: after)
+                Text("修改前").foregroundStyle(.secondary)
+                (Text(span.prefix) + Text(span.removed).foregroundColor(.red).strikethrough() + Text(span.suffix)).textSelection(.enabled)
+                Text("修改后").foregroundStyle(.secondary)
+                (Text(span.prefix) + Text(span.inserted).foregroundColor(accent).bold() + Text(span.suffix)).textSelection(.enabled)
+            } else { Text(ChangeDifference.describe(item)).textSelection(.enabled) }
+            if let onOpen, let reference { Button("定位这处修改") { onOpen(reference) }.buttonStyle(.link) }
+        }.font(.caption).padding(10).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

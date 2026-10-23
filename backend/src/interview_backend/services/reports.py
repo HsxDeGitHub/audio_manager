@@ -51,6 +51,9 @@ class ReportService:
                 failed.append({'id': recording['id'], 'title': recording['title'], 'reason': '转写或处理未完成'}); continue
             child = {**frozen['contexts'][recording['id']], 'root_run_id': run_id,
                      'conversation_history':parent.get('conversation_history',[]), 'history_omitted':parent.get('history_omitted',False)}
+            if parent.get('task_intent'):
+                child['task_intent'] = {**parent['task_intent'], 'reading':'full'}
+                child['intent_policy'] = parent.get('intent_policy')
             try:
                 if any(not self.evidence.valid_after_changes(r, self.evidence.committed(run_id)) for r in child['resources']):
                     raise DomainError('stale_context', '周目标内容已变化，请基于当前资料重新执行。', 409)
@@ -74,5 +77,14 @@ class ReportService:
         if batch.targets and failed: raise DomainError('incomplete_batch','批量目标尚未全部完成，整次修改未提交。',409)
         from interview_backend.agent.finalization import finalize
         aggregate={**parent,'resources':read_resources,'sources':[s for child in frozen['contexts'].values() for s in child.get('sources',[])]}
+        if len(items) > 1 and parent.get('task_intent') and not parent.get('allow_write'):
+            from interview_backend.agent.synthesis import synthesize
+            summary = await synthesize(engine, run_id, instruction, aggregate,
+                [item['result'] for item in items], model, emit)
+            if summary:
+                result['answer'] = description + '\n\n' + summary['answer']
+                result['claims'] = summary['claims']
+                if failed or plan['excluded']:
+                    result['answer'] += '\n\n未纳入或未完成：\n' + '\n'.join(f"{r['title']}：{r['reason']}" for r in failed + plan['excluded'])
         result=await finalize(engine,run_id,result,aggregate,batch,emit) if hasattr(engine,'registry') else result
         return result

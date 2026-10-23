@@ -19,6 +19,7 @@ class MessageContext(BaseModel):
     draft_id: str | None = None
     document_ids: list[str] = Field(default_factory=list)
     quotes: list[SelectedQuote] = Field(default_factory=list, max_length=20)
+    proposal_id: str | None = Field(default=None, max_length=200)
 
 
 from interview_backend.agent.permissions import ACTION_VERBS, action_allowed, action_permissions, write_permissions, transcript_organization
@@ -27,18 +28,20 @@ from interview_backend.agent.permissions import ACTION_VERBS, action_allowed, ac
 class EvidenceService:
     def __init__(self, database): self.database = database
 
-    def freeze(self, context, instruction):
+    def freeze(self, context, instruction, *, semantic=False):
         context = MessageContext.model_validate(context)
         if context.draft_id:
             raise DomainError('draft_workflow_retired', '独立整理稿流程已停用，请选择转写正文；旧引用仍可回看。', 409)
-        mutation, importing = write_permissions(instruction)
-        organizing = transcript_organization(instruction)
+        # 新运行先冻结对象，语义分类完成前不授予写入或设备能力。
+        # 旧上下文继续使用原规则，恢复时不会被静默扩权。
+        mutation, importing = (False, False) if semantic else write_permissions(instruction)
+        organizing = False if semantic else transcript_organization(instruction)
         if context.scope not in {'current', 'all'}:
             raise DomainError('invalid_scope', '资料范围不正确。', 422)
         with self.database.transaction() as c:
             recordings = [dict(r) for r in c.execute('SELECT * FROM recordings ORDER BY created_at,id')] if context.scope == 'all' else [require(c, 'recordings', context.recording_id)] if context.recording_id else []
             resources = []; excluded = []; sources = []; device_targets = []; cancel_tasks = []
-            if context.scope == 'current' and not recordings and not context.document_ids and not importing:
+            if not semantic and context.scope == 'current' and not recordings and not context.document_ids and not importing:
                 return {**context.model_dump(), 'resources': [], 'sources': [], 'excluded': [], 'allow_write': False, 'clarification': '请指定当前资料，或切换为全部资料。'}
             for recording in recordings:
                 from interview_backend.services.device_tasks import active_tasks
@@ -75,7 +78,7 @@ class EvidenceService:
             if re.search(r'这段|这一段|这句话', instruction) and not context.segment_ids and not context.quotes and not context.draft_id and len(sources) > 1:
                 return {**context.model_dump(), 'resources': resources, 'sources': sources, 'excluded': excluded, 'allow_write': False, 'clarification': '请引用要处理的段落，避免误改其他内容。'}
             # 内容编辑默认可用，显式只读关闭；设备动作仍单独判断。资料正文不参与判断。
-            actions = action_permissions(instruction)
+            actions = [] if semantic else action_permissions(instruction)
             from interview_backend.agent.permissions import command_text
             command=command_text(instruction)
             if '整理' in command and not re.search('转写|识别',command):cancel_tasks=[t for t in cancel_tasks if t['task_type']=='organize']
@@ -83,6 +86,7 @@ class EvidenceService:
             device = any(a.startswith(('device.', 'jobs.')) for a in actions)
             external = any(a.startswith('mcp.') for a in actions)
             frozen = {**context.model_dump(), 'resources': resources,
+                    'scope_title': '、'.join([r['title'] for r in recordings] + [r['title'] for r in document_rows])[:240] or '未选择资料',
                     'write_resources': [r for r in resources if r['resource_type'] == 'segment'] if organizing else list(resources),
                     'transcript_organization': organizing, 'write_field_limits': {'segment': ['text']} if organizing else {},
                     'sources': sources, 'excluded': excluded, 'allow_write': mutation,

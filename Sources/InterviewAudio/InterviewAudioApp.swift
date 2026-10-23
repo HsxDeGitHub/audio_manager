@@ -5,6 +5,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
     var reopenWindow: (() -> Void)?
+    private var terminating = false
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -15,8 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        model?.shutdown()
-        return .terminateNow
+        guard !terminating else { return .terminateLater }; terminating = true
+        Task { @MainActor in await model?.shutdown(); NSApp.reply(toApplicationShouldTerminate: true) }
+        return .terminateLater
     }
 }
 
@@ -39,8 +41,8 @@ struct InterviewAudioApp: App {
             }
             CommandGroup(after: .undoRedo) {
                 Divider()
-                Button(model.undoLabel.map { "撤销校对：" + $0 } ?? "撤销校对修改") { model.undoEdit() }.disabled(model.undoLabel == nil).keyboardShortcut("z", modifiers: [.command, .option])
-                Button(model.redoLabel.map { "重做校对：" + $0 } ?? "重做校对修改") { model.undoEdit(redo: true) }.disabled(model.redoLabel == nil).keyboardShortcut("z", modifiers: [.command, .option, .shift])
+                Button(model.undoLabel.map { "撤销校对：" + $0 } ?? "撤销校对修改") { Task { await model.undoEdit() } }.disabled(model.undoLabel == nil).keyboardShortcut("z", modifiers: [.command, .option])
+                Button(model.redoLabel.map { "重做校对：" + $0 } ?? "重做校对修改") { Task { await model.undoEdit(redo: true) } }.disabled(model.redoLabel == nil).keyboardShortcut("z", modifiers: [.command, .option, .shift])
             }
             CommandGroup(replacing: .newItem) {
                 Button("导入音频…") { model.pickFiles() }.keyboardShortcut("o")

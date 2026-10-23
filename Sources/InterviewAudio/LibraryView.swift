@@ -8,10 +8,14 @@ import AudioCore
 struct LibraryView: View {
     @ObservedObject var model: AppModel
     @AppStorage("assistant.visible") private var assistantVisible = false
+    @AppStorage("library.sidebarHidden") private var sidebarHidden = false
+    @UIState private var compactNavigation = false
+    @UIState private var showNavigation = false
     @UIState private var removeID: String?
     @UIState private var renaming: Recording?
     @UIState private var metadataRecording: Recording?
     @UIState private var nameDraft = ""
+    @UIState private var renamingSaving = false
     @FocusState private var searchFocused: Bool
     @ObservedObject private var installer: ModelInstaller
     init(model: AppModel) { self.model = model; installer = model.installer }
@@ -24,21 +28,21 @@ struct LibraryView: View {
             }
             Divider()
             AssistantWorkspace(visible: assistantVisible) {
-                HSplitView {
+                GeometryReader { area in
                     Group {
-                        if model.searchText.isEmpty { sidebar }
-                        else {
-                            VStack(spacing: 0) {
-                                HStack {
-                                    Button { model.searchText = "" } label: { Label("资料库", systemImage: "chevron.left") }
-                                    Spacer()
-                                    Button("返回原位置") { Task { await model.returnFromSearch() } }.disabled(!model.hasSearchOrigin)
-                                }.font(.caption).padding(12)
-                                searchResults
+                        if !sidebarHidden && area.size.width >= 900 {
+                            HSplitView {
+                                navigationPane.frame(minWidth: 220, idealWidth: 248, maxWidth: 280)
+                                detail.frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
                             }
+                        } else {
+                            // 不保留只剩一个子视图的原生分栏，避免其沿用旧阅读宽度。
+                            detail.frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
-                    }.frame(minWidth: 220, idealWidth: 248, maxWidth: 280)
-                    detail.frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .frame(width: area.size.width, height: area.size.height)
+                    .onAppear { compactNavigation = area.size.width < 900 }
+                    .onChange(of: area.size.width) { _, width in compactNavigation = width < 900 }
                 }
             } assistant: {
                 AssistantView(model: model, assistant: model.assistant)
@@ -46,7 +50,7 @@ struct LibraryView: View {
         }
         .tint(accent)
         .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(isPresented: $model.showChangeHistory) { ChangeHistoryView(model: model.changeHistory, onChange: { model.reload() }) }
+        .sheet(isPresented: $model.showChangeHistory) { ChangeHistoryView(model: model.changeHistory, onChange: { Task { await model.reload() } }) }
         .sheet(isPresented: Binding(get: { model.historicalSource != nil }, set: { if !$0 { model.historicalSource = nil } })) {
             if let source = model.historicalSource {
                 VStack(alignment: .leading, spacing: 14) {
@@ -65,7 +69,7 @@ struct LibraryView: View {
                 Text("重命名音频").font(.headline)
                 TextField("音频名称", text: $nameDraft).textFieldStyle(.roundedBorder)
                 Text("只修改资料库中的名称。").font(.caption).foregroundStyle(.secondary)
-                HStack { Spacer(); Button("取消") { renaming = nil }.keyboardShortcut(.cancelAction); Button("保存") { model.renameRecording(recording.id, name: nameDraft); renaming = nil }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(nameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+                HStack { Spacer(); Button("取消") { renaming = nil }.keyboardShortcut(.cancelAction); Button(renamingSaving ? "保存中…" : "保存") { renamingSaving = true; Task { defer { renamingSaving = false }; if await model.renameRecording(recording.id, name: nameDraft) { renaming = nil } } }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction).disabled(renamingSaving || nameDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
             }.padding(24).frame(width: 420)
         }
         .sheet(item: $metadataRecording) { recording in
@@ -87,9 +91,9 @@ struct LibraryView: View {
             Button("好", role: .cancel) { model.alert = nil }
         } message: { Text(model.alert ?? "") }
         .confirmationDialog("从资料库移除录音？", isPresented: Binding(get: { removeID != nil }, set: { if !$0 { removeID = nil } }), titleVisibility: .visible) {
-            Button("移除记录", role: .destructive) { if let id = removeID { model.remove(id) }; removeID = nil }
+            Button("移除记录", role: .destructive) { if let id = removeID { Task { await model.remove(id) } }; removeID = nil }
         } message: { Text("仅移除转写和应用记录，原音频文件会保留。") }
-        .onChange(of: model.searchText) { _, _ in model.refreshSearch() }
+        .onChange(of: model.searchText) { _, text in model.refreshSearch(); if compactNavigation && !text.isEmpty { showNavigation = true } }
         .onChange(of: model.searchAll) { _, _ in model.refreshSearch() }
         .onChange(of: model.searchFocusRequestID) { _, _ in searchFocused = true }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
@@ -108,6 +112,11 @@ struct LibraryView: View {
     }
     private var header: some View {
         HStack(spacing: 16) {
+            Button {
+                if compactNavigation { showNavigation.toggle() } else { sidebarHidden.toggle() }
+            } label: { Image(systemName: "sidebar.left") }
+                .help("资料与搜索").accessibilityLabel("显示或收起资料导航")
+                .popover(isPresented: $showNavigation) { navigationPane.frame(width: 280, height: 540) }
             Image(systemName: "waveform.circle.fill").font(.system(size: 30)).foregroundStyle(accent)
             VStack(alignment: .leading, spacing: 2) {
                 Text("听阅").font(.system(size: 17, weight: .semibold))
@@ -138,6 +147,19 @@ struct LibraryView: View {
                 .menuStyle(.borderlessButton).fixedSize().help("模型设置").accessibilityLabel("模型设置")
         }.padding(.horizontal, 24).padding(.vertical, 15)
     }
+    private var navigationPane: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button { model.librarySection = .audio } label: { Label("音频", systemImage: "waveform") }
+                    .buttonStyle(.bordered).tint(model.librarySection == .audio ? accent : .secondary)
+                Button { model.librarySection = .documents; model.searchText = ""; showNavigation = false } label: { Label("个人材料", systemImage: "doc.text") }
+                    .buttonStyle(.bordered).tint(model.librarySection == .documents ? accent : .secondary)
+            }.controlSize(.small).padding(12)
+            Divider()
+            if model.searchText.isEmpty { sidebar }
+            else { searchResults }
+        }
+    }
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -162,7 +184,7 @@ struct LibraryView: View {
                         if !model.recordings.isEmpty { Button("清除筛选") { model.libraryTitleFilter = ""; model.setLibraryFilter(.all) }.font(.caption) }
                     }
                     ForEach(model.visibleRecordings) { recording in
-                        Button { Task { await model.select(recording.id) } } label: {
+                        Button { model.librarySection = .audio; showNavigation = false; Task { await model.select(recording.id) } } label: {
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "waveform").font(.system(size: 16)).foregroundStyle(accent).padding(.top, 3)
                                 VStack(alignment: .leading, spacing: 7) {
@@ -183,8 +205,8 @@ struct LibraryView: View {
                                 Button("重命名…") { nameDraft = recording.title; renaming = recording }
                                 Button("资料信息…") { metadataRecording = recording }
                                 Divider()
-                                Button("转写 / 重试") { model.enqueue(recording.id) }
-                                if recording.state.isRunning || recording.state == .queued { Button("取消任务") { model.cancel(recording.id) } }
+                                Button("转写 / 重试") { Task { await model.enqueue(recording.id) } }
+                                if recording.state.isRunning || recording.state == .queued { Button("取消任务") { Task { await model.cancel(recording.id) } } }
                                 Divider()
                                 Button("从资料库移除…", role: .destructive) { removeID = recording.id }
                             }
@@ -193,7 +215,7 @@ struct LibraryView: View {
             }
             Divider()
             VStack(alignment: .leading, spacing: 10) {
-                Button("转写全部待处理录音") { model.enqueuePending() }.disabled(model.recordings.allSatisfy { $0.state != .idle })
+                Button("转写全部待处理录音") { Task { await model.enqueuePending() } }.disabled(model.recordings.allSatisfy { $0.state != .idle })
                 if let selected = model.selected {
                     Button("编辑「\(selected.title)」资料信息…") { metadataRecording = selected }.font(.caption)
                 }
@@ -223,7 +245,9 @@ struct LibraryView: View {
                     Button { Task { await model.returnFromSearch() } } label: { Label("返回搜索前的位置", systemImage: "arrow.uturn.backward") }
                 }
             }.font(.system(size: 12)).foregroundStyle(.secondary).padding(15)
-            if model.hits.isEmpty {
+            if model.searchLoading && model.hits.isEmpty {
+                VStack(spacing: 12) { ProgressView(); Text("正在搜索资料…").font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if model.hits.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "text.magnifyingglass").font(.largeTitle).foregroundStyle(.tertiary)
                     Text("没有找到相关内容").foregroundStyle(.secondary)
@@ -244,6 +268,10 @@ struct LibraryView: View {
                                 .id(hit.id)
                             Divider().padding(.horizontal, 15)
                         }
+                        if model.searchHasMore {
+                            Button(model.searchLoading ? "正在加载…" : "加载更多结果") { Task { await model.loadMoreSearch() } }
+                                .disabled(model.searchLoading).padding(12)
+                        }
                     }
                 }.onChange(of: model.activeHitID) { _, id in if let id { proxy.scrollTo(id, anchor: .center) } }
                 }
@@ -252,7 +280,9 @@ struct LibraryView: View {
     }
     private var detail: some View {
         Group {
-            if let recording = model.selected {
+            if model.librarySection == .documents, let client = model.backendClient {
+                DocumentsView(app: model, client: client, embedded: true)
+            } else if let recording = model.selected {
                 TranscriptView(model: model, player: model.player, recording: recording)
             } else {
                 VStack(spacing: 20) {
@@ -299,8 +329,8 @@ struct SpeakerNameField: View {
         HStack {
             Text(SpeakerMatcher.defaultName(speaker)).font(.caption).frame(width: 65, alignment: .leading)
             TextField("名称", text: $value).textFieldStyle(.roundedBorder)
-                .onSubmit { model.renameSpeaker(speaker, name: value) }
-            Button("保存") { model.renameSpeaker(speaker, name: value) }
+                .onSubmit { Task { await model.renameSpeaker(speaker, name: value) } }
+            Button("保存") { Task { await model.renameSpeaker(speaker, name: value) } }
         }.onAppear { value = model.speakerName(speaker) }.onChange(of: model.names[speaker]) { _, _ in value = model.speakerName(speaker) }
     }
 }
@@ -335,7 +365,7 @@ struct ModelSettingsView: View {
                 Button("更换…") { Task { await model.chooseModelsDirectory() } }.disabled(installer.busy || model.activeJobID != nil)
             }
             if !installer.valid.contains(ModelSpec.punctuation.id), !installer.busy {
-                Button("下载智能标点模型（可选）") { Task { await installer.download(directory: model.modelsDirectory, specs: [ModelSpec.punctuation]); model.refreshPunctuation() } }.disabled(model.activeJobID != nil)
+                Button("下载智能标点模型（可选）") { Task { await installer.download(directory: model.modelsDirectory, specs: [ModelSpec.punctuation]); Task { await model.refreshPunctuation() } } }.disabled(model.activeJobID != nil)
             }
             if installer.busy {
                 if let progress = installer.progress { ProgressView(value: progress); Text("\(Int(progress * 100))%").font(.caption.monospacedDigit()) }
@@ -350,7 +380,7 @@ struct ModelSettingsView: View {
                     Button("下载缺少的模型") { Task { await installer.download(directory: model.modelsDirectory) } }.buttonStyle(.borderedProminent).disabled(model.activeJobID != nil)
                 }
                 Spacer()
-                Button(installer.ready ? "完成" : "稍后设置") { dismiss(); model.refreshPunctuation(); if installer.ready { model.enqueuePending() } }.keyboardShortcut(.defaultAction)
+                Button(installer.ready ? "完成" : "稍后设置") { dismiss(); Task { await model.refreshPunctuation() }; if installer.ready { Task { await model.enqueuePending() } } }.keyboardShortcut(.defaultAction)
             }
         }.padding(28).frame(width: 610)
     }

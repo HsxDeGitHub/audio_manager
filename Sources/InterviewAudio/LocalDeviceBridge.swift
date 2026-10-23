@@ -146,7 +146,7 @@ final class DeviceBridge {
                 await app.select(recordingID)
                 guard app.selectedID == recordingID, let runID = command.arguments["run_id"]?.stringValue,
                       app.runs.contains(where: { $0.id == runID }) else { throw DeviceBridgeError.failed("资料或转写版本不存在。") }
-                if app.selected?.activeRun != runID { app.switchRun(runID) }
+                if app.selected?.activeRun != runID { await app.switchRun(runID) }
                 guard app.selected?.activeRun == runID else { throw DeviceBridgeError.failed("转写版本切换失败。") }
                 var position = command.arguments["start"]?.doubleValue
                 if let segmentID = command.arguments["segment_id"]?.stringValue {
@@ -176,7 +176,7 @@ final class DeviceBridge {
 
             case "transcribe":
                 guard let recordingID = command.arguments["recording_id"]?.stringValue else { return ("failed", ["message": "缺少资料标识。"]) }
-                let taskID = app.enqueue(recordingID)
+                let taskID = await app.enqueue(recordingID)
                 let receipt = try DeviceExecutionResult.started(taskID: taskID, state: app.activeRecordingID == recordingID ? "started" : "queued",
                     statusPath: taskID.map { "/api/v1/jobs/\($0)" } ?? "")
                 return ("completed", receipt)
@@ -317,7 +317,7 @@ enum DeviceExecutionResult {
 
 extension AppModel {
     func cancelDeviceTask(recordingID: String, taskID: String, taskType: String) async throws -> [String: Any] {
-        if taskType == "audio", cancelAudioTask(recordingID: recordingID, taskID: taskID) {
+        if taskType == "audio", await cancelAudioTask(recordingID: recordingID, taskID: taskID) {
             return ["state": "cancelling", "task_id": taskID, "task_type": taskType]
         }
         guard let backendClient else { throw BackendClientError.unavailable }

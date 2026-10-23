@@ -25,6 +25,30 @@ class AgentEngine:
     def __init__(self, settings, registry, evidence):
         self.settings, self.registry, self.evidence = settings, registry, evidence
 
+    async def prepare_context(self, run_id, context, emit=None):
+        from interview_backend.agent.intent import resolve, apply
+        from interview_backend.agent.work import WorkLog
+        # 无法定位资料或存在选区歧义时保留服务端澄清，先不发送资料。
+        if context.get('clarification'):
+            return context
+        if emit:
+            await emit('task_stage', {'message': '正在理解任务与操作限制…'})
+        work = WorkLog(self.evidence.database, run_id)
+        intent = work.get('task_intent')
+        if intent is None:
+            intent = await resolve(self.settings, self.registry, context, getattr(self, 'intent_model', None))
+            work.save('task_intent', intent)
+        value = apply(context, intent)
+        selected = context.get('proposal_id') or intent.get('proposal_id')
+        if selected and intent['mode'] == 'edit':
+            from interview_backend.agent.proposals import select
+            value = select(self.evidence, value, selected)
+        if intent['reading'] == 'weekly' and hasattr(self, 'reports'):
+            value['report_plan'] = self.reports.freeze(value, context['instruction'])
+        if emit:
+            await emit('task_stage', {'message': '任务范围已确定，正在读取资料…'})
+        return value
+
     async def execute(self, run_id, instruction, context, model=None, emit=None, change_plan=None):
         from langgraph.graph import StateGraph, START, END
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -34,7 +58,8 @@ class AgentEngine:
         if finalization is not None: return await resume(self,run_id,finalization,emit)
         if context.get('clarification'):
             return {'answer': context['clarification'], 'clarification': context['clarification'], 'claims': [], 'coverage': {'total': 0, 'covered': 0, 'excluded': context.get('excluded', [])}}
-        if hasattr(self, 'reports') and not context.get('report_subtask') and re.search(r'本周|这周|周报', instruction):
+        weekly = context.get('task_intent', {}).get('reading') == 'weekly' if context.get('task_intent') else bool(re.search(r'本周|这周|周报', instruction))
+        if hasattr(self, 'reports') and not context.get('report_subtask') and weekly:
             return await self.reports.render(run_id, instruction, self, emit=emit, context=context, model=model)
         if model is None:
             model = ModelSettings.load(self.settings.data_dir).client()
@@ -79,7 +104,8 @@ class AgentEngine:
         bound = model.bind_tools(tools) if tools else model
         configuration={'model':getattr(model,'model_name',type(model).__qualname__),'tools':[(t.name,t.args_schema.model_json_schema()) for t in tools]}
         sources = context.get('sources', [])
-        full = context.get('allow_write') or bool(re.search(r'全部|所有|本周|周报',instruction))
+        strategy = context.get('task_intent', {}).get('reading')
+        full = strategy in {'selection', 'full', 'weekly'} if strategy else context.get('allow_write') or bool(re.search(r'全部|所有|本周|周报',instruction))
         if hasattr(self,'retrieval') and not full and sources:
             allowed = {(r['resource_type'],r['resource_id']) for r in context['resources']}
             hits = await asyncio.to_thread(self.retrieval.search,instruction,8,allowed)
@@ -119,7 +145,7 @@ class AgentEngine:
         initial_dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources]
         initial_dependencies += [{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in live_memories()]
         coverage=Coverage(work,chunks,context.get('excluded',[]),initial_dependencies,configuration)
-        answers = []; claims = []; targets = []; covered = set(); model_questions = []
+        answers = []; claims = []; targets = []; covered = set(); model_questions = []; proposals = []
         all_questions = bool(re.search(r'全部.*问题|所有.*问题|问题.*汇总|列出.*问题|哪些问题', instruction))
         for i, chunk in enumerate(chunks):
             await coverage.begin(i,chunk,emit)
@@ -136,7 +162,7 @@ class AgentEngine:
                             context['resources'].append(reference); known.add(key)
             current_scope=[r for r in context['resources'] if self.evidence.valid_after_changes(r,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []))]
             dependencies=[{k:r[k] for k in ('resource_type','resource_id','revision')} for r in sources]+[{'resource_type':'memory','resource_id':m['id'],'revision':m['revision']} for m in memory]
-            prompt = {'conversation_history':context.get('conversation_history',[]), 'history_omitted':context.get('history_omitted',False), 'selected_quotes':context.get('quotes',[]), 'device_tasks':context.get('cancel_tasks',[]), 'current_valid_memories': memory, 'instruction': instruction, 'scope': current_scope, 'untrusted_evidence': chunk,
+            prompt = {'selected_proposal':context.get('selected_proposal'), 'pending_proposals':context.get('pending_proposals',[]), 'task_intent':context.get('task_intent'), 'conversation_history':context.get('conversation_history',[]), 'history_omitted':context.get('history_omitted',False), 'selected_quotes':context.get('quotes',[]), 'device_tasks':context.get('cancel_tasks',[]), 'current_valid_memories': memory, 'instruction': instruction, 'scope': current_scope, 'untrusted_evidence': chunk,
                       'allow_write': context.get('allow_write', False), 'transcript_organization': context.get('transcript_organization', False), 'chunk': i+1, 'chunks': len(chunks)}
             try:
                 messages = [SystemMessage(content=SYSTEM), HumanMessage(content=encode(prompt))]
@@ -252,12 +278,22 @@ class AgentEngine:
                 result['questions']=chunk_questions
                 model_questions += chunk_questions
             answers.append(result['answer']); claims += result['claims']
+            proposals += result.get('proposals') or []
             covered.update((s['resource_type'], s['resource_id']) for s in chunk)
             await coverage.complete(chunk,result,context,dependencies,emit)
         for source in sources:
             if not self.evidence.valid_after_changes(source, self.evidence.committed(run_id)):
                 raise DomainError('stale_source', '运行中资料发生变化，请基于当前版本重新执行。', 409)
         result = {'answer': '\n\n'.join(answers), 'claims': claims, 'coverage':coverage.snapshot()}
+        if proposals:
+            from interview_backend.agent.proposals import prepare
+            result['proposals'] = prepare(self.evidence, run_id, proposals, context)
+        if len(answers) > 1 and context.get('task_intent') and not context.get('allow_write'):
+            from interview_backend.agent.synthesis import synthesize
+            summary = await synthesize(self, run_id, instruction, context,
+                [{'answer': answer, 'claims': claims if i == 0 else []} for i, answer in enumerate(answers)], model, emit)
+            if summary:
+                result.update(summary)
         if all_questions:
             # 标点问句做确定性兜底；模型识别结果必须再核对来源，未标点的真实录音也能进入清单。
             deterministic = [{'text': s['text'].strip(), 'source': {k: s[k] for k in ('resource_type','resource_id','revision')}, 'start': s.get('start')}
@@ -284,7 +320,8 @@ class AgentEngine:
                         merged[key] = {'text': text.strip()[:2000], 'source': {k: reference[k] for k in ('resource_type','resource_id','revision')}, 'start': start}
             result['questions'] = sorted(merged.values(), key=lambda q: (q.get('start') is None, q.get('start') or 0, q['source']['resource_id']))
         if result.get('questions'):
-            result['answer'] += '\n\n原文问题清单：\n' + '\n'.join(f"{i+1}. {q['text']}" for i,q in enumerate(result['questions']))
+            if not context.get('task_intent'):
+                result['answer'] += '\n\n原文问题清单：\n' + '\n'.join(f"{i+1}. {q['text']}" for i,q in enumerate(result['questions']))
             deterministic_keys = {(re.sub(r'[\W_]+', '', q['text']), q['source']['resource_id']) for q in deterministic}
             result['claims'] += [{'text':q['text'],'kind':'original_statement','sources':[q['source']]}
                                  for q in result['questions'] if (re.sub(r'[\W_]+', '', q['text']), q['source']['resource_id']) in deterministic_keys]

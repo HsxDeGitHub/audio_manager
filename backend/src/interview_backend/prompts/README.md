@@ -4,6 +4,9 @@
 
 | 文件 | 用途 | 调用位置 |
 | --- | --- | --- |
+| `agent/intent.md` | 本轮任务、编辑限制、设备动作和读取策略的语义分类 | `agent/intent.py` |
+| `agent/synthesis.md` | 分块及跨面试综合，拒绝新来源和写入 | `agent/synthesis.py` |
+| `connection/structured-user.md` | 仅合成 JSON 能力检测 | `agent/models.py` |
 | `agent/system.md` | 听阅助手的事实、来源、修改、工具与输出规则 | `agent/graph.py` |
 | `agent/text-edit-result.md` | 仅口头登记修改时补取可执行正文目标 | `agent/graph.py` |
 | `memory/extract.md` | 从当前用户陈述提取个人事实与偏好 | `agent/memory.py` |

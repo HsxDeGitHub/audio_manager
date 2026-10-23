@@ -507,7 +507,7 @@ private func bodyData(_ request: URLRequest) -> Data? {
     @MainActor func successfulBackendDeathIsDetectedAndRetryRebindsState() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("backend-reconnect-\(UUID().uuidString)")
         let app = AppModel(dataDirectoryOverride: root)
-        defer { app.shutdown(); try? FileManager.default.removeItem(at: root) }
+        defer { await app.shutdown(); try? FileManager.default.removeItem(at: root) }
         do {
             let store = try LibraryStore(url: root.appendingPathComponent("library.sqlite"))
             try store.save(Recording(id: "reconnect-r", title: "合成重连", path: "/synthetic.wav", fingerprint: "synthetic", duration: 3))
@@ -530,7 +530,7 @@ private func bodyData(_ request: URLRequest) -> Data? {
         let job: AssistantAcknowledgment = try await reconnected.send("/api/v1/jobs/reconnect-job")
         #expect(job.state == "interrupted")
         #expect(try app.store?.recordings().first?.title == "合成重连")
-        app.shutdown()
+        await app.shutdown()
         #expect(!app.backendUnavailable)
     }
 
@@ -585,7 +585,7 @@ private func bodyData(_ request: URLRequest) -> Data? {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let app = AppModel(dataDirectoryOverride: root)
-        #expect(app.enqueue("absent") == nil)
+        #expect(await app.enqueue("absent") == nil)
         var recording = Recording(title: "合成", path: "/synthetic/unavailable.wav", fingerprint: "synthetic", duration: 5)
         recording.activeRun = "synthetic-run"; app.recordings = [recording]; app.selectedID = recording.id
     }

@@ -37,18 +37,29 @@ final class DocumentsModel: ObservableObject {
             await load()
         } catch { self.error = error.localizedDescription; await load() }
     }
+    func save(_ item: BackendDocument, title: String, content: String) async throws {
+        let receipt = try await client.updateDocument(id: item.id, revision: item.revision,
+            fields: ["title": title, "content": content], operationID: UUID().uuidString)
+        history?.record(receipt); await load()
+    }
+    func latest(_ id: String) async throws -> BackendDocument {
+        let values = try await client.documents()
+        guard let item = values.first(where: { $0.id == id }) else { throw BackendClientError.notFound }
+        return item
+    }
 }
 
 struct DocumentsView: View {
     @ObservedObject var app: AppModel
+    let embedded: Bool
     @StateObject private var model: DocumentsModel
     @UIState private var selectedID: String?
     @UIState private var editing: BackendDocument?
     @UIState private var removing: BackendDocument?
     @UIState private var showHistory = false
     @Environment(\.dismiss) private var dismiss
-    init(app: AppModel, client: BackendClient) {
-        self.app = app
+    init(app: AppModel, client: BackendClient, embedded: Bool = false) {
+        self.app = app; self.embedded = embedded
         _model = StateObject(wrappedValue: DocumentsModel(client: client, history: app.changeHistory))
     }
     private var selected: BackendDocument? { model.items.first { $0.id == selectedID } }
@@ -83,18 +94,20 @@ struct DocumentsView: View {
                         DocumentSelectionText(text: item.content, line: app.documentSourceID == item.id ? app.documentSourceLine : 1) { range in attach(item, range: range) }
                             .id(item.id)
                     } else { Text("导入或选择一份个人材料。").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
-                }.padding(12).frame(minWidth: 420)
+                }.padding(12).frame(minWidth: embedded ? 280 : 420)
             }
             if model.busy { ProgressView().controlSize(.small) }
             if let notice = model.notice { Text(notice).font(.caption).foregroundStyle(.secondary) }
             if let error = model.error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
-            HStack { Spacer(); Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction) }
-        }.padding(20).frame(minWidth: 740, minHeight: 500)
+            HStack { Spacer(); if !embedded { Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction) } }
+        }.padding(20).frame(minWidth: embedded ? 520 : 740, minHeight: 500)
         .task { await model.load(); selectedID = app.documentSourceID ?? model.items.first?.id }
         .onChange(of: app.documentSourceID) { _, id in selectedID = id }
-        .sheet(isPresented: $showHistory) { ChangeHistoryView(model: app.changeHistory, onChange: { Task { await model.load() }; app.reload() }) }
+        .sheet(isPresented: $showHistory) { ChangeHistoryView(model: app.changeHistory, onChange: { Task { await model.load(); await app.reload() } }) }
         .sheet(item: $editing) { item in
-            DocumentEditor(item: item) { title, content in Task { await model.update(item, fields: ["title": title, "content": content]) } }
+            DocumentEditor(item: item, latest: { try await model.latest(item.id) }) { base, title, content in
+                try await model.save(base, title: title, content: content)
+            }
         }
         .confirmationDialog("移除这份材料？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
             Button("移除", role: .destructive) {
@@ -105,7 +118,7 @@ struct DocumentsView: View {
     }
     private func attach(_ item: BackendDocument, range: NSRange) {
         guard let quote = SelectedQuote.document(item, range: range) else { return }
-        if app.assistant.addQuote(quote) { dismiss() }
+        if app.assistant.addQuote(quote) { if !embedded { dismiss() } }
         else { model.error = app.assistant.error }
     }
     private func importFile() {
@@ -119,13 +132,17 @@ struct DocumentsView: View {
 }
 
 private struct DocumentEditor: View {
-    let item: BackendDocument
-    let save: (String, String) -> Void
+    let latest: () async throws -> BackendDocument
+    let save: (BackendDocument, String, String) async throws -> Void
+    @UIState private var base: BackendDocument
+    @UIState private var current: BackendDocument?
+    @StateObject private var state = EditorSaveState()
     @UIState private var title: String
     @UIState private var content: String
     @Environment(\.dismiss) private var dismiss
-    init(item: BackendDocument, save: @escaping (String, String) -> Void) {
-        self.item = item; self.save = save
+    init(item: BackendDocument, latest: @escaping () async throws -> BackendDocument, save: @escaping (BackendDocument, String, String) async throws -> Void) {
+        self.latest = latest; self.save = save
+        _base = UIState(initialValue: item)
         _title = UIState(initialValue: item.title); _content = UIState(initialValue: item.content)
     }
     var body: some View {
@@ -133,11 +150,26 @@ private struct DocumentEditor: View {
             Text("编辑材料").font(.headline)
             TextField("名称", text: $title).textFieldStyle(.roundedBorder)
             TextEditor(text: $content).frame(minHeight: 260).border(Color.secondary.opacity(0.25))
+                .disabled(state.saving)
+            if let error = state.error { Text(error).font(.caption).foregroundStyle(.orange).textSelection(.enabled) }
+            if let current {
+                DisclosureGroup("当前已保存的版本 v\(current.revision)（你的输入已保留）") {
+                    ScrollView { Text(current.content).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }.frame(maxHeight: 120)
+                }.font(.caption)
+                Button("使用当前版本作为基准，保留输入继续编辑") { base = current; self.current = nil }.disabled(state.saving)
+            }
             HStack {
-                Spacer(); Button("取消") { dismiss() }
-                Button("保存") { save(title, content); dismiss() }.buttonStyle(.borderedProminent)
-                    .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if state.saving { ProgressView().controlSize(.small) }
+                Spacer(); Button("取消") { dismiss() }.disabled(state.saving)
+                Button("保存") {
+                    Task {
+                        if await state.commit({ try await save(base, title, content) }) { dismiss() }
+                        else { current = try? await latest() }
+                    }
+                }.buttonStyle(.borderedProminent)
+                    .disabled(state.saving || current != nil || title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }.padding(20).frame(width: 600)
+            .interactiveDismissDisabled(state.saving)
     }
 }
