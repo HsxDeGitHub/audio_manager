@@ -7,6 +7,7 @@ import re
 from typing import TypedDict
 from interview_backend.errors import DomainError
 from interview_backend.agent.models import ModelSettings
+from interview_backend.agent.text_edits import needs_edit_result, validate_edit_claims
 from interview_backend.prompt_catalog import load_text
 from interview_backend.services.common import encode
 
@@ -193,10 +194,22 @@ class AgentEngine:
                 content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content.strip())
                 result = json.loads(content)
                 if not isinstance(result.get('answer'), str) or not isinstance(result.get('claims'), list): raise ValueError()
+                if needs_edit_result(result, context, plan):
+                    # 不能把自然语言里的“已登记”当作修改操作。最多补取一次结构化目标。
+                    messages += [response, SystemMessage(content=load_text('agent/text-edit-result.md'))]
+                    model_key += ':edit-result'
+                    response = await work.model(model_key,model,messages,configuration,dependencies,emit=emit)
+                    content = response.content if isinstance(response.content,str) else ''.join(b.get('text','') for b in response.content if isinstance(b,dict))
+                    result = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', content.strip()))
+                    if response.tool_calls or not isinstance(result.get('answer'),str) or not isinstance(result.get('claims'),list): raise ValueError()
+                    if not result.get('targets') and not result.get('clarification') and not result.get('no_match'):
+                        work.discard(model_key)
+                        raise DomainError('edit_not_applied','正文尚未修改：模型没有返回可执行的修改内容。',409)
             except asyncio.CancelledError:
                 await coverage.fail(chunk,'cancelled',emit)
                 raise
             except DomainError:
+                work.discard(model_key)
                 await coverage.fail(chunk,'failed',emit)
                 raise
             except Exception:
@@ -206,8 +219,10 @@ class AgentEngine:
             if result.get('clarification'):
                 await coverage.fail(chunk,'pending',emit)
                 return {'answer':result['clarification'],'clarification':result['clarification'],'claims':[],'coverage':coverage.snapshot()}
-            try:self.evidence.validate_result({'claims':result['claims']},context,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []))
+            try:validate_edit_claims(self.evidence,result,context,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []),
+                                    list(plan.targets.values())+(result.get('targets') or []))
             except DomainError:
+                work.discard(model_key)
                 await coverage.fail(chunk,'failed',emit)
                 raise
             if result.get('targets') and not context.get('allow_write'):

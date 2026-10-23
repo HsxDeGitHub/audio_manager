@@ -2,6 +2,7 @@
 import copy
 from interview_backend.errors import DomainError
 from interview_backend.agent.work import WorkLog
+from interview_backend.agent.text_edits import text_only_targets, validate_edit_claims
 from interview_backend.tools.registry import ToolContext
 
 
@@ -45,6 +46,7 @@ async def resume(engine,run_id,payload,emit=None):
     if prior and prior['state']=='reverted': raise DomainError('reverted_operation','本次修改已撤销，未重复提交或执行后续步骤。',409)
     if any(not evidence.valid_after_changes(s,changes) for s in context.get('sources',[])):
         raise DomainError('stale_source','运行来源已有外部变化，请重新指定任务。',409)
+    validate_edit_claims(evidence,result,context,changes+([payload['preview']] if payload.get('preview') else []),request['targets'] if request else [])
     if request and not prior:
         evidence.validate_result(result,context,changes+([payload['preview']] if payload['preview'] else []))
         call=ToolContext(request_id=run_id,operation_id=request['operation_id'],allowed_effects=frozenset({'write'}),
@@ -76,5 +78,8 @@ async def resume(engine,run_id,payload,emit=None):
             raise DomainError('device_step_'+output['state'],'内容结果已保留；设备步骤'+{'cancelled':'已取消，可继续未完成步骤。','failed':'失败，请检查后继续。','unknown':'结果未知，请先核对实际状态，不会自动重放。'}.get(output['state'],'未完成。'),409)
     evidence.validate_result(result,context,changes)
     result.pop('incomplete',None)
+    if request and text_only_targets(request['targets']) and not steps:
+        count=sum(change['count'] for change in changes if change['state']=='committed')
+        result['answer']=f'已更新左侧正文 {count} 处，可在修改记录中撤销。'
     work.save('finalization_result',describe(result))
     return result

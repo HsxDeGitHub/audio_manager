@@ -5,6 +5,7 @@
 | 文件 | 用途 | 调用位置 |
 | --- | --- | --- |
 | `agent/system.md` | 听阅助手的事实、来源、修改、工具与输出规则 | `agent/graph.py` |
+| `agent/text-edit-result.md` | 仅口头登记修改时补取可执行正文目标 | `agent/graph.py` |
 | `memory/extract.md` | 从当前用户陈述提取个人事实与偏好 | `agent/memory.py` |
 | `connection/text-system.md` | 文本连接测试的系统消息 | `Sources/AudioCore/AIConnectionClient.swift` |
 | `connection/text-user.md` | 文本连接测试的用户消息 | 同上 |
