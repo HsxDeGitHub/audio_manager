@@ -1,0 +1,29 @@
+{
+  "tools": {
+    "verify_connection": "仅用于连通测试",
+    "device.locate": "在应用中打开指定资料和片段，并按实际播放结果回报。",
+    "device.copy": "把用户要求的文字写入本机剪贴板并回报结果。",
+    "device.choose_file": "在应用中打开文件选择器，用户取消时返回取消而不是成功。",
+    "device.export": "在应用中让用户选择保存位置并导出，按真实保存或取消结果回报。",
+    "jobs.transcribe": "把资料加入应用现有转写队列；完成情况以任务事件为准。",
+    "jobs.cancel": "取消应用正在处理的该资料任务，保留已完成部分。",
+    "changesets.apply": "一次事务提交用户明确授权的全部目标，校验预期版本并记录差异和撤销。",
+    "evidence.read": "读取当前消息固定范围内的完整证据、版本和无法纳入项。",
+    "documents.import": "导入用户明确提供的 TXT/Markdown 文本，共用材料业务接口，返回内容去重结果。",
+    "documents.update": "修改范围内材料的 title/content，或以 removed=true 移除；校验版本并保留差异与撤销。",
+    "library.update_metadata": "修改资料类型、实际面试日期、公司或岗位，校验预期版本并记录可撤销修改。",
+    "speakers.rename": "为指定说话人设置业务名称；自动聚类编号不代表已确认身份。",
+    "models.status": "报告用户配置的模型是否可用及语义索引状态，不返回密钥或私人正文。",
+    "system.status": "读取真实能力开关和数量，不把未实现能力报告为可用。",
+    "library.list_recordings": "按导入时间分页列出资料，不把导入时间当作实际面试日期。",
+    "library.get_recording": "按资料标识读取名称、处理状态和元信息。",
+    "transcript.list_segments": "按版本分页读取片段，保留原稿、校对、说话人与时间位置。",
+    "mcp.fallback": "外部 MCP 工具"
+  },
+  "fields": {
+    "Pagination.offset": "跳过的记录数",
+    "Pagination.limit": "本次最多返回的记录数",
+    "RecordingReference.recording_id": "录音资料的稳定标识",
+    "SegmentQuery.run_id": "转写版本的稳定标识"
+  }
+}

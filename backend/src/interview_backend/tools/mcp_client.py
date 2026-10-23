@@ -11,6 +11,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model, model_validator
 
 from interview_backend.errors import DomainError
+from interview_backend.prompt_catalog import tool_description
 from interview_backend.tools.registry import ToolSpec
 
 
@@ -165,7 +166,7 @@ class MCPClientManager:
                     continue
                 input_model = _schema_model(config.id, tool.name, tool.inputSchema or {'type': 'object'})
                 spec = ToolSpec(tool_id=tool_id, version='external', title=tool.title or tool.name,
-                                description=(tool.description or '外部 MCP 工具')[:2000],
+                                description=(tool.description or tool_description('mcp.fallback'))[:2000],
                                 input_model=input_model, output_model=ExternalOutput,
                                 effect='external', idempotent=False, timeout_seconds=30,
                                 handler=self._handler(config, tool.name))

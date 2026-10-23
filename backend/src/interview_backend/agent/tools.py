@@ -4,6 +4,7 @@ import re
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 from interview_backend.errors import DomainError
+from interview_backend.prompt_catalog import tool_description
 from interview_backend.services.common import require, version, encode
 from interview_backend.tools.registry import ToolSpec
 
@@ -217,7 +218,7 @@ def install_agent_tools(registry, changesets):
         return {'result': changesets.submit({'operation_id': context.operation_id,
                     'targets': [t.model_dump() for t in args.targets], 'new_documents': list(context.prepared_documents)}, allowed, context.change_plan)}
     registry.register(ToolSpec(tool_id='changesets.apply', version='1.0', title='提交范围内修改',
-        description='一次事务提交用户明确授权的全部目标，校验预期版本并记录差异和撤销。',
+        description=tool_description('changesets.apply'),
         input_model=ApplyArguments, output_model=ResultEnvelope, effect='write',
         handler=apply))
     def read(args, context):
@@ -225,7 +226,7 @@ def install_agent_tools(registry, changesets):
             raise DomainError('scope_required', '需要先确定资料范围。', 409)
         return {'result': {'sources': context.frozen_context['sources'], 'excluded': context.frozen_context.get('excluded', []), 'tasks':context.frozen_context.get('cancel_tasks',[])}}
     registry.register(ToolSpec(tool_id='evidence.read', version='1.0', title='读取固定范围证据',
-        description='读取当前消息固定范围内的完整证据、版本和无法纳入项。', input_model=EmptyArguments, output_model=ResultEnvelope, handler=read))
+        description=tool_description('evidence.read'), input_model=EmptyArguments, output_model=ResultEnvelope, handler=read))
 
     from interview_backend.services.documents import DocumentService
     documents = DocumentService(changesets.database)
@@ -250,10 +251,10 @@ def install_agent_tools(registry, changesets):
                               expected_revision=args.expected_revision, fields=args.fields)
         return apply(ApplyArguments(targets=[target]), context)
     registry.register(ToolSpec(tool_id='documents.import', version='1.0', title='导入个人材料',
-        description='导入用户明确提供的 TXT/Markdown 文本，共用材料业务接口，返回内容去重结果。',
+        description=tool_description('documents.import'),
         input_model=ImportDocument, output_model=ResultEnvelope, effect='write', handler=import_document))
     registry.register(ToolSpec(tool_id='documents.update', version='1.0', title='修改或移除材料',
-        description='修改范围内材料的 title/content，或以 removed=true 移除；校验版本并保留差异与撤销。',
+        description=tool_description('documents.update'),
         input_model=UpdateDocument, output_model=ResultEnvelope, effect='write', handler=update_document))
 
 
@@ -381,16 +382,16 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
         return {'result': repository.status()}
 
     registry.register(ToolSpec(tool_id='library.update_metadata', version='1.0', title='修改资料信息',
-        description='修改资料类型、实际面试日期、公司或岗位，校验预期版本并记录可撤销修改。',
+        description=tool_description('library.update_metadata'),
         input_model=MetadataArguments, output_model=ResultEnvelope, effect='write', handler=update_metadata))
     registry.register(ToolSpec(tool_id='speakers.rename', version='1.0', title='重命名说话人',
-        description='为指定说话人设置业务名称；自动聚类编号不代表已确认身份。',
+        description=tool_description('speakers.rename'),
         input_model=SpeakerRenameArguments, output_model=ResultEnvelope, effect='write', handler=rename_speaker))
     registry.register(ToolSpec(tool_id='models.status', version='1.0', title='读取模型与索引状态',
-        description='报告用户配置的模型是否可用及语义索引状态，不返回密钥或私人正文。',
+        description=tool_description('models.status'),
         input_model=EmptyArguments, output_model=ResultEnvelope, handler=models_status))
     registry.register(ToolSpec(tool_id='system.status', version='1.0', title='读取应用能力状态',
-        description='读取真实能力开关和数量，不把未实现能力报告为可用。',
+        description=tool_description('system.status'),
         input_model=EmptyArguments, output_model=ResultEnvelope, handler=system_status))
 
     def device_tool(tool_id, title, description, input_model, kind, argument_builder, target_builder=None, timeout=20):
@@ -413,15 +414,15 @@ def install_app_tools(registry, changesets, device, settings, repository, retrie
             input_model=input_model, output_model=ResultEnvelope, effect='device', handler=handler,
             timeout_seconds=timeout))
 
-    device_tool('device.locate', '定位并回听', '在应用中打开指定资料和片段，并按实际播放结果回报。',
+    device_tool('device.locate', '定位并回听', tool_description('device.locate'),
         DeviceLocateArguments, 'locate', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)
-    device_tool('device.copy', '复制到剪贴板', '把用户要求的文字写入本机剪贴板并回报结果。',
+    device_tool('device.copy', '复制到剪贴板', tool_description('device.copy'),
         DeviceClipboardArguments, 'clipboard', lambda a: a.model_dump(mode='json'))
-    device_tool('device.choose_file', '选择本机文件', '在应用中打开文件选择器，用户取消时返回取消而不是成功。',
+    device_tool('device.choose_file', '选择本机文件', tool_description('device.choose_file'),
         DeviceChooseFileArguments, 'choose_file', lambda a: a.model_dump(mode='json'))
-    device_tool('device.export', '导出文字', '在应用中让用户选择保存位置并导出，按真实保存或取消结果回报。',
+    device_tool('device.export', '导出文字', tool_description('device.export'),
         DeviceExportArguments, 'export', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id or '')
-    device_tool('jobs.transcribe', '开始或重试转写', '把资料加入应用现有转写队列；完成情况以任务事件为准。',
+    device_tool('jobs.transcribe', '开始或重试转写', tool_description('jobs.transcribe'),
         RecordingActionArguments, 'transcribe', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)
-    device_tool('jobs.cancel', '取消后台任务', '取消应用正在处理的该资料任务，保留已完成部分。',
+    device_tool('jobs.cancel', '取消后台任务', tool_description('jobs.cancel'),
         CancelTaskArguments, 'cancel', lambda a: a.model_dump(mode='json'), lambda a: a.recording_id)

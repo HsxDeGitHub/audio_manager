@@ -16,7 +16,9 @@ let package = Package(
     ],
     targets: [
         .systemLibrary(name: "CSQLite"),
-        .target(name: "AudioCore", dependencies: ["CSQLite"]),
+        .target(name: "PromptResources", path: "backend/src/interview_backend/prompts",
+                exclude: ["README.md", "agent", "memory", "tools"], resources: [.copy("connection")]),
+        .target(name: "AudioCore", dependencies: ["CSQLite", "PromptResources"]),
         .executableTarget(name: "InterviewAudio", dependencies: ["AudioCore"]),
         .executableTarget(name: "AudioWorker", dependencies: ["AudioCore"]),
         .testTarget(name: "AudioCoreTests", dependencies: ["AudioCore", "InterviewAudio"], swiftSettings: testSettings)

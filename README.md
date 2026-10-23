@@ -147,6 +147,12 @@ INTERVIEW_ACTUAL_TEST_DIR="$PWD/TestArtifacts" INTERVIEW_PUNCTUATION_MODEL_DIR="
 
 当前使用原生 SwiftUI 应用，通过 `zsh Scripts/package.sh` 重新编译打包；退出并重开 `dist/听阅.app` 即可使用新版。资料库和配置位于应用包外，更新沿用现有数据。目前未接入在线自动更新。
 
+## 提示词管理
+
+固定模型提示词统一放在 [backend/src/interview_backend/prompts/](backend/src/interview_backend/prompts/README.md)，包括助手规则、记忆提取、连接测试以及本地工具和参数说明。按用途编辑 Markdown/JSON，调用代码通过资源加载器引用；Swift 和 Python 共用这一份源文件，打包时自动携带所需资源。
+
+修改后需重启开发后端；Swift 端重新构建，发布应用重新执行 `zsh Scripts/package.sh`。目录中的说明列出了每份提示词的用途、调用位置、维护与验证方法。
+
 ## 助手与本地后端
 
 个人规格、方案、任务和 Agent 开发约定位于本机的 `specs/`、`.specify/` 与 `AGENTS.md`，

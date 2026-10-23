@@ -53,11 +53,14 @@ def test_native_langchain_and_mcp_adapters_return_equivalent_data(client):
     async def scenario():
         context = ToolContext(request_id='adapters')
         tools = {tool.name: tool for tool in framework_tools(client.app.state.tools, context)}
+        descriptions = {tool['framework_name']: tool['description'] for tool in client.app.state.tools.list()}
+        assert all(tool.description == descriptions[name] for name, tool in tools.items())
         adapted = await tools['library__get_recording'].ainvoke({'recording_id': 'r1'})
         native = await client.app.state.tools.execute('library.get_recording', {'recording_id': 'r1'}, context)
         assert adapted == native['data']
         server = build_server(NativeAPI(client.app))
         async with create_connected_server_and_client_session(server) as session:
+            assert {tool.name: tool.description for tool in (await session.list_tools()).tools} == descriptions
             result = await session.call_tool('library__get_recording', {'recording_id': 'r1'})
             assert result.structuredContent['data'] == native['data']
             assert result.structuredContent['tool_id'] == native['tool_id']

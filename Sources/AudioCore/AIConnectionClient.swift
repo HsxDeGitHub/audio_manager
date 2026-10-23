@@ -1,4 +1,5 @@
 import Foundation
+import PromptResources
 
 /// 只发送固定测试消息；不发送资料正文或保存服务端错误内容。
 public struct AIConnectionClient: Sendable {
@@ -56,6 +57,7 @@ public struct AIConnectionClient: Sendable {
         return value
     }
     public func test(settings: AISettings) async throws {
-        _ = try await complete(settings: settings, system: "请简短回复。", input: "连接测试，请回复：连接成功。", maxTokens: 512)
+        let prompts = try ModelPrompts.connectionTest()
+        _ = try await complete(settings: settings, system: prompts.system, input: prompts.user, maxTokens: 512)
     }
 }

@@ -4,6 +4,7 @@ import os
 from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from interview_backend.errors import DomainError
+from interview_backend.prompt_catalog import load_text, tool_description
 
 
 class ModelSettings(BaseModel):
@@ -38,10 +39,10 @@ class ModelSettings(BaseModel):
 
 async def tool_call_self_test(settings):
     from langchain_core.messages import HumanMessage
-    definition = {'type': 'function', 'function': {'name': 'verify_connection', 'description': '仅用于连通测试',
+    definition = {'type': 'function', 'function': {'name': 'verify_connection', 'description': tool_description('verify_connection'),
         'parameters': {'type': 'object', 'properties': {'value': {'type': 'string'}}, 'required': ['value']}}}
     try:
-        result = await settings.client().bind_tools([definition], tool_choice='verify_connection').ainvoke([HumanMessage(content='调用 verify_connection，value 为 ok。这是合成连接测试。')])
+        result = await settings.client().bind_tools([definition], tool_choice='verify_connection').ainvoke([HumanMessage(content=load_text('connection/tool-user.md'))])
         if not result.tool_calls or result.tool_calls[0]['name'] != 'verify_connection' or result.tool_calls[0]['args'] != {'value': 'ok'}:
             raise ValueError()
         return {'available': True, 'tool_calling': True}

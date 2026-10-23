@@ -146,6 +146,15 @@ private final class AIStubProtocol: URLProtocol, @unchecked Sendable {
             #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
             let body = String(decoding: try Self.body(request), as: UTF8.self)
             #expect(!body.contains("请介绍项目") && !body.contains("保留具体例子"))
+            let payload = try #require(JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any])
+            let messages = try #require(payload["messages"] as? [[String: String]])
+            let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            let resources = root.appendingPathComponent("backend/src/interview_backend/prompts/connection")
+            #expect(messages == [
+                ["role": "system", "content": try String(contentsOf: resources.appendingPathComponent("text-system.md"), encoding: .utf8).trimmingCharacters(in: .newlines)],
+                ["role": "user", "content": try String(contentsOf: resources.appendingPathComponent("text-user.md"), encoding: .utf8).trimmingCharacters(in: .newlines)]
+            ])
+            #expect(payload["max_tokens"] as? Int == 512)
             return (200,output)
         }
         try await client().test(settings: local)

@@ -27,7 +27,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/interview_backend"]
-artifacts = ["src/interview_backend/migrations/**"]
+artifacts = ["src/interview_backend/migrations/**", "src/interview_backend/prompts/**/*.md", "src/interview_backend/prompts/**/*.json"]
+exclude = ["src/interview_backend/prompts/*.swift"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

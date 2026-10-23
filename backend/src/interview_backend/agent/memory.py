@@ -2,6 +2,7 @@
 import json
 import re
 from interview_backend.agent.models import ModelSettings
+from interview_backend.prompt_catalog import load_text
 from interview_backend.services.common import encode
 
 
@@ -15,7 +16,7 @@ class AutomaticMemory:
         current = self.service.active(('global',))
         model = model or ModelSettings.load(self.settings.data_dir).client()
         response = await model.ainvoke([
-            SystemMessage(content='只从本次用户消息提取明确个人陈述和偏好，不提取假设例子、待总结资料或建议。输出 JSON memories 数组，每条含 category(user_statement/preference)、content、topic、scope(global)、可选 supersedes。明确纠正才填现有记忆ID；不确定不提取。'),
+            SystemMessage(content=load_text('memory/extract.md')),
             HumanMessage(content=encode({'user_message':instruction,'existing':[{'id':m['id'],'topic':m['topic'],'content':m['content']} for m in current]}))])
         values = json.loads(response.content).get('memories',[])
         for i,item in enumerate(values):
