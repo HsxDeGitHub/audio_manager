@@ -66,7 +66,75 @@ private final class ExperienceProtocol: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
+/// 长任务的流式监听可在测试返回后收尾，使用独立协议避免命中下一用例的处理器。
+private final class AcceptedQuestionProtocol: URLProtocol, @unchecked Sendable {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let data: Data
+        if request.httpMethod == "POST" || request.url!.path == "/api/v1/agent/runs/accepted" {
+            data = Data(#"{"id":"accepted","state":"running"}"#.utf8)
+        } else if request.url!.path.hasSuffix("/events") { data = Data() }
+        else { client?.urlProtocol(self, didFailWithError: URLError(.timedOut)); return }
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data); client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
 @Suite(.serialized) struct AssistantSendingTests {
+    @MainActor @Test func acceptedQuestionRemainsVisibleWhenHistoryRefreshFails() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [AcceptedQuestionProtocol.self]
+        let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)
+        let model = AssistantModel(client: client)
+        defer { model.stop() }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let app = AppModel(dataDirectoryOverride: directory)
+        model.activate("s"); model.input = "只分析合成资料，不要修改"
+        await model.send(model: app)
+        #expect(model.messages.count == 1 && model.messages.first?.content == "只分析合成资料，不要修改")
+        #expect(model.input.isEmpty && model.error != nil)
+        #expect(model.activeInstruction == "只分析合成资料，不要修改")
+    }
+    @MainActor @Test func historyRunsWithoutLoadedQuestionsRemainDisplayable() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ExperienceProtocol.self]
+        let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)
+        let model = AssistantModel(client: client)
+        defer { model.stop(); ExperienceProtocol.handler = nil }
+        ExperienceProtocol.handler = { _ in
+            Data(#"{"items":[{"id":"u","role":"user","content":"已加载的问题"}],"runs":[{"id":"paired","message_id":"u","state":"completed","result":{"answer":"对应回答"}},{"id":"missing","message_id":"older","state":"completed","result":{"answer":"分页之外的问题回答"}},{"id":"legacy","state":"failed"}]}"#.utf8)
+        }
+        model.activate("s"); try await model.loadHistory()
+        #expect(model.unpairedRuns.map(\.id) == ["missing", "legacy"])
+        #expect(model.runs.count == 3)
+    }
+    @MainActor @Test func documentsReloadKeepsSelectionAndFailureWhileRemovingMissingItems() async throws {
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ExperienceProtocol.self]
+        let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)
+        let model = DocumentsModel()
+        defer { ExperienceProtocol.handler = nil }
+        var includeSecond = true
+        ExperienceProtocol.handler = { request in
+            if request.httpMethod == "PATCH" { throw URLError(.timedOut) }
+            return Data((includeSecond
+                ? #"{"items":[{"id":"a","title":"项目经历","format":"md","content":"合成甲","revision":1},{"id":"b","title":"面试复盘","format":"txt","content":"合成乙","revision":2}]}"#
+                : #"{"items":[{"id":"a","title":"项目经历","format":"md","content":"合成甲","revision":1}]}"#).utf8)
+        }
+        await model.connect(client)
+        #expect(model.selectedID == "a" && !model.loading)
+        model.selectedID = "b"; model.filterText = "  复盘 "
+        await model.load()
+        #expect(model.selectedID == "b" && model.visibleItems.map(\.id) == ["b"])
+        let selected = try #require(model.selected)
+        await model.update(selected, fields: ["removed": true])
+        #expect(model.error != nil && model.selectedID == "b")
+        includeSecond = false; await model.load()
+        #expect(model.selectedID == "a" && model.selected?.content == "合成甲" && model.error == nil)
+        await model.connect(nil)
+        do { _ = try await model.latest("a"); Issue.record("断开后不应使用旧连接") }
+        catch { #expect(error as? BackendClientError == .unavailable) }
+    }
     @MainActor @Test func quoteRetryKeepsAttachmentsAndChangedSelectionGetsNewMessageIdentity() async throws {
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [ExperienceProtocol.self]
         let client = try BackendClient(baseURL: URL(string: "http://127.0.0.1:18888")!, token: "synthetic", configuration: config)

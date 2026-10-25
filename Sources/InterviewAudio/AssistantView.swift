@@ -16,6 +16,10 @@ struct AssistantView: View {
         VStack(spacing: 0) {
             header
             Divider()
+            if assistant.activeRun != nil || assistant.sending {
+                taskStatus.padding(12)
+                Divider()
+            }
             transcript
             Divider()
             composer
@@ -88,7 +92,7 @@ struct AssistantView: View {
                             Button(assistant.loadingHistory ? "正在加载…" : "查看更早的对话") { following = false; Task { await assistant.loadOlderHistory() } }
                                 .disabled(assistant.loadingHistory).font(.caption)
                         }
-                        if assistant.messages.isEmpty && !assistant.sending {
+                        if assistant.messages.isEmpty && assistant.runs.isEmpty && assistant.activeRun == nil && !assistant.sending {
                             VStack(alignment: .leading, spacing: 14) {
                                 Image(systemName: "quote.bubble").font(.system(size: 28)).foregroundStyle(accent)
                                 Text("边听边问，思路更清楚").font(.headline)
@@ -109,8 +113,8 @@ struct AssistantView: View {
                                 }
                             }.id(message.id)
                         }
-                        // 兼容没有message_id的旧契约响应。
-                        ForEach(assistant.runs.filter { $0.messageID == nil }) { run in AssistantRunView(model: model, assistant: assistant, run: run) }
+                        // 历史尚未加载或分页不含关联消息时，也展示运行结果。
+                        ForEach(assistant.unpairedRuns) { run in AssistantRunView(model: model, assistant: assistant, run: run) }
                         Color.clear.frame(height: 1).id("assistant-bottom")
                     }.padding(16)
                         .background(AssistantScrollProbe { atBottom in following = atBottom })
@@ -124,6 +128,28 @@ struct AssistantView: View {
             .onChange(of: assistant.selectedSession) { _, _ in following = true; proxy.scrollTo("assistant-bottom", anchor: .bottom) }
             .onChange(of: assistant.sending) { _, sending in if sending { following = true; proxy.scrollTo("assistant-bottom", anchor: .bottom) } }
         }
+    }
+    private var taskStatus: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(assistant.sending ? "正在发送请求" : "任务进行中").font(.callout.weight(.semibold))
+                Spacer(minLength: 4)
+                if assistant.activeRun != nil {
+                    Button("停止") { Task { await assistant.cancel() } }.controlSize(.small)
+                }
+            }
+            if let instruction = assistant.activeInstruction {
+                Text(instruction).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                    .help(instruction)
+            }
+            Text(assistant.sending ? "请求已准备，正在等待本地服务接收…" : assistant.progress.isEmpty ? "正在读取资料…" : assistant.progress)
+                .font(.caption).fixedSize(horizontal: false, vertical: true)
+            let saved = assistant.activeSavedChanges.filter { $0.state == "committed" }.reduce(0) { $0 + $1.count }
+            if saved > 0 { Label("已保存 \(saved) 项修改", systemImage: "checkmark.circle").font(.caption).foregroundStyle(accent) }
+        }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+            .accessibilityElement(children: .contain)
     }
     private var composer: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -149,14 +175,6 @@ struct AssistantView: View {
                         .disabled(model.focusSegmentID == nil && model.bulkSelection.isEmpty)
                 }
             }.foregroundStyle(.secondary)
-            if assistant.activeRun != nil || assistant.sending {
-                HStack(spacing: 7) {
-                    ProgressView().controlSize(.small)
-                    Text(assistant.sending ? "正在发送…" : assistant.progress).font(.caption).lineLimit(2)
-                    Spacer()
-                    if assistant.activeRun != nil { Button("停止") { Task { await assistant.cancel() } }.controlSize(.small) }
-                }.foregroundStyle(.secondary)
-            }
             VStack(spacing: 2) {
                 if !assistant.quotes.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {

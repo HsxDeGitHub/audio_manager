@@ -59,10 +59,10 @@ struct TranscriptView: View {
         }.background(Color(nsColor: .textBackgroundColor).opacity(0.45))
     }
     private var titleBar: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text(recording.title).font(.system(size: 20, weight: .semibold)).lineLimit(2).textSelection(.enabled)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(recording.title).font(.system(size: 18, weight: .semibold)).lineLimit(2).textSelection(.enabled)
                     HStack(spacing: 12) {
                         Label(TimeFormat.clock(recording.duration), systemImage: "clock")
                         if !model.utterances.isEmpty { Text("\(model.utterances.count) 次发言") }
@@ -105,13 +105,13 @@ struct TranscriptView: View {
             } else if recording.state == .queued {
                 HStack { Text("排队第 \(model.queuePosition(recording.id) ?? 1) 位").font(.caption).foregroundStyle(.secondary); Spacer(); Button("取消排队") { Task { await model.cancel(recording.id) } } }
             }
-        }.padding(.horizontal, 26).padding(.vertical, 20)
+        }.padding(.horizontal, 24).padding(.vertical, 12)
     }
     private var readerToolbar: some View {
         ViewThatFits(in: .horizontal) {
             readerToolbarContent(compact: false)
             readerToolbarContent(compact: true)
-        }.font(.caption).padding(.horizontal, 26).padding(.vertical, 11)
+        }.font(.caption).padding(.horizontal, 24).padding(.vertical, 8)
     }
     private func readerToolbarContent(compact: Bool) -> some View {
         HStack(spacing: compact ? 8 : 14) {

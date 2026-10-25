@@ -93,6 +93,7 @@ final class AssistantModel: ObservableObject {
         var input = ""; var allMaterials = false; var quotes: [SelectedQuote] = []
         var progress = ""; var error: String?; var activeRun: String?; var sending = false
         var outputs: [String: AssistantOutput] = [:]
+        var savedChanges: [String: [AssistantChange]] = [:]
         var pendingInstruction: String?; var pendingBody: Data?
         var pendingContext: Data?
         var historyVersion = 0
@@ -125,6 +126,21 @@ final class AssistantModel: ObservableObject {
     var error: String? { current.error }
     var activeRun: String? { current.activeRun }
     var sending: Bool { current.sending }
+    var activeInstruction: String? {
+        if sending { return current.pendingInstruction ?? (input.isEmpty ? nil : input) }
+        guard let id = activeRun else { return nil }
+        if let messageID = runs.first(where: { $0.id == id })?.messageID,
+           let message = messages.first(where: { $0.id == messageID && $0.role == "user" }) { return message.content }
+        return current.pendingInstruction ?? messages.last(where: { $0.role == "user" })?.content
+    }
+    var activeSavedChanges: [AssistantChange] {
+        guard let id = activeRun else { return [] }
+        return current.savedChanges[id] ?? runs.first(where: { $0.id == id })?.result?.allChanges ?? []
+    }
+    var unpairedRuns: [AssistantRun] {
+        let messageIDs = Set(messages.filter { $0.role == "user" }.map(\.id))
+        return runs.filter { $0.messageID.map { !messageIDs.contains($0) } ?? true }
+    }
     var hasMoreHistory: Bool { current.hasMoreHistory }
     var loadingHistory: Bool { current.loadingHistory }
     var anyRunning: Bool { conversations.values.contains { $0.activeRun != nil || $0.sending } }
@@ -318,8 +334,18 @@ final class AssistantModel: ObservableObject {
                 body = try JSONSerialization.data(withJSONObject: ["session_id": id, "message_id": UUID().uuidString, "instruction": instruction, "context": context])
                 update(id) { $0.pendingInstruction = instruction; $0.pendingBody = body; $0.pendingContext = contextData }
             }
+            let identity = try JSONDecoder().decode(MessageIdentity.self, from: body)
             let result: AssistantAcknowledgment = try await client.send("/api/v1/agent/runs", method: "POST", body: body)
-            update(id) { if $0.input == instruction { $0.input = ""; $0.proposalID = nil }; $0.quotes.removeAll { quote in value.quotes.contains { $0.id == quote.id } }; $0.pendingBody = nil; $0.pendingInstruction = nil; $0.pendingContext = nil }
+            update(id) {
+                // 后端已接收后立即保留问题；历史刷新失败时仍能看见本轮任务。
+                if !$0.messages.contains(where: { $0.id == identity.messageID }) {
+                    $0.messages.append(AssistantMessage(id: identity.messageID, role: "user", content: instruction,
+                        context: AssistantMessageContext(runID: pinned?.runID ?? model.selected?.activeRun, quotes: value.quotes)))
+                }
+                if $0.input == instruction { $0.input = ""; $0.proposalID = nil }
+                $0.quotes.removeAll { quote in value.quotes.contains { $0.id == quote.id } }
+                $0.pendingBody = nil; $0.pendingInstruction = nil; $0.pendingContext = nil
+            }
             // 先绑定运行，历史加载失败也不会丢失刚创建的运行。
             follow(result.id, session: id, model: model)
             try await refresh(id)
@@ -375,7 +401,16 @@ final class AssistantModel: ObservableObject {
             else if event.kind == "tool_end" { value.progress = "正在整理工具结果…" }
             else if event.kind == "task_stage", let payload = try? JSONSerialization.jsonObject(with: event.data) as? [String: String] { value.progress = payload["message"] ?? "正在处理任务…" }
             else if event.kind == "generation_mode", let payload = try? JSONSerialization.jsonObject(with: event.data) as? [String: String] { value.progress = payload["message"] ?? "正在生成…" }
+            else if event.kind == "changeset", let change = try? JSONDecoder().decode(AssistantChange.self, from: event.data) {
+                var changes = value.savedChanges[run] ?? []
+                changes.removeAll { $0.id == change.id }; changes.append(change)
+                value.savedChanges[run] = changes
+            }
         }
+    }
+    private struct MessageIdentity: Decodable {
+        let messageID: String
+        private enum CodingKeys: String, CodingKey { case messageID = "message_id" }
     }
     func cancel() async {
         guard let client, let run = activeRun, let session = selectedSession else { return }

@@ -18,7 +18,11 @@ struct LibraryView: View {
     @UIState private var renamingSaving = false
     @FocusState private var searchFocused: Bool
     @ObservedObject private var installer: ModelInstaller
-    init(model: AppModel) { self.model = model; installer = model.installer }
+    @StateObject private var documents: DocumentsModel
+    init(model: AppModel) {
+        self.model = model; installer = model.installer
+        _documents = StateObject(wrappedValue: DocumentsModel(history: model.changeHistory))
+    }
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -80,7 +84,7 @@ struct LibraryView: View {
             else { VStack(spacing: 12) { Text("本地服务尚未连接，无法读取长期记忆。"); Button("关闭") { model.showMemories = false } }.padding(24) }
         }
         .sheet(isPresented: $model.showDocuments) {
-            if let client = model.backendClient { DocumentsView(app: model, client: client) }
+            if model.backendClient != nil { DocumentsView(app: model, model: documents) }
             else { VStack(spacing: 12) { Text("本地服务尚未连接，无法读取个人材料。"); Button("关闭") { model.showDocuments = false } }.padding(24) }
         }
         .sheet(isPresented: $model.showToolSettings) {
@@ -95,7 +99,14 @@ struct LibraryView: View {
         } message: { Text("仅移除转写和应用记录，原音频文件会保留。") }
         .onChange(of: model.searchText) { _, text in model.refreshSearch(); if compactNavigation && !text.isEmpty { showNavigation = true } }
         .onChange(of: model.searchAll) { _, _ in model.refreshSearch() }
-        .onChange(of: model.searchFocusRequestID) { _, _ in searchFocused = true }
+        .onChange(of: model.searchFocusRequestID) { _, _ in model.librarySection = .audio; searchFocused = true }
+        .task(id: model.backendClient.map { ObjectIdentifier($0) }) {
+            if let id = model.documentSourceID { documents.selectedID = id }
+            await documents.connect(model.backendClient)
+        }
+        .onChange(of: model.documentSourceID) { _, id in
+            if let id { documents.selectedID = id; documents.filterText = "" }
+        }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             Task { @MainActor in
                 var urls: [URL] = []
@@ -111,41 +122,58 @@ struct LibraryView: View {
         }
     }
     private var header: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 12) {
             Button {
                 if compactNavigation { showNavigation.toggle() } else { sidebarHidden.toggle() }
             } label: { Image(systemName: "sidebar.left") }
                 .help("资料与搜索").accessibilityLabel("显示或收起资料导航")
                 .popover(isPresented: $showNavigation) { navigationPane.frame(width: 280, height: 540) }
-            Image(systemName: "waveform.circle.fill").font(.system(size: 30)).foregroundStyle(accent)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("听阅").font(.system(size: 17, weight: .semibold))
-                Text("让每段对话都能被找到").font(.system(size: 11)).foregroundStyle(.secondary)
-            }
+            Label("听阅", systemImage: "waveform.circle.fill").font(.system(size: 15, weight: .semibold)).foregroundStyle(accent)
             Spacer()
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("搜索音频文字", text: $model.searchText).textFieldStyle(.plain)
-                    .accessibilityLabel("搜索音频文字")
-                    .focused($searchFocused).onExitCommand { model.searchText = ""; searchFocused = false }
-                if !model.searchText.isEmpty { Button { model.searchText = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary) }
-                Picker("搜索范围", selection: $model.searchAll) {
-                    Text("全部录音").tag(true)
-                    Text("当前录音").tag(false)
-                }.labelsHidden().frame(width: 105)
-            }
-            .padding(.horizontal, 12).padding(.vertical, 8)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-            .frame(minWidth: 240, idealWidth: 320, maxWidth: 380)
+            if model.librarySection == .documents {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("筛选材料名称", text: $documents.filterText).textFieldStyle(.plain)
+                        .accessibilityLabel("筛选材料名称")
+                        .onExitCommand { documents.filterText = "" }
+                    if !documents.filterText.isEmpty {
+                        Button { documents.filterText = "" } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).accessibilityLabel("清除材料筛选")
+                    }
+                }.padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+                    .frame(minWidth: 240, idealWidth: 320, maxWidth: 380)
+                    .onChange(of: documents.filterText) { _, text in if compactNavigation && !text.isEmpty { showNavigation = true } }
+            } else { audioSearch }
             AssistantToggle(assistant: model.assistant)
-            Button { model.pickFiles() } label: { Label(model.importing ? "正在导入" : "导入音频", systemImage: "plus") }
-                .buttonStyle(.borderedProminent).disabled(model.importing)
+            if model.librarySection == .documents {
+                Button { documents.pickFile() } label: { Label("导入材料", systemImage: "plus") }
+                    .buttonStyle(.borderedProminent).disabled(documents.busy || model.backendClient == nil)
+            } else {
+                Button { model.pickFiles() } label: { Label(model.importing ? "正在导入" : "导入音频", systemImage: "plus") }
+                    .buttonStyle(.borderedProminent).disabled(model.importing)
+            }
             Menu {
                 Button("本地识别模型…") { model.showSettings = true }
                 Button("大模型配置…") { model.showAISettings = true }
             } label: { Image(systemName: "gearshape") }
                 .menuStyle(.borderlessButton).fixedSize().help("模型设置").accessibilityLabel("模型设置")
-        }.padding(.horizontal, 24).padding(.vertical, 15)
+        }.padding(.horizontal, 16).padding(.vertical, 8)
+    }
+    private var audioSearch: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("搜索音频文字", text: $model.searchText).textFieldStyle(.plain)
+                .accessibilityLabel("搜索音频文字")
+                .focused($searchFocused).onExitCommand { model.searchText = ""; searchFocused = false }
+            if !model.searchText.isEmpty { Button { model.searchText = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary) }
+            Picker("搜索范围", selection: $model.searchAll) {
+                Text("全部录音").tag(true)
+                Text("当前录音").tag(false)
+            }.labelsHidden().frame(width: 105)
+        }.padding(.horizontal, 10).padding(.vertical, 6)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+            .frame(minWidth: 240, idealWidth: 320, maxWidth: 380)
     }
     private var navigationPane: some View {
         VStack(spacing: 0) {
@@ -156,7 +184,9 @@ struct LibraryView: View {
                     .buttonStyle(.bordered).tint(model.librarySection == .documents ? accent : .secondary)
             }.controlSize(.small).padding(12)
             Divider()
-            if model.searchText.isEmpty { sidebar }
+            if model.librarySection == .documents {
+                DocumentsSidebar(app: model, model: documents, onSelect: { showNavigation = false })
+            } else if model.searchText.isEmpty { sidebar }
             else { searchResults }
         }
     }
@@ -280,8 +310,14 @@ struct LibraryView: View {
     }
     private var detail: some View {
         Group {
-            if model.librarySection == .documents, let client = model.backendClient {
-                DocumentsView(app: model, client: client, embedded: true)
+            if model.librarySection == .documents {
+                if model.backendClient != nil { DocumentsView(app: model, model: documents, embedded: true) }
+                else {
+                    VStack(spacing: 12) {
+                        Text("连接本地服务后，可查看个人材料。").foregroundStyle(.secondary)
+                        Button("重试本地服务") { Task { await model.connectBackend() } }.disabled(model.backendConnecting)
+                    }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             } else if let recording = model.selected {
                 TranscriptView(model: model, player: model.player, recording: recording)
             } else {

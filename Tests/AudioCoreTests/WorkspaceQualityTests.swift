@@ -6,6 +6,23 @@ import AudioCore
 @testable import InterviewAudio
 
 @Suite(.serialized) struct WorkspaceQualityTests {
+    @MainActor @Test func taskStatusCountsOnlyRealReceiptsAndKeepsRunsSeparate() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let app = AppModel(dataDirectoryOverride: directory)
+        let model = AssistantModel()
+        defer { model.stop() }
+        model.activate("s"); model.follow("first", session: "s", model: app)
+        #expect(model.activeSavedChanges.isEmpty)
+        model.consume(.init(id: 1, kind: "task_stage", data: Data(#"{"message":"正在分析第 2/5 批资料，完成后统一保存…"}"#.utf8)), run: "first", session: "s")
+        #expect(model.progress.contains("2/5") && model.activeSavedChanges.isEmpty)
+        for id in [2, 3] {
+            model.consume(.init(id: id, kind: "changeset", data: Data(#"{"id":"saved","state":"committed","count":4}"#.utf8)), run: "first", session: "s")
+        }
+        #expect(model.activeSavedChanges.count == 1 && model.activeSavedChanges.first?.count == 4)
+        model.follow("second", session: "s", model: app)
+        #expect(model.activeSavedChanges.isEmpty)
+    }
     @MainActor @Test func saveFailureStaysRecoverableAndRetryCommits() async {
         let state = EditorSaveState()
         let failed = await state.commit { throw BackendClientError.conflict }
