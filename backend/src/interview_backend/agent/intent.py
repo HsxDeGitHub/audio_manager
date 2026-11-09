@@ -15,13 +15,20 @@ from interview_backend.services.common import encode
 class TaskIntent(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
     mode: Literal['read', 'edit', 'clarify']
-    reading: Literal['selection', 'search', 'full', 'weekly']
+    reading: Literal['none', 'selection', 'search', 'full', 'weekly']
     edit_target: Literal['none', 'transcript', 'content']
     import_documents: bool
     actions: list[str] = Field(max_length=12)
     constraints: list[str] = Field(max_length=12)
     clarification: str = Field(max_length=1000)
     proposal_id: str = Field(default='', max_length=200)
+
+
+def social_message(instruction):
+    text = instruction.strip().rstrip('!！?？。.,，~～… \t\r\n')
+    return re.fullmatch(r'你好[呀啊]?|您好[呀啊]?|嗨|哈喽|在吗|早上好|下午好|晚上好|早安|晚安|'
+                        r'谢谢(?:你)?|多谢|hi|hello|hey|thanks|thank you|'
+                        r'你是谁|你能做什么|你有什么功能', text, re.IGNORECASE) is not None
 
 
 def explicit_readonly(instruction):
@@ -41,6 +48,9 @@ def explicit_readonly(instruction):
 
 async def resolve(settings, registry, context, model=None):
     from interview_backend.agent.protocol import Message
+    if social_message(context['instruction']):
+        return TaskIntent(mode='read', reading='none', edit_target='none', import_documents=False,
+                          actions=[], constraints=[], clarification='').model_dump()
     catalog = [{k: t[k] for k in ('id', 'title', 'effect')}
                for t in registry.list() if t['effect'] in {'device', 'external'}]
     # 分类不接收资料正文、选区文字、记忆或工具结果，只使用本轮指令及受限历史。
@@ -74,6 +84,8 @@ async def resolve(settings, registry, context, model=None):
             raise ValueError()
         if intent.import_documents and (intent.mode != 'edit' or intent.edit_target != 'content'):
             raise ValueError()
+        if intent.reading == 'none' and (intent.mode == 'edit' or intent.actions or intent.import_documents):
+            raise ValueError()
         if intent.mode == 'clarify' and not intent.clarification.strip():
             raise ValueError()
     except DomainError:
@@ -89,9 +101,16 @@ async def resolve(settings, registry, context, model=None):
 
 def apply(context, intent):
     value = {**context, 'task_intent': TaskIntent.model_validate(intent).model_dump()}
+    if intent['reading'] == 'none':
+        value.update(resources=[], sources=[], write_resources=[], speaker_catalog=[], quotes=[],
+                     excluded=[], recording_ids=[], device_targets=[], cancel_tasks=[], pending_proposals=[])
+        value.pop('selected_proposal', None)
+        value.pop('report_plan', None)
+        if social_message(context['instruction']):
+            value['conversation_history'] = []
     value['allow_write'] = intent['mode'] == 'edit'
     value['transcript_organization'] = intent['edit_target'] == 'transcript'
-    value['write_resources'] = [r for r in context['resources'] if r['resource_type'] == 'segment'] if value['transcript_organization'] else list(context['resources'])
+    value['write_resources'] = [r for r in value['resources'] if r['resource_type'] == 'segment'] if value['transcript_organization'] else list(value['resources'])
     value['write_field_limits'] = {'segment': ['text']} if value['transcript_organization'] else {}
     if value['transcript_organization'] and context.get('intent_policy') == 'semantic-v2':
         # 新消息可校对发言归属、名称和核对状态；旧运行继续使用已冻结的文字边界。

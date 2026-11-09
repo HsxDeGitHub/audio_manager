@@ -588,9 +588,10 @@ def test_import_and_content_changes_share_atomic_commit(client, config, fail):
 
 @pytest.mark.parametrize('interruption', ['failure', 'cancel', 'restart'])
 def test_resume_completes_remaining_model_step_without_replaying_completed_device(client, monkeypatch, interruption):
-    import time
+    import threading
     from interview_backend.agent.models import ModelSettings
     from interview_backend.agent.api import AgentAPI
+    second_started = threading.Event()
     class Model(FakeModel):
         step = 0
         ready = False
@@ -598,6 +599,8 @@ def test_resume_completes_remaining_model_step_without_replaying_completed_devic
             self.step += 1
             if self.step == 1:
                 return assistant_message(content='', tool_calls=[{'name':'device__locate','id':'first','args':{'recording_id':'r1','segment_id':'s1'}}])
+            if self.step == 2:
+                second_started.set()
             if not self.ready:
                 if interruption == 'failure': raise RuntimeError('second step failed')
                 await asyncio.sleep(30)
@@ -614,9 +617,7 @@ def test_resume_completes_remaining_model_step_without_replaying_completed_devic
     identifier = client.post('/api/v1/agent/runs',json={'session_id':session,'instruction':'请回听当前面试并分析回答','context':{'recording_id':'r1'}}).json()['id']
     if interruption=='failure': assert wait_for_run(client,identifier)['state']=='failed'
     else:
-        for _ in range(200):
-            if model.step >= 2: break
-            time.sleep(.005)
+        assert second_started.wait(10), '第二个模型步骤未开始'
         client.post('/api/v1/agent/runs/'+identifier+'/cancel')
         wait_for_run(client,identifier)
         if interruption=='restart':

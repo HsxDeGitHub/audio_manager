@@ -32,14 +32,20 @@ class EvidenceService:
 
     def freeze(self, context, instruction, *, semantic=False):
         context = MessageContext.model_validate(context)
+        if context.scope not in {'current', 'all'}:
+            raise DomainError('invalid_scope', '资料范围不正确。', 422)
+        from interview_backend.agent.intent import social_message
+        if semantic and social_message(instruction):
+            return {**context.model_dump(), 'instruction': instruction, 'resources': [], 'sources': [],
+                    'excluded': [], 'write_resources': [], 'allow_write': False,
+                    'allow_device': False, 'allow_external': False, 'allowed_actions': [],
+                    'allow_document_import': False}
         if context.draft_id:
             raise DomainError('draft_workflow_retired', '独立整理稿流程已停用，请选择转写正文；旧引用仍可回看。', 409)
         # 新运行先冻结对象，语义分类完成前不授予写入或设备能力。
         # 旧上下文继续使用原规则，恢复时不会被静默扩权。
         mutation, importing = (False, False) if semantic else write_permissions(instruction)
         organizing = False if semantic else transcript_organization(instruction)
-        if context.scope not in {'current', 'all'}:
-            raise DomainError('invalid_scope', '资料范围不正确。', 422)
         with self.database.transaction() as c:
             recordings = [dict(r) for r in c.execute('SELECT * FROM recordings ORDER BY created_at,id')] if context.scope == 'all' else [require(c, 'recordings', context.recording_id)] if context.recording_id else []
             resources = []; excluded = []; sources = []; device_targets = []; cancel_tasks = []; speaker_catalog = []

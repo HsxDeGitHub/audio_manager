@@ -131,8 +131,11 @@ class PiBridge:
 
     async def _callback(self, record):
         owner = record['owner']
+        callback = self.callbacks.get(owner)
+        if callback is None:
+            return
         try:
-            result = await self.callbacks[owner](record['method'], record['payload'])
+            result = await callback(record['method'], record['payload'])
             await self.send({'type': 'callback_result', 'id': record['id'], 'result': result})
         except asyncio.CancelledError as error:
             self.callback_errors.setdefault(owner, error)
@@ -141,7 +144,8 @@ class PiBridge:
             raise
         except Exception as error:
             self.callback_errors.setdefault(owner, error)
-            await self.send({'type': 'callback_result', 'id': record['id'], 'error': True})
+            with suppress(BrokenPipeError, ConnectionResetError):
+                await self.send({'type': 'callback_result', 'id': record['id'], 'error': True})
 
     async def _read(self):
         try:

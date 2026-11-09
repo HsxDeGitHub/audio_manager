@@ -37,7 +37,7 @@ class AgentEngine:
         if intent['reading'] == 'weekly' and hasattr(self, 'reports'):
             value['report_plan'] = self.reports.freeze(value, context['instruction'])
         if emit:
-            await emit('task_stage', {'message': '任务范围已确定，正在读取资料…'})
+            await emit('task_stage', {'message': '正在回复…' if intent['reading'] == 'none' else '任务范围已确定，正在读取资料…'})
         return value
 
     async def execute(self, run_id, instruction, context, model=None, emit=None, change_plan=None):
@@ -52,6 +52,8 @@ class AgentEngine:
             return await self.reports.render(run_id, instruction, self, emit=emit, context=context, model=model)
         if model is None:
             model = ModelSettings.load(self.settings.data_dir).client()
+        if context.get('task_intent', {}).get('reading') == 'none':
+            return await self._converse(run_id, instruction, context, model, emit)
         value = await self._answer(run_id, instruction, context, model, emit, change_plan)
         if hasattr(self, 'retrieval'):
             status = self.retrieval.semantic.status()
@@ -59,6 +61,41 @@ class AgentEngine:
             if not status['ready']:
                 value['answer'] += '\n\n检索状态：' + status['message'] + ' 全量任务仍按范围完整读取。'
         return value
+
+    async def _converse(self, run_id, instruction, context, model, emit):
+        from interview_backend.agent.protocol import Message
+        from interview_backend.agent.work import WorkLog
+        from interview_backend.agent.model_recovery import parse_result, OutputError
+        from interview_backend.agent.batching import short_history, MAX_INPUT_BYTES
+        from interview_backend.agent.pi_runtime import run_session
+        work = WorkLog(self.evidence.database, run_id)
+        empty = {'resources': [], 'sources': []}
+
+        def validate(response):
+            if response.tool_calls:
+                raise DomainError('tool_not_allowed', '本轮对话无需调用资料或操作工具。', 403)
+            result = parse_result(response)
+            if any(result.get(key) for key in ('targets', 'proposals', 'questions')):
+                raise OutputError('invalid_structure')
+            self.evidence.validate_result(result, empty)
+
+        async def model_step(turn, messages):
+            return await work.model(f'conversation:model:{turn}', model, messages,
+                                    {'model': getattr(model, 'model_name', type(model).__qualname__),
+                                     'input_budget_bytes': MAX_INPUT_BYTES}, emit=emit, validator=validate)
+
+        async def tool_step(*_):
+            raise DomainError('tool_not_allowed', '本轮对话无需调用资料或操作工具。', 403)
+
+        history = [{key: message[key] for key in ('role', 'content') if key in message}
+                   for message in short_history(context.get('conversation_history', []))]
+        response, _ = await run_session([], [Message(role='system', content=load_text('agent/conversation.md')),
+            Message(role='user', content=encode({'instruction': instruction, 'conversation_history': history}))],
+            model_step, tool_step)
+        parsed = parse_result(response)
+        result = {key: parsed[key] for key in ('answer', 'claims', 'clarification') if key in parsed}
+        work.save('answer', result)
+        return result
 
     async def _answer(self, run_id, instruction, context, model, emit, change_plan=None):
         from interview_backend.agent.work import WorkLog
@@ -103,6 +140,9 @@ class AgentEngine:
                         for neighbor in sources[max(0,index-1):index+2]:
                             if neighbor.get('run_id')==match.get('run_id') and neighbor not in selected: selected.append(neighbor)
             if selected: sources = selected
+            elif strategy == 'search':
+                return {'answer': '当前资料中未检索到相关内容，请补充关键词或指定片段。', 'claims': [],
+                        'coverage': {'total': 0, 'covered': 0, 'excluded': context.get('excluded', [])}}
         
         if not sources and not context.get('allow_document_import') and not context.get('allow_device'):
             reasons = '\n'.join(item['reason'] for item in context.get('excluded', []) if item.get('reason'))

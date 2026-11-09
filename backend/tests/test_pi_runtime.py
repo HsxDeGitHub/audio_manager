@@ -209,6 +209,13 @@ def test_unexpected_pi_exit_fails_pending_request():
     asyncio.run(scenario())
 
 
+def test_late_pi_callback_after_cancellation_is_ignored():
+    bridge = PiBridge()
+    asyncio.run(bridge._callback({'owner':'cancelled-request', 'id':'late-callback',
+                                 'method':'model', 'payload':{}}))
+    assert bridge.callbacks == bridge.callback_errors == {}
+
+
 def test_native_provider_falls_back_for_non_streaming_endpoint(model_server):
     model_server.streaming_supported = False
     model = ModelSettings(baseURL=model_server.url + '/chat/completions', model='synthetic-pi').client()
@@ -256,3 +263,51 @@ def test_repeated_cancellation_cleans_owned_workspace_and_process():
         assert not workspace.exists()
         assert bridge.process.returncode is not None
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('context', [{'recording_id': 'r1'}, {'scope': 'all'}, {}])
+def test_greeting_with_large_library_finishes_once_without_material(client, config, model_server, monkeypatch, context):
+    from test_bounded_editing import seed
+    from interview_backend.agent.batching import make_chunks
+    from interview_backend.services.common import encode
+    frozen = seed(client, count=1344)
+    assert len(make_chunks(frozen['sources'], compact=True)) >= 42
+    engine = client.app.state.agent.engine
+    def forbidden(*_):
+        raise AssertionError('问候不应读取资料、检索或分析意图')
+    monkeypatch.setattr(engine.evidence, 'ref', forbidden)
+    monkeypatch.setattr(engine.retrieval, 'search', forbidden)
+    monkeypatch.setattr(engine.intent_model, 'complete', forbidden)
+    config.data_dir.joinpath('llm-settings.json').write_text(json.dumps({
+        'baseURL': model_server.url, 'model': 'synthetic-pi'}))
+    session = client.post('/api/v1/sessions', json={}).json()['id']
+    with client.app.state.database.transaction(True) as connection:
+        connection.execute('INSERT INTO messages VALUES(?,?,?,?,?,?)',
+            ('earlier-message', session, 'user', '请处理整篇资料', '{}', 1))
+        connection.execute('INSERT INTO agent_runs VALUES(?,?,?,?,?,?,?)',
+            ('earlier-run', session, 'earlier-message', 'completed', '{}',
+             encode({'answer': '历史全文任务数据不得进入'}), 1))
+        before = connection.execute('SELECT count(*) FROM changesets').fetchone()[0]
+    model_server.respond = lambda _: {'content': '{"answer":"你好，我在。","claims":[]}'}
+    response = client.post('/api/v1/agent/runs', json={
+        'session_id': session, 'instruction': '你好', 'context': context})
+    identifier = response.json()['id']
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        run = client.get('/api/v1/agent/runs/' + identifier).json()
+        if run['state'] not in {'queued', 'running'}: break
+        time.sleep(.02)
+    assert run['state'] == 'completed', run
+    assert run['result']['answer'] == '你好，我在。'
+    assert len(model_server.requests) == 1
+    sent = json.dumps(model_server.requests, ensure_ascii=False)
+    assert '合成候选人的发言' not in sent and '历史全文任务数据不得进入' not in sent
+    assert not model_server.requests[0].get('tools')
+    assert run['context']['sources'] == run['context']['resources'] == []
+    assert 'coverage' not in run['result'] and 'retrieval' not in run['result']
+    with client.app.state.database.transaction() as connection:
+        events = [(row['kind'], json.loads(row['payload'])) for row in connection.execute(
+            'SELECT kind,payload FROM events WHERE run_id=?', (identifier,))]
+        assert connection.execute('SELECT count(*) FROM changesets').fetchone()[0] == before
+    assert not any(kind in {'coverage', 'tool_start', 'tool_end'} for kind, _ in events)
+    assert not any('批资料' in payload.get('message', '') for _, payload in events)
