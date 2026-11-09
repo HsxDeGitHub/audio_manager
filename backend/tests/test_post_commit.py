@@ -1,20 +1,20 @@
 """组合指令先原子提交内容，再执行依赖该版本的设备步骤。"""
 import asyncio,json
 import pytest
-from langchain_core.messages import AIMessage
+from pi_fakes import assistant_message
 from interview_backend.errors import DomainError
 
 class EditAndExport:
     def __init__(self,fail=False):self.step=0;self.fail=fail
-    def bind_tools(self,tools):return self
-    async def ainvoke(self,messages):
+    def with_tools(self,tools):return self
+    async def complete(self,messages):
         self.step+=1
         if self.step==1:
-            return AIMessage(content='',tool_calls=[
+            return assistant_message(content='',tool_calls=[
                 {'name':'changesets__apply','id':'edit','args':{'targets':[{'resource_type':'segment','resource_id':'s1','expected_revision':1,'fields':{'text':'提交后的正文'}}]}},
                 {'name':'device__export','id':'export','args':{'recording_id':'r1','format':'txt'}}])
         if self.fail:raise RuntimeError('合成模型失败')
-        return AIMessage(content=json.dumps({'answer':'提出修改与导出步骤。','claims':[]}))
+        return assistant_message(content=json.dumps({'answer':'提出修改与导出步骤。','claims':[]}))
 
 
 def test_export_reads_committed_content_and_can_resume_without_rewriting(client,monkeypatch):

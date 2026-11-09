@@ -65,8 +65,8 @@ class AgentEngine:
         from interview_backend.agent.model_recovery import parse_result
         work = WorkLog(self.evidence.database, run_id, context.get('root_run_id',run_id))
         run_id = context.get('root_run_id', run_id)
-        from langchain_core.messages import HumanMessage, SystemMessage
-        from interview_backend.agent.tools import framework_tools
+        from interview_backend.agent.protocol import Message
+        from interview_backend.agent.tools import pi_tools
         from interview_backend.tools.registry import ToolContext
         effects = {'read'}
         if context.get('allow_write'): effects.add('write')
@@ -83,9 +83,9 @@ class AgentEngine:
                                    operation_id=run_id + ':tools', frozen_context=context, change_plan=plan,
                                    resource_scope=frozenset((r['resource_type'], r['resource_id'])
                                                             for r in context.get('write_resources', context['resources'])))
-        tools = framework_tools(self.registry, read_context)
-        bound = model.bind_tools(tools) if tools else model
-        configuration={'model':getattr(model,'model_name',type(model).__qualname__),'tools':[(t.name,t.args_schema.model_json_schema()) for t in tools]}
+        tools = pi_tools(self.registry, read_context)
+        bound = model.with_tools(tools) if tools else model
+        configuration={'model':getattr(model,'model_name',type(model).__qualname__),'tools':[(t.name,t.parameters) for t in tools]}
         if compact: configuration['input_budget_bytes'] = MAX_INPUT_BYTES
         sources = context.get('sources', [])
         strategy = context.get('task_intent', {}).get('reading')
@@ -179,7 +179,7 @@ class AgentEngine:
                 if spec is None:
                     raise DomainError('tool_not_allowed', '该工具在当前用户消息范围内不可用。', 403)
                 if emit: await emit('tool_start', {'tool': call['name']})
-                digest = hashlib.sha256(encode({'tool': call['name'], 'arguments': call['args']}).encode()).hexdigest()[:24]
+                digest = hashlib.sha256(encode({'tool': call['name'], 'arguments': call['arguments']}).encode()).hexdigest()[:24]
                 call_scope=plan.allowed & (batch_keys | frozenset(('document',identifier) for identifier in plan.documents)) if compact else plan.allowed
                 call_context = replace(read_context, operation_id=f'{run_id}:tool:{digest}', resource_scope=call_scope, frozen_context=batch_context)
                 # 模型只看到同源 Schema；执行仍经过统一执行器，保留参数及业务错误。
@@ -196,14 +196,14 @@ class AgentEngine:
                         from interview_backend.services.device import DeviceService
                         from interview_backend.agent.tools import command_result
                         output={'result':command_result(DeviceService(self.evidence.database).get(output['result']['command_id']))}
-                    elif cached.get('legacy') or not work.valid(cached.get('dependencies',[])):
+                    elif not work.valid(cached.get('dependencies',[])):
                         output={'result':{'state':'completed','operation_id':call_context.operation_id,'message':'操作已完成；旧输出的证据依赖已失效，未重新注入，也未重复执行。'}}
                 else:
                     deferred=effect=='device' and context.get('allow_write') and tool_id in {'device.export','device.copy','jobs.transcribe'}
                     if business and not deferred: work.reserve(slot,tool_id,digest)
                     if effect=='external' and work.started(digest):raise DomainError('external_result_unknown','外部工具结果未知，不能自动重复执行。',409)
                     if effect=='external':work.save('external_started:'+digest,{'state':'started'})
-                    output=(await self.registry.execute(tool_id,call['args'],call_context))['data']
+                    output=(await self.registry.execute(tool_id,call['arguments'],call_context))['data']
                     if business and output.get('result',{}).get('state')!='planned':
                         work.save('effect:'+digest,{'output':output,'dependencies':dependencies})
                     work.save(step_key,output)
@@ -225,12 +225,12 @@ class AgentEngine:
 
             try:
                 from interview_backend.agent.pi_runtime import run_session
-                messages = [SystemMessage(content=SYSTEM), HumanMessage(content=encode(prompt))]
+                messages = [Message(role='system', content=SYSTEM), Message(role='user', content=encode(prompt))]
                 response, messages = await run_session(tools, messages, model_step, tool_step)
                 result = parse_result(response)
                 if needs_edit_result(result, context, plan):
                     # 不能把自然语言里的“已登记”当作修改操作。最多补取一次结构化目标。
-                    messages += [response, SystemMessage(content=load_text('agent/text-edit-result.md'))]
+                    messages += [response, Message(role='system', content=load_text('agent/text-edit-result.md'))]
                     model_key += ':edit-result'
                     response = await work.model(model_key,model,messages,configuration,dependencies,emit=emit,validator=validate_response)
                     result = parse_result(response)

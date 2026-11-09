@@ -17,17 +17,16 @@ class OutputError(ValueError):
 
 
 def check_completion(response):
-    finish = (getattr(response, 'response_metadata', None) or {}).get('finish_reason')
+    finish = response.stopReason
     if finish in {'length', 'max_tokens'}:
         raise OutputError('output_truncated')
-    if getattr(response, 'invalid_tool_calls', None):
+    if any(not isinstance(call.get('arguments'), dict) for call in response.tool_calls):
         raise OutputError('invalid_tool_arguments')
 
 
 def parse_result(response):
     check_completion(response)
-    content = response.content if isinstance(response.content, str) else ''.join(
-        b.get('text', '') for b in response.content if isinstance(b, dict))
+    content = response.text
     try:
         result = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', content.strip()))
     except (ValueError, TypeError):
@@ -82,8 +81,8 @@ def diagnostic(error, attempt, response=None):
     value = {'code': code, 'reason': reason, 'attempt': attempt, 'error_type': type(error).__name__[:80]}
     status = getattr(error, 'status_code', None)
     if type(status) is int: value['http_status'] = status
-    finish = (getattr(response, 'response_metadata', None) or {}).get('finish_reason')
-    if finish in {'stop', 'length', 'max_tokens', 'tool_calls', 'content_filter'}: value['finish_reason'] = finish
+    finish = response.stopReason if response is not None else None
+    if finish in {'stop', 'length', 'max_tokens', 'toolUse', 'content_filter'}: value['finish_reason'] = finish
     return value
 
 

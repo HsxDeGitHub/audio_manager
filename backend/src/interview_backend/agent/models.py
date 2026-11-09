@@ -30,12 +30,12 @@ class ModelSettings(BaseModel):
 
 
 async def tool_call_self_test(settings):
-    from langchain_core.messages import HumanMessage
+    from interview_backend.agent.protocol import Message
     definition = {'type': 'function', 'function': {'name': 'verify_connection', 'description': tool_description('verify_connection'),
         'parameters': {'type': 'object', 'properties': {'value': {'type': 'string'}}, 'required': ['value']}}}
     try:
-        result = await settings.client().bind_tools([definition], tool_choice='verify_connection').ainvoke([HumanMessage(content=load_text('connection/tool-user.md'))])
-        if not result.tool_calls or result.tool_calls[0]['name'] != 'verify_connection' or result.tool_calls[0]['args'] != {'value': 'ok'}:
+        result = await settings.client().with_tools([definition], tool_choice='verify_connection').complete([Message(role='user', content=load_text('connection/tool-user.md'))])
+        if not result.tool_calls or result.tool_calls[0]['name'] != 'verify_connection' or result.tool_calls[0]['arguments'] != {'value': 'ok'}:
             raise ValueError()
         return {'available': True, 'tool_calling': True}
     except Exception:
@@ -46,7 +46,7 @@ async def capability_self_test(settings):
     """仅使用固定合成消息，逐项报告，失败不回显上游正文或密钥。"""
     import asyncio
     import json
-    from langchain_core.messages import HumanMessage, SystemMessage
+    from interview_backend.agent.protocol import Message
     checks = []
     client = settings.client()
     async def check(identifier, title, operation):
@@ -57,20 +57,20 @@ async def capability_self_test(settings):
             raise
         except Exception:
             checks.append({'id':identifier,'title':title,'supported':False,'message':'未通过，请检查模型能力、接口或额度'})
-    messages = [SystemMessage(content=load_text('connection/text-system.md')),
-                HumanMessage(content=load_text('connection/text-user.md'))]
+    messages = [Message(role='system', content=load_text('connection/text-system.md')),
+                Message(role='user', content=load_text('connection/text-user.md'))]
     async def text():
-        response = await client.ainvoke(messages)
-        if not isinstance(response.content,str) or not response.content.strip(): raise ValueError()
+        response = await client.complete(messages)
+        if not isinstance(response.text,str) or not response.text.strip(): raise ValueError()
     async def structured():
-        response = await client.ainvoke([HumanMessage(content=load_text('connection/structured-user.md'))])
-        if json.loads(response.content) != {'ok':True}: raise ValueError()
+        response = await client.complete([Message(role='user', content=load_text('connection/structured-user.md'))])
+        if json.loads(response.text) != {'ok':True}: raise ValueError()
     async def tools():
         await tool_call_self_test(settings)
     async def streaming():
         received = False
-        async for chunk in client.astream(messages):
-            if isinstance(chunk.content,str) and chunk.content: received = True
+        async for chunk in client.stream(messages):
+            if chunk['type'] == 'text_delta' and chunk['delta']: received = True
         if not received: raise ValueError()
     for args in [('text','文本生成',text),('structured','结构化 JSON',structured),
                  ('tools','工具调用',tools),('streaming','流式输出协议',streaming)]:

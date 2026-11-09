@@ -3,7 +3,7 @@ import asyncio
 from importlib.resources import files
 import json
 
-from langchain_core.messages import AIMessage
+from pi_fakes import assistant_message
 import pytest
 
 from interview_backend import prompt_catalog
@@ -22,17 +22,17 @@ def test_agent_uses_resource_and_preserves_dynamic_context(client, config, monke
     calls = []
 
     class Model:
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
-            assert messages[0].content == expected
-            payload = json.loads(messages[1].content)
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
+            assert messages[0].text == expected
+            payload = json.loads(messages[1].text)
             assert payload['instruction'] == instruction
             assert len(payload['untrusted_evidence']) == len(context['sources'])
             for source, original in zip(payload['untrusted_evidence'], context['sources']):
                 assert all(source[key] == value for key, value in original.items())
             assert payload['scope'] == context['resources']
             calls.append(payload)
-            return AIMessage(content=json.dumps({'answer': '合成分析', 'claims': []}))
+            return assistant_message(content=json.dumps({'answer': '合成分析', 'claims': []}))
 
     result = asyncio.run(AgentEngine(config, client.app.state.tools, evidence).execute('prompt-agent', instruction, context, model=Model()))
     assert calls and result['answer'] == '合成分析'
@@ -43,11 +43,11 @@ def test_memory_extraction_uses_resource_without_replacing_user_data(client, con
     calls = []
 
     class Model:
-        async def ainvoke(self, messages):
-            assert messages[0].content == prompt_catalog.load_text('memory/extract.md')
-            assert json.loads(messages[1].content) == {'user_message': instruction, 'existing': []}
+        async def complete(self, messages):
+            assert messages[0].text == prompt_catalog.load_text('memory/extract.md')
+            assert json.loads(messages[1].text) == {'user_message': instruction, 'existing': []}
             calls.append(messages)
-            return AIMessage(content='{"memories": []}')
+            return assistant_message(content='{"memories": []}')
 
     result = asyncio.run(AutomaticMemory(config, client.app.state.memories).extract(
         {'instruction': instruction, 'message_id': 'prompt-memory'}, model=Model()))
@@ -57,13 +57,13 @@ def test_memory_extraction_uses_resource_without_replacing_user_data(client, con
 def test_tool_connection_test_uses_managed_message_and_description():
     class Model:
         def client(self): return self
-        def bind_tools(self, tools, tool_choice):
+        def with_tools(self, tools, tool_choice):
             assert tool_choice == 'verify_connection'
             assert tools[0]['function']['description'] == prompt_catalog.tool_description('verify_connection')
             return self
-        async def ainvoke(self, messages):
-            assert len(messages) == 1 and messages[0].content == prompt_catalog.load_text('connection/tool-user.md')
-            return AIMessage(content='', tool_calls=[{'id': 'verify', 'name': 'verify_connection', 'args': {'value': 'ok'}}])
+        async def complete(self, messages):
+            assert len(messages) == 1 and messages[0].text == prompt_catalog.load_text('connection/tool-user.md')
+            return assistant_message(content='', tool_calls=[{'id': 'verify', 'name': 'verify_connection', 'args': {'value': 'ok'}}])
 
     assert asyncio.run(tool_call_self_test(Model())) == {'available': True, 'tool_calling': True}
 

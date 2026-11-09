@@ -4,7 +4,7 @@ import json
 import time
 
 import pytest
-from langchain_core.messages import AIMessage
+from pi_fakes import assistant_message
 
 from interview_backend.agent.graph import AgentEngine
 from interview_backend.agent.intent import apply
@@ -31,16 +31,16 @@ class EditModel:
         self.payload = None
         self.calls = 0
 
-    def bind_tools(self, tools): return self
+    def with_tools(self, tools): return self
 
-    async def ainvoke(self, messages):
+    async def complete(self, messages):
         self.calls += 1
         if self.calls == 1:
-            self.payload = json.loads(messages[-1].content)
+            self.payload = json.loads(messages[-1].text)
             if self.mutate: self.mutate()
         if self.tools and self.calls == 1:
-            return AIMessage(content='', tool_calls=[{'name':'changesets__apply', 'args':{'targets':self.targets}, 'id':'speaker-fix'}])
-        return AIMessage(content=json.dumps({'answer':'自我介绍归给回答者，保留原文字。', 'claims':[],
+            return assistant_message(content='', tool_calls=[{'name':'changesets__apply', 'args':{'targets':self.targets}, 'id':'speaker-fix'}])
+        return assistant_message(content=json.dumps({'answer':'自我介绍归给回答者，保留原文字。', 'claims':[],
                                             'targets':[] if self.tools else self.targets}))
 
 

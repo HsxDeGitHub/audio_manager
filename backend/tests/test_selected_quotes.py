@@ -5,7 +5,7 @@ import json
 import time
 
 import pytest
-from langchain_core.messages import AIMessage
+from pi_fakes import assistant_message
 from interview_backend.agent.graph import AgentEngine
 from interview_backend.errors import DomainError
 from interview_backend.services.documents import DocumentService
@@ -23,13 +23,13 @@ def test_selected_words_reach_model_separately_and_edit_only_selected_segment(cl
     frozen = evidence.freeze(context, instruction)
 
     class Model:
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
-            payload = json.loads(messages[-1].content)
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
+            payload = json.loads(messages[-1].text)
             assert payload['instruction'] == instruction
             assert payload['selected_quotes'][0]['text'] == '原始'
             assert [s['resource_id'] for s in payload['untrusted_evidence']] == ['s1']
-            return AIMessage(content=json.dumps({'answer': '修订正文', 'claims': [], 'targets': [
+            return assistant_message(content=json.dumps({'answer': '修订正文', 'claims': [], 'targets': [
                 {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '合成问题'}}]}))
 
     result = asyncio.run(AgentEngine(config, client.app.state.tools, evidence).execute('selected-edit', instruction, frozen, model=Model()))

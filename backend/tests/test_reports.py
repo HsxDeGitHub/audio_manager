@@ -41,7 +41,7 @@ def test_weekly_context_freezes_read_targets_without_expanding_write_scope(clien
 
 def test_weekly_batch_has_one_parent_receipt_and_rolls_back_if_later_child_fails(client, config):
     import json, pytest
-    from langchain_core.messages import AIMessage
+    from pi_fakes import assistant_message
     from interview_backend.agent.graph import AgentEngine
     from interview_backend.errors import DomainError
     week_fixture(client)
@@ -49,12 +49,12 @@ def test_weekly_batch_has_one_parent_receipt_and_rolls_back_if_later_child_fails
     service = client.app.state.agent.engine.reports
     class Model:
         def __init__(self, fail): self.fail = fail
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
-            prompt = json.loads(messages[-1].content)
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
+            prompt = json.loads(messages[-1].text)
             identifier = prompt['untrusted_evidence'][0]['resource_id']
             if self.fail and identifier == 's3': raise RuntimeError('later child failure')
-            return AIMessage(content=json.dumps({'answer':'建议', 'claims':[], 'targets':[
+            return assistant_message(content=json.dumps({'answer':'建议', 'claims':[], 'targets':[
                 {'resource_type':'segment','resource_id':identifier,'expected_revision':1,'fields':{'text':'周批量'}}]}))
     parent = evidence.freeze({'scope':'all'}, '请修改本周全部面试')
     parent['report_plan'] = service.freeze(parent, parent['instruction'], '2026-10-21')
@@ -69,17 +69,17 @@ def test_weekly_batch_has_one_parent_receipt_and_rolls_back_if_later_child_fails
 
 def test_weekly_subtasks_cannot_write_outside_parent_or_use_changed_source(client, config):
     import json, pytest
-    from langchain_core.messages import AIMessage
+    from pi_fakes import assistant_message
     from interview_backend.errors import DomainError
     week_fixture(client)
     evidence = client.app.state.evidence
     engine = client.app.state.agent.engine
     class Model:
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
-            prompt = json.loads(messages[-1].content)
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
+            prompt = json.loads(messages[-1].text)
             identifier = prompt['untrusted_evidence'][0]['resource_id']
-            return AIMessage(content=json.dumps({'answer':'建议','claims':[], 'targets':[
+            return assistant_message(content=json.dumps({'answer':'建议','claims':[], 'targets':[
                 {'resource_type':'segment','resource_id':identifier,'expected_revision':1,'fields':{'text':'修改'}}]}))
     parent = evidence.freeze({'recording_id':'r1'}, '本周仅修改当前面试，并分析全部面试')
     parent['report_plan'] = engine.reports.freeze(parent, parent['instruction'], '2026-10-21')

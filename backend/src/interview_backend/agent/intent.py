@@ -40,7 +40,7 @@ def explicit_readonly(instruction):
 
 
 async def resolve(settings, registry, context, model=None):
-    from langchain_core.messages import HumanMessage, SystemMessage
+    from interview_backend.agent.protocol import Message
     catalog = [{k: t[k] for k in ('id', 'title', 'effect')}
                for t in registry.list() if t['effect'] in {'device', 'external'}]
     # 分类不接收资料正文、选区文字、记忆或工具结果，只使用本轮指令及受限历史。
@@ -54,11 +54,11 @@ async def resolve(settings, registry, context, model=None):
                'schema': TaskIntent.model_json_schema()}
     try:
         client = model or ModelSettings.load(settings.data_dir).client()
-        response = await client.ainvoke([SystemMessage(content=load_text('agent/intent.md')),
-                                       HumanMessage(content=encode(payload))])
+        response = await client.complete([Message(role='system', content=load_text('agent/intent.md')),
+                                       Message(role='user', content=encode(payload))])
         if getattr(response, 'tool_calls', None):
             raise ValueError()
-        raw = response.content
+        raw = response.text
         if not isinstance(raw, str):
             raise ValueError()
         raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw.strip())

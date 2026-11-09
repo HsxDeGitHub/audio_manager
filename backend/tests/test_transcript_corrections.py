@@ -2,7 +2,7 @@
 import asyncio
 import json
 
-from langchain_core.messages import AIMessage
+from pi_fakes import assistant_message
 import pytest
 
 from interview_backend.agent.graph import AgentEngine
@@ -35,12 +35,12 @@ def test_text_correction_is_not_blocked_by_unconfirmed_identity(client, config, 
     before = snapshot(client)
     class Model:
         calls = 0
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
             self.calls += 1
             if tool_call and self.calls == 1:
-                return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'edit', 'args': {'targets': [target]}}])
-            return AIMessage(content=json.dumps({'answer': '已登记为 planned，待提交；说话人身份未确认。',
+                return assistant_message(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'edit', 'args': {'targets': [target]}}])
+            return assistant_message(content=json.dumps({'answer': '已登记为 planned，待提交；说话人身份未确认。',
                 'claims': [claim], **({} if tool_call else {'targets': [target]})}))
     model = Model()
     engine = AgentEngine(config, client.app.state.tools, client.app.state.evidence)
@@ -64,8 +64,8 @@ def test_identity_assertion_still_rejected_for_qa_without_an_edit(client, config
     instruction = '分析这次对话中的身份'
     context = client.app.state.evidence.freeze({'recording_id': 'r1'}, instruction)
     class Model:
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages): return AIMessage(content=json.dumps({'answer': '未经证实的身份断言', 'claims': [claim]}))
+        def with_tools(self, tools): return self
+        async def complete(self, messages): return assistant_message(content=json.dumps({'answer': '未经证实的身份断言', 'claims': [claim]}))
     with pytest.raises(DomainError) as error:
         asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('identity-qa', instruction, context, model=Model()))
     assert error.value.code == 'identity_unconfirmed'
@@ -80,8 +80,8 @@ def test_edit_claim_filter_keeps_source_scope_and_version_checks(client, config,
     claim['sources'] = [source]
     before = snapshot(client)
     class Model:
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages): return AIMessage(content=json.dumps({'answer': '待提交', 'claims': [claim], 'targets': [target]}))
+        def with_tools(self, tools): return self
+        async def complete(self, messages): return assistant_message(content=json.dumps({'answer': '待提交', 'claims': [claim], 'targets': [target]}))
     with pytest.raises(DomainError) as error:
         asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('identity-bad-source', instruction, context, model=Model()))
     assert error.value.code == 'stale_source' and snapshot(client) == before
@@ -93,13 +93,13 @@ def test_prose_only_planned_edit_is_repaired_before_reporting_success(client, co
     before = snapshot(client)
     class Model:
         calls = 0
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
             self.calls += 1
             if self.calls == 1 or (bad_retry and self.calls == 2):
-                return AIMessage(content=json.dumps({'answer': '正文纠错已登记为 planned，尚未提交。', 'claims': []}))
-            assert '没有返回可执行目标' in messages[-1].content
-            return AIMessage(content=json.dumps({'answer': '准备修改', 'claims': [], 'targets': [target]}))
+                return assistant_message(content=json.dumps({'answer': '正文纠错已登记为 planned，尚未提交。', 'claims': []}))
+            assert '没有返回可执行目标' in messages[-1].text
+            return assistant_message(content=json.dumps({'answer': '准备修改', 'claims': [], 'targets': [target]}))
     model = Model()
     engine = AgentEngine(config, client.app.state.tools, client.app.state.evidence)
     if bad_retry:
@@ -115,10 +115,10 @@ def test_repair_with_no_matching_text_does_not_create_a_change(client, config):
     before = snapshot(client)
     class Model:
         calls = 0
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
             self.calls += 1
-            return AIMessage(content=json.dumps({'answer': '正文已修改' if self.calls == 1 else '未找到匹配文字，正文没有变化。',
+            return assistant_message(content=json.dumps({'answer': '正文已修改' if self.calls == 1 else '未找到匹配文字，正文没有变化。',
                                                 'claims': [], **({} if self.calls == 1 else {'no_match': True})}))
     result = asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('no-text-match', instruction, context, model=Model()))
     assert '没有变化' in result['answer'] and not result.get('changesets') and snapshot(client) == before

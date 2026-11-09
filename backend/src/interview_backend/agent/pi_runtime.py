@@ -1,6 +1,5 @@
 """Pi SDK 的本地 JSONL 桥，工具执行始终回到绑定业务上下文的 Python 闭包。"""
 import asyncio
-import importlib.util
 from contextlib import suppress
 from contextvars import ContextVar
 import json
@@ -29,8 +28,7 @@ def runtime_paths():
 def available():
     runtime, node = runtime_paths()
     return bool(node and (runtime / 'runner.mjs').is_file()
-                and (runtime / 'node_modules/@earendil-works/pi-coding-agent/dist/index.js').is_file()
-                and importlib.util.find_spec('langchain_core') is not None)
+                and (runtime / 'node_modules/@earendil-works/pi-coding-agent/dist/index.js').is_file())
 
 
 class PiProviderError(Exception):
@@ -181,40 +179,13 @@ class PiBridge:
 
 
 def host_messages(system_prompt, messages):
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-    result = [SystemMessage(content=system_prompt)]
-    for message in messages:
-        original = message.get('hostMessage')
-        if original:
-            result.append(AIMessage.model_validate(original))
-        elif message['role'] == 'user':
-            content = message['content']
-            text = content if isinstance(content, str) else ''.join(b.get('text', '') for b in content)
-            result.append(HumanMessage(content=text))
-        elif message['role'] == 'toolResult':
-            result.append(ToolMessage(content=''.join(b.get('text', '') for b in message['content']),
-                                      tool_call_id=message['toolCallId']))
-        else:
-            result.append(AIMessage(content=''.join(b.get('text', '') for b in message['content'] if b['type'] == 'text'),
-                tool_calls=[{'id': b['id'], 'name': b['name'], 'args': b['arguments']}
-                            for b in message['content'] if b['type'] == 'toolCall']))
-    return result
-
-
-def assistant_message(response):
-    content = response.content if isinstance(response.content, str) else ''.join(b.get('text', '') for b in response.content)
-    return {'role': 'assistant', 'content': [{'type': 'text', 'text': content}] + [
-        {'type': 'toolCall', 'id': c['id'], 'name': c['name'], 'arguments': c['args']} for c in response.tool_calls],
-        'api': 'openai-completions', 'provider': 'tingyue', 'model': 'host',
-        'usage': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'totalTokens': 0,
-                  'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'total': 0}},
-        'stopReason': 'toolUse' if response.tool_calls else 'stop', 'timestamp': 0,
-        'hostMessage': response.model_dump(mode='json')}
+    from interview_backend.agent.protocol import Message
+    return [Message(role='system', content=system_prompt)] + [Message.model_validate(value) for value in messages]
 
 
 async def run_session(tools, messages, model_step, tool_step):
     """Pi 执行工具循环，业务步骤仍使用稳定编号和原有回执。"""
-    from langchain_core.messages import AIMessage
+    from interview_backend.agent.protocol import Message
     turn = -1
     call_index = 0
     tool_names = {tool.name for tool in tools}
@@ -234,12 +205,12 @@ async def run_session(tools, messages, model_step, tool_step):
             if any(call['name'] not in tool_names for call in response.tool_calls):
                 raise DomainError('tool_not_allowed', '该工具在当前用户消息范围内不可用。', 403)
             from pydantic import ValidationError
-            native = assistant_message(response)
+            native = response.native()
             originals.clear()
-            for call, block in zip(response.tool_calls, native['content'][1:]):
+            for call, block in zip(response.tool_calls, [b for b in native['content'] if b['type'] == 'toolCall']):
                 tool = next(t for t in tools if t.name == call['name'])
                 try:
-                    arguments = tool.args_schema.model_validate(call['args'])
+                    arguments = tool.input_model.model_validate(call['arguments'])
                 except ValidationError:
                     raise DomainError('invalid_tool_arguments', '工具参数不合法。', 422) from None
                 block['arguments'] = arguments.model_dump(mode='json', exclude_unset=True)
@@ -253,8 +224,8 @@ async def run_session(tools, messages, model_step, tool_step):
 
     async with PiBridge() as bridge:
         value = await bridge.request('agent', {
-            'systemPrompt': messages[0].content, 'prompt': messages[-1].content,
-            'tools': [{'name': t.name, 'description': t.description, 'parameters': t.args_schema.model_json_schema()}
+            'systemPrompt': messages[0].text, 'prompt': messages[-1].text,
+            'tools': [{'name': t.name, 'description': t.description, 'parameters': t.parameters}
                       for t in tools],
         }, callback=callback)
-        return AIMessage.model_validate(value['response']), host_messages(value['systemPrompt'], value['messages'])[:-1]
+        return Message.model_validate(value['response']), host_messages(value['systemPrompt'], value['messages'])[:-1]

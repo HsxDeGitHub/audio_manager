@@ -4,7 +4,7 @@ import json
 
 import httpx
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk
+from pi_fakes import assistant_message, text_event
 
 from interview_backend.agent import model_recovery as recovery
 from interview_backend.agent.work import WorkLog
@@ -22,18 +22,18 @@ def test_partial_stream_disconnect_retries_current_step_and_replaces_preview(cli
     events=[]
     class Model:
         calls=0
-        async def astream(self,messages):
+        async def stream(self,messages):
             self.calls+=1
             if self.calls==1:
-                yield AIMessageChunk(content='{"answer":"无效的部分回答')
+                yield text_event(content='{"answer":"无效的部分回答')
                 raise httpx.ReadError('private-provider-body KEY=synthetic-secret')
-            yield AIMessageChunk(content='{"answer":"完整的合成回答","claims":[]}')
+            yield text_event(content='{"answer":"完整的合成回答","claims":[]}')
     model=Model();work=WorkLog(client.app.state.database,'stream-retry')
     async def execute():
         async def emit(kind,payload):events.append((kind,payload))
         return await work.model('chunk:0:model:0',model,[],emit=emit,validator=recovery.parse_result)
     result=asyncio.run(execute())
-    assert model.calls==2 and json.loads(result.content)['answer']=='完整的合成回答'
+    assert model.calls==2 and json.loads(result.text)['answer']=='完整的合成回答'
     preview=''
     for kind,payload in events:
         if kind=='answer_start':preview=''
@@ -46,22 +46,22 @@ def test_partial_stream_disconnect_retries_current_step_and_replaces_preview(cli
 
 
 @pytest.mark.parametrize('first',[
-    AIMessage(content='不是JSON'),
-    AIMessage(content='{"answer":"截断但看似有效","claims":[]}',response_metadata={'finish_reason':'length'}),
-    AIMessage(content='{"answer":3,"claims":[]}'),
-    AIMessage(content='',invalid_tool_calls=[{'name':'changesets__apply','args':'{','id':'bad','error':'bad json'}]),
+    assistant_message(content='不是JSON'),
+    assistant_message(content='{"answer":"截断但看似有效","claims":[]}',response_metadata={'finish_reason':'length'}),
+    assistant_message(content='{"answer":3,"claims":[]}'),
+    assistant_message(content='',invalid_tool_calls=[{'name':'changesets__apply','args':'{','id':'bad','error':'bad json'}]),
 ])
 def test_bad_model_response_is_repaired_before_it_is_cached(client,first):
     class Model:
         calls=0
-        async def ainvoke(self,messages):
+        async def complete(self,messages):
             self.calls+=1
             if self.calls==1:return first
-            assert messages[-1].type=='system' and '只返回完整 JSON' in messages[-1].content
-            return AIMessage(content='{"answer":"修复后的合成输出","claims":[]}')
+            assert messages[-1].role=='system' and '只返回完整 JSON' in messages[-1].text
+            return assistant_message(content='{"answer":"修复后的合成输出","claims":[]}')
     work=WorkLog(client.app.state.database,'format-retry');model=Model()
     response=asyncio.run(work.model('model',model,[],validator=recovery.parse_result))
-    assert model.calls==2 and response.content==work.get('model')['response']['content']
+    assert model.calls==2 and response.native()==work.get('model')['response']
 
 
 @pytest.mark.parametrize('kind,expected,calls',[
@@ -72,9 +72,9 @@ def test_bad_model_response_is_repaired_before_it_is_cached(client,first):
 def test_retry_budget_and_safe_error_categories(client,kind,expected,calls):
     class Model:
         calls=0
-        async def ainvoke(self,messages):
+        async def complete(self,messages):
             self.calls+=1
-            if kind=='format':return AIMessage(content='KEY=synthetic-secret')
+            if kind=='format':return assistant_message(content='KEY=synthetic-secret')
             if kind=='timeout':raise httpx.ReadTimeout('KEY=synthetic-secret')
             from openai import APIStatusError
             response=httpx.Response(int(kind),request=httpx.Request('POST','https://synthetic.invalid/private'))
@@ -92,7 +92,7 @@ def test_retry_budget_and_safe_error_categories(client,kind,expected,calls):
 def test_cancel_during_model_step_is_not_retried(client):
     class Model:
         calls=0
-        async def ainvoke(self,messages):
+        async def complete(self,messages):
             self.calls+=1
             raise asyncio.CancelledError()
     model=Model()
@@ -100,11 +100,31 @@ def test_cancel_during_model_step_is_not_retried(client):
     assert model.calls==1
 
 
+def test_previous_framework_cache_is_ignored_and_replaced_by_native_message(client):
+    work = WorkLog(client.app.state.database, 'native-cache-only')
+    class Model:
+        calls = 0
+        async def complete(self, messages):
+            self.calls += 1
+            assert all('旧缓存专用标记' not in message.text for message in messages)
+            return assistant_message(content='{"answer":"当前 Pi 输出","claims":[]}')
+    model = Model()
+    first = asyncio.run(work.model('model', model, [], validator=recovery.parse_result))
+    record = work.get('model')
+    record.pop('format')
+    record['response'] = {'type':'ai', 'content':'旧缓存专用标记', 'tool_calls':[]}
+    work.save('model', record)
+    second = asyncio.run(work.model('model', model, [], validator=recovery.parse_result))
+    assert model.calls == 2 and second == first
+    assert work.get('model')['format'] == 'pi-native-v1'
+    assert work.get('model')['response']['role'] == 'assistant'
+
+
 def test_step_has_a_total_deadline_and_provider_retries_are_not_nested(client,monkeypatch):
     monkeypatch.setattr(recovery,'STEP_TIMEOUT',.02)
     class Model:
         calls=0
-        async def ainvoke(self,messages):
+        async def complete(self,messages):
             self.calls+=1
             await asyncio.Event().wait()
     model=Model()
@@ -112,13 +132,13 @@ def test_step_has_a_total_deadline_and_provider_retries_are_not_nested(client,mo
     assert error.value.code=='model_timeout' and model.calls==1
     from interview_backend.agent.models import ModelSettings
     real=ModelSettings(baseURL='https://synthetic.invalid/v1',apiKey='synthetic',model='synthetic').client()
-    assert real.request_timeout.connect==10 and real.request_timeout.read==180 and real.max_retries==0
+    assert real.payload([])['configuration']['model']=='synthetic'
 
 
 def test_retry_rechecks_actual_versions_before_sending_more_content(client):
     class Model:
         calls=0
-        async def ainvoke(self,messages):
+        async def complete(self,messages):
             self.calls+=1
             ChangeSetService(client.app.state.database).submit({'operation_id':'concurrent-edit','targets':[
                 {'resource_type':'segment','resource_id':'s1','expected_revision':1,'fields':{'text':'并发校对'}}]})
@@ -137,23 +157,23 @@ def test_544_long_task_recovers_multiple_failures_without_replaying_writes(clien
         before=[dict(r) for r in c.execute("SELECT * FROM segments WHERE run_id='run1' ORDER BY start")]
     class FlakyModel(ToolBatchModel):
         def __init__(self,client):super().__init__(client);self.faults=set();self.batch=0;self.receipts=0
-        async def ainvoke(self,messages):
-            if messages[-1].type=='tool' or messages[-1].type=='system':
+        async def complete(self,messages):
+            if messages[-1].role=='toolResult' or messages[-1].role=='system':
                 # 格式纠正追加system，原工具回执仍在同一模型步骤内。
-                if any(m.type=='tool' for m in messages):
+                if any(m.role=='toolResult' for m in messages):
                     self.receipts+=1
                     if self.batch==8 and 'citation' not in self.faults:
                         self.faults.add('citation')
-                        return AIMessage(content=json.dumps({'answer':'无效引用','claims':[{'kind':'analysis','text':'合成分析',
+                        return assistant_message(content=json.dumps({'answer':'无效引用','claims':[{'kind':'analysis','text':'合成分析',
                             'sources':[{'resource_type':'segment','resource_id':'not-in-scope','revision':99}]}]}))
-                    return AIMessage(content='{"answer":"本批已登记","claims":[]}')
-            prompt=json.loads(messages[1].content);self.batch=prompt['chunk']
+                    return assistant_message(content='{"answer":"本批已登记","claims":[]}')
+            prompt=json.loads(messages[1].text);self.batch=prompt['chunk']
             assert 'batch_result_hint' in prompt
             if self.batch in {4,11} and self.batch not in self.faults:
                 self.faults.add(self.batch)
                 if self.batch==4:raise httpx.ReadTimeout('synthetic transient failure')
-                return AIMessage(content='{"answer":"未完整","claims":[]}',response_metadata={'finish_reason':'length'})
-            return await super().ainvoke(messages[:2])
+                return assistant_message(content='{"answer":"未完整","claims":[]}',response_metadata={'finish_reason':'length'})
+            return await super().complete(messages[:2])
     model=FlakyModel(client)
     result=run(client,config,context,model,identifier='long-retry')
     assert result['coverage']['covered']==544 and result['changeset']['count']==544

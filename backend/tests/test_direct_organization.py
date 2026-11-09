@@ -3,7 +3,7 @@ import asyncio
 import json
 
 import pytest
-from langchain_core.messages import AIMessage
+from pi_fakes import assistant_message
 
 from interview_backend.agent.graph import AgentEngine
 from interview_backend.errors import DomainError
@@ -41,17 +41,17 @@ def test_organization_is_an_explicit_transcript_edit(client, instruction, allowe
 
 class OrganizationModel:
     def __init__(self, targets=None): self.targets = targets
-    def bind_tools(self, tools):
+    def with_tools(self, tools):
         assert 'organize__start' not in {t.name for t in tools}
         return self
-    async def ainvoke(self, messages):
-        prompt = json.loads(messages[-1].content)
+    async def complete(self, messages):
+        prompt = json.loads(messages[-1].text)
         assert prompt['allow_write'] and prompt['transcript_organization']
         targets = self.targets or [
             {'resource_type': 'segment', 'resource_id': source['resource_id'],
              'expected_revision': source['revision'], 'fields': {'text': '整理后：' + source['text']}}
             for source in prompt['untrusted_evidence']]
-        return AIMessage(content=json.dumps({'answer': '正文整理建议。', 'claims': [], 'targets': targets}))
+        return assistant_message(content=json.dumps({'answer': '正文整理建议。', 'claims': [], 'targets': targets}))
 
 
 def test_direct_organization_commits_once_preserves_originals_and_undoes(client, config):

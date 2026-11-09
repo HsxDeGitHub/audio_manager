@@ -1,6 +1,6 @@
 import json,time
 import pytest
-from langchain_core.messages import AIMessage
+from pi_fakes import assistant_message
 from interview_backend.agent.models import ModelSettings
 
 
@@ -11,14 +11,14 @@ def prepare(client,monkeypatch,cancel=False):
     class Model:
         count=0
         ready=False
-        def bind_tools(self,tools):return self
-        async def ainvoke(self,messages):
+        def with_tools(self,tools):return self
+        async def complete(self,messages):
             import asyncio
             self.count+=1
             if self.count==2 and not self.ready:
                 if cancel:await asyncio.sleep(30)
                 else:raise RuntimeError('第二块合成失败')
-            return AIMessage(content=json.dumps({'answer':'已保留的合成分块分析','claims':[]}))
+            return assistant_message(content=json.dumps({'answer':'已保留的合成分块分析','claims':[]}))
     model=Model()
     class Settings:
         def client(self):return model
@@ -73,11 +73,11 @@ def test_mixed_sources_count_only_fully_processed_sources(client,monkeypatch):
         c.execute("UPDATE segments SET original='另一个短来源',edited=NULL WHERE id='s2'")
     class Model:
         count=0
-        def bind_tools(self,tools):return self
-        async def ainvoke(self,messages):
+        def with_tools(self,tools):return self
+        async def complete(self,messages):
             self.count+=1
             if self.count==2:raise RuntimeError('合成后块失败')
-            return AIMessage(content=json.dumps({'answer':'第一组','claims':[]}))
+            return assistant_message(content=json.dumps({'answer':'第一组','claims':[]}))
     from interview_backend.errors import DomainError
     engine=client.app.state.agent.engine;context=client.app.state.evidence.freeze({'recording_id':'r1'},'分析全部资料')
     with pytest.raises(DomainError):asyncio.run(engine.execute('mixed-coverage',context['instruction'],context,model=Model()))

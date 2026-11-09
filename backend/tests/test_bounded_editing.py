@@ -5,7 +5,7 @@ import threading
 import uuid
 
 import pytest
-from langchain_core.messages import AIMessage
+from pi_fakes import assistant_message
 
 from interview_backend.agent.batching import MAX_PARTS, MAX_INPUT_BYTES, make_chunks, bounded_memories
 from interview_backend.agent.graph import AgentEngine
@@ -38,16 +38,16 @@ class BatchModel:
         self.client,self.fail_at,self.wrong_revision,self.mutate=client,fail_at,wrong_revision,mutate
         self.calls=[]; self.bytes=[]
 
-    def bind_tools(self,tools):
+    def with_tools(self,tools):
         apply=next(t for t in tools if t.name=='changesets__apply')
-        schema=apply.args_schema.model_json_schema()
+        schema=apply.parameters
         assert 'expected_revision' not in schema['$defs']['ProposedTarget']['required']
         return self
 
-    async def ainvoke(self,messages):
-        prompt=json.loads(messages[-1].content)
+    async def complete(self,messages):
+        prompt=json.loads(messages[-1].text)
         sources=prompt['untrusted_evidence']; self.calls.append([s['resource_id'] for s in sources])
-        self.bytes.append(len(messages[-1].content.encode()))
+        self.bytes.append(len(messages[-1].text.encode()))
         assert len(sources)<=MAX_PARTS and self.bytes[-1]<MAX_INPUT_BYTES
         assert len(prompt['scope'])<=MAX_PARTS+3
         assert prompt['host_bound_revisions'] and not prompt['pending_proposals']
@@ -59,18 +59,18 @@ class BatchModel:
             self.mutate(sources[0]); self.mutate=None
         targets=[{'resource_type':'segment','resource_id':s['resource_id'],'fields':{'speaker':1},
                   **({'expected_revision':1} if self.wrong_revision else {})} for s in sources]
-        return AIMessage(content=json.dumps({'answer':'合成发言归属建议','claims':[],'targets':targets}))
+        return assistant_message(content=json.dumps({'answer':'合成发言归属建议','claims':[],'targets':targets}))
 
 
 class ToolBatchModel(BatchModel):
-    async def ainvoke(self,messages):
-        if messages[-1].type=='tool':
-            receipt=json.loads(messages[-1].content)['result']
+    async def complete(self,messages):
+        if messages[-1].role=='toolResult':
+            receipt=json.loads(messages[-1].text)['result']
             assert receipt['state']=='planned' and 'items' not in receipt
-            assert len(messages[-1].content.encode())<1000
-            return AIMessage(content=json.dumps({'answer':'本批已登记','claims':[]}))
-        result=json.loads((await super().ainvoke(messages)).content)
-        return AIMessage(content='',tool_calls=[{'name':'changesets__apply','args':{'targets':result['targets']},'id':'batch'}])
+            assert len(messages[-1].text.encode())<1000
+            return assistant_message(content=json.dumps({'answer':'本批已登记','claims':[]}))
+        result=json.loads((await super().complete(messages)).text)
+        return assistant_message(content='',tool_calls=[{'name':'changesets__apply','args':{'targets':result['targets']},'id':'batch'}])
 
 
 def run(client,config,context,model,identifier='bounded-edit'):
@@ -149,16 +149,16 @@ def test_repeated_read_does_not_duplicate_the_frozen_library(client,config):
     context=seed(client,40)
     class ReadAgain(BatchModel):
         def __init__(self,client):super().__init__(client);self.current=None;self.reads=0
-        def bind_tools(self,tools):return self
-        async def ainvoke(self,messages):
-            if messages[-1].type=='tool':
-                result=json.loads(messages[-1].content)['result'];self.reads+=1
+        def with_tools(self,tools):return self
+        async def complete(self,messages):
+            if messages[-1].role=='toolResult':
+                result=json.loads(messages[-1].text)['result'];self.reads+=1
                 assert result['already_provided'] and 'sources' not in result
-                return AIMessage(content=json.dumps({'answer':'本批只作分析','claims':[]}))
-            self.current=json.loads(messages[-1].content)
+                return assistant_message(content=json.dumps({'answer':'本批只作分析','claims':[]}))
+            self.current=json.loads(messages[-1].text)
             if 'untrusted_parts' in self.current:
-                return AIMessage(content=json.dumps({'answer':'合成综合','claims':[]}))
-            return AIMessage(content='',tool_calls=[{'name':'evidence__read','id':'r','args':{}}])
+                return assistant_message(content=json.dumps({'answer':'合成综合','claims':[]}))
+            return assistant_message(content='',tool_calls=[{'name':'evidence__read','id':'r','args':{}}])
     context['allow_write']=False
     model=ReadAgain(client);result=run(client,config,context,model)
     assert model.reads==result['coverage']['chunks'] and result['coverage']['covered']==40
@@ -183,8 +183,8 @@ def test_a_batch_cannot_write_an_unread_later_batch(client,config):
     context=seed(client,80)
     last=context['sources'][-1]
     class EscapeModel(BatchModel):
-        async def ainvoke(self,messages):
-            return AIMessage(content=json.dumps({'answer':'不应跨批修改','claims':[], 'targets':[
+        async def complete(self,messages):
+            return assistant_message(content=json.dumps({'answer':'不应跨批修改','claims':[], 'targets':[
                 {'resource_type':'segment','resource_id':last['resource_id'],'fields':{'speaker':1}}]}))
     with pytest.raises(DomainError) as error:run(client,config,context,EscapeModel(client))
     assert error.value.code=='scope_denied'

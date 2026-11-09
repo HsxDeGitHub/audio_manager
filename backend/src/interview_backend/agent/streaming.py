@@ -55,14 +55,14 @@ def answer_prefix(content):
 
 
 def text_content(message):
-    if isinstance(message.content, str): return message.content
-    return ''.join(b.get('text', '') for b in message.content if isinstance(b, dict) and b.get('type') == 'text')
+    return message.text
 
 
 async def invoke(bound, messages, emit=None, block_id='answer'):
-    from langchain_core.messages import AIMessageChunk, message_chunk_to_message
+    from interview_backend.agent.protocol import Message
     if emit: await emit('answer_start', {'block_id': block_id})
     aggregate = None
+    text = ''
     emitted = ''
     last = 0.0
     async def preview(force=False):
@@ -71,28 +71,33 @@ async def invoke(bound, messages, emit=None, block_id='answer'):
         if value.startswith(emitted) and len(value) > len(emitted) and (force or time.monotonic()-last >= .05):
             if emit: await emit('answer_delta', {'block_id':block_id, 'text':value[len(emitted):]})
             emitted = value; last = time.monotonic()
-    if not hasattr(bound, 'astream'):
-        aggregate = await bound.ainvoke(messages)
+    if not hasattr(bound, 'stream'):
+        aggregate = await bound.complete(messages)
     else:
         try:
-            async for chunk in bound.astream(messages):
-                if emit and (getattr(chunk, 'response_metadata', None) or {}).get('pi_non_streaming'):
+            async for event in bound.stream(messages):
+                if event['type'] == 'text_delta':
+                    text += event['delta']
+                    aggregate = Message(role='assistant', content=[{'type':'text','text':text}], stopReason='stop')
+                elif event['type'] == 'done':
+                    aggregate = event['message']
+                elif event['type'] == 'toolcall_delta':
+                    aggregate = Message.model_validate(event['partial'])
+                elif event['type'] == 'generation_mode' and emit:
                     await emit('generation_mode', {'message':'模型接口不支持流式，正在等待完整回答。'})
-                aggregate = chunk if aggregate is None else aggregate + chunk
-                if emit: await preview()
+                if emit and aggregate is not None: await preview()
         except Exception as error:
-            # 本层只处理明确不支持stream的回退。中途失败交给WorkLog重试当前模型步骤，工具由外层执行。
             body = getattr(error, 'body', None) or {}
             detail = body.get('error', body) if isinstance(body, dict) else {}
             unsupported = getattr(error, 'status_code', None) == 501 or (detail.get('param') == 'stream' and detail.get('code') in {'unsupported_value','unsupported_parameter','not_supported'})
             if aggregate is not None or not unsupported: raise
             if emit: await emit('generation_mode', {'message':'模型接口不支持流式，正在等待完整回答。'})
-            aggregate = await bound.ainvoke(messages)
+            aggregate = await bound.complete(messages)
     if aggregate is None: raise ValueError('empty model stream')
-    if getattr(aggregate, 'tool_calls', None):
+    if aggregate.tool_calls:
         if emit: await emit('answer_start', {'block_id':block_id})
     elif emit: await preview(force=True)
-    return message_chunk_to_message(aggregate) if isinstance(aggregate, AIMessageChunk) else aggregate
+    return aggregate
 
 
 def output_snapshot(c, run_id):

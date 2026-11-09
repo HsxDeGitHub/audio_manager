@@ -93,7 +93,7 @@ def build(app_dir, embeddings):
         link.symlink_to('../../python-base/bin/python3' if name == 'python' else 'python')
 
     pi_manifest = build_pi_runtime(runtime / 'pi-agent')
-    modules = ['interview_backend', 'interview_backend.app', 'fastapi', 'mcp', 'langchain_core']
+    modules = ['interview_backend', 'interview_backend.app', 'fastapi', 'mcp', 'interview_backend.agent.protocol']
     if embeddings:
         modules += ['fastembed', 'numpy', 'jieba']
     run([venv / 'bin' / 'python', '-c', 'import ' + ', '.join(modules) + '; print("runtime imports ok")'])

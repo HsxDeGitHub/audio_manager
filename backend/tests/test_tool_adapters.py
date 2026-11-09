@@ -6,7 +6,7 @@ from mcp import types
 from mcp.server.lowlevel import Server
 from mcp.shared.memory import create_connected_server_and_client_session
 
-from interview_backend.agent.tools import framework_tools
+from interview_backend.agent.tools import pi_tools
 from interview_backend.errors import DomainError
 from interview_backend.tools.mcp_client import MCPClientManager
 from interview_backend.tools.mcp_server import build_server
@@ -49,13 +49,13 @@ def test_mcp_server_uses_same_catalog_results_and_disabled_state(client):
     asyncio.run(scenario())
 
 
-def test_native_langchain_and_mcp_adapters_return_equivalent_data(client):
+def test_native_pi_and_mcp_adapters_return_equivalent_data(client):
     async def scenario():
         context = ToolContext(request_id='adapters')
-        tools = {tool.name: tool for tool in framework_tools(client.app.state.tools, context)}
+        tools = {tool.name: tool for tool in pi_tools(client.app.state.tools, context)}
         descriptions = {tool['framework_name']: tool['description'] for tool in client.app.state.tools.list()}
         assert all(tool.description == descriptions[name] for name, tool in tools.items())
-        adapted = await tools['library__get_recording'].ainvoke({'recording_id': 'r1'})
+        adapted = await tools['library__get_recording'].execute({'recording_id': 'r1'})
         native = await client.app.state.tools.execute('library.get_recording', {'recording_id': 'r1'}, context)
         assert adapted == native['data']
         server = build_server(NativeAPI(client.app))
@@ -232,8 +232,8 @@ def test_same_device_operation_is_shared_by_native_framework_and_mcp(client,monk
     async def scenario():
         native=API(client.app).invoke('device.copy',{'text':'合成三入口'},'shared-device')
         ctx=ToolContext(request_id='framework-device',operation_id='shared-device',allowed_effects=frozenset({'device'}))
-        tools={t.name:t for t in framework_tools(client.app.state.tools,ctx)}
-        framed=await tools['device__copy'].ainvoke({'text':'合成三入口'})
+        tools={t.name:t for t in pi_tools(client.app.state.tools,ctx)}
+        framed=await tools['device__copy'].execute({'text':'合成三入口'})
         async with create_connected_server_and_client_session(build_server(API(client.app))) as session:
             result=await session.call_tool('device__copy',{'text':'合成三入口'},meta={'operation_id':'shared-device'})
             assert not result.isError

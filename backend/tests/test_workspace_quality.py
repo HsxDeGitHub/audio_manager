@@ -2,7 +2,7 @@
 import asyncio
 import json
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk
+from pi_fakes import assistant_message, text_event
 from interview_backend.errors import DomainError
 
 
@@ -53,23 +53,23 @@ def test_synthesis_reduces_parts_and_rejects_new_sources_or_side_effects(client,
     parts = [{'answer':'共同问题：缺少例子。','claims':[]},{'answer':'第二段也缺少例子，但给出了边界。','claims':[]}]
     class Model:
         calls = 0
-        async def ainvoke(self, messages):
+        async def complete(self, messages):
             self.calls += 1
-            payload = json.loads(messages[-1].content)
+            payload = json.loads(messages[-1].text)
             assert len(payload['untrusted_parts']) == 2
-            return AIMessage(content=json.dumps({'answer':'共同问题是缺少例子，第二段的边界说明较好。','claims':[]}))
+            return assistant_message(content=json.dumps({'answer':'共同问题是缺少例子，第二段的边界说明较好。','claims':[]}))
     model = Model()
     value = asyncio.run(synthesize(engine,'synth-read','完整总结',context,parts,model))
     assert value['answer'].startswith('共同问题') and model.calls == 1
     assert asyncio.run(synthesize(engine,'synth-read','完整总结',context,parts,model)) == value
     assert model.calls == 1
     class Invalid:
-        async def ainvoke(self,messages):
-            return AIMessage(content=json.dumps({'answer':'越界','claims':[{'text':'不存在的依据','kind':'analysis','sources':[{'resource_type':'segment','resource_id':'s3','revision':1}]}]}))
+        async def complete(self,messages):
+            return assistant_message(content=json.dumps({'answer':'越界','claims':[{'text':'不存在的依据','kind':'analysis','sources':[{'resource_type':'segment','resource_id':'s3','revision':1}]}]}))
     with pytest.raises(DomainError):
         asyncio.run(synthesize(engine,'synth-invalid','完整总结',context,parts,Invalid()))
     class Writer:
-        async def ainvoke(self,messages): return AIMessage(content='{"answer":"修改","claims":[],"targets":[]}')
+        async def complete(self,messages): return assistant_message(content='{"answer":"修改","claims":[],"targets":[]}')
     with pytest.raises(DomainError):
         asyncio.run(synthesize(engine,'synth-write','完整总结',context,parts,Writer()))
     assert evidence.committed('synth-write') == []
@@ -93,12 +93,12 @@ def test_proposal_selection_preserves_scope_and_rejects_stale_plan(client):
 def test_capability_tests_do_not_persist_credentials_or_return_provider_errors(client, monkeypatch):
     from interview_backend.agent.models import ModelSettings
     class Model:
-        def bind_tools(self, *args, **kwargs): return self
-        async def ainvoke(self, messages):
-            if messages[-1].content.startswith('这是合成的 JSON'): return AIMessage(content='{"ok":true}')
+        def with_tools(self, *args, **kwargs): return self
+        async def complete(self, messages):
+            if messages[-1].text.startswith('这是合成的 JSON'): return assistant_message(content='{"ok":true}')
             if len(messages)==1: raise ValueError('synthetic-secret private upstream body')
-            return AIMessage(content='准备就绪')
-        async def astream(self,messages): yield AIMessageChunk(content='合成增量')
+            return assistant_message(content='准备就绪')
+        async def stream(self,messages): yield text_event(content='合成增量')
     monkeypatch.setattr(ModelSettings,'client',lambda self:Model())
     response = client.post('/api/v1/models/test-capabilities',json={'baseURL':'https://synthetic.test/v1','model':'synthetic','apiKey':'synthetic-secret'})
     assert response.status_code == 200

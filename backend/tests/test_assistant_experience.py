@@ -1,7 +1,7 @@
 import asyncio
 import json
 import pytest
-from langchain_core.messages import AIMessageChunk
+from pi_fakes import text_event
 
 
 def test_answer_parser_only_top_level_and_unicode():
@@ -17,17 +17,17 @@ def test_stream_emits_before_model_finishes_and_preserves_tool_calls():
     from interview_backend.agent.streaming import invoke
     events = []
     class Model:
-        async def astream(self, messages):
-            yield AIMessageChunk(content='{"answer":"中文')
+        async def stream(self, messages):
+            yield text_event(content='{"answer":"中文')
             await asyncio.sleep(.06)
-            yield AIMessageChunk(content='输出')
+            yield text_event(content='输出')
             await asyncio.sleep(.06)
             assert any(k == 'answer_delta' for k, _ in events)
-            yield AIMessageChunk(content='","claims":[]}')
+            yield text_event(content='","claims":[]}')
     async def run():
         async def emit(kind, payload): events.append((kind, payload))
         result = await invoke(Model(), [], emit, 'block')
-        assert json.loads(result.content)['answer'] == '中文输出'
+        assert json.loads(result.text)['answer'] == '中文输出'
     asyncio.run(run())
     assert ''.join(p['text'] for k,p in events if k=='answer_delta') == '中文输出'
     assert len([1 for k,p in events if k=='answer_delta']) >= 2
@@ -89,35 +89,38 @@ def test_tool_arguments_and_reasoning_never_become_body():
     from interview_backend.agent.streaming import invoke
     events=[]
     class Model:
-        async def astream(self,messages):
-            yield AIMessageChunk(content='',additional_kwargs={'reasoning_content':'不可展示的内部推理'},tool_call_chunks=[{'name':'evidence__read','args':'{','id':'call','index':0}])
-            yield AIMessageChunk(content='',tool_call_chunks=[{'name':None,'args':'}','id':None,'index':0}])
+        async def stream(self,messages):
+            yield {'type':'toolcall_delta', 'partial':{'role':'assistant', 'content':[
+                {'type':'thinking','thinking':'不可展示的内部推理'},
+                {'type':'toolCall','name':'evidence__read','id':'call','arguments':{}}]}}
+            from pi_fakes import assistant_message
+            yield {'type':'done','message':assistant_message(tool_calls=[{'name':'evidence__read','id':'call','args':{}}])}
     async def run():
         async def emit(k,p):events.append((k,p))
         result=await invoke(Model(),[],emit,'tool')
-        assert result.tool_calls[0]['args']=={}
+        assert result.tool_calls[0]['arguments']=={}
     asyncio.run(run())
     assert not any(k=='answer_delta' for k,p in events)
 
 
 def test_explicit_stream_unsupported_fallback_and_midstream_failure_not_retried():
     from interview_backend.agent.streaming import invoke
-    from langchain_core.messages import AIMessage
+    from pi_fakes import assistant_message
     class Unsupported(Exception): status_code=501
     class Model:
         calls=0
-        async def astream(self,messages):
+        async def stream(self,messages):
             raise Unsupported()
             yield
-        async def ainvoke(self,messages):
+        async def complete(self,messages):
             self.calls+=1
-            return AIMessage(content='{"answer":"完整回退","claims":[]}')
+            return assistant_message(content='{"answer":"完整回退","claims":[]}')
     model=Model()
-    assert asyncio.run(invoke(model,[])).content
+    assert asyncio.run(invoke(model,[])).text
     assert model.calls==1
     class Broken(Model):
-        async def astream(self,messages):
-            yield AIMessageChunk(content='{"answer":"部分')
+        async def stream(self,messages):
+            yield text_event(content='{"answer":"部分')
             raise Unsupported()
     broken=Broken()
     with pytest.raises(Unsupported):asyncio.run(invoke(broken,[]))

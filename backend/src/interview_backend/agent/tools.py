@@ -1,4 +1,6 @@
 import hashlib
+from dataclasses import dataclass
+from typing import Callable
 import json
 import re
 from typing import Literal
@@ -200,8 +202,16 @@ class EvidenceService:
         return result
 
 
-def framework_tools(registry, context):
-    from langchain_core.tools import StructuredTool
+@dataclass(frozen=True)
+class PiTool:
+    name: str
+    description: str
+    parameters: dict
+    input_model: type[BaseModel]
+    execute: Callable
+
+
+def pi_tools(registry, context):
     tools = []
     for metadata in registry.list():
         spec = registry._tools[metadata['id']]
@@ -209,10 +219,10 @@ def framework_tools(registry, context):
         if context.frozen_context is not None and spec.effect in {'device', 'external'} and not action_allowed(spec.tool_id, context.frozen_context): continue
         # 冻结范围时只允许固定证据读取；写和设工具由执行器再次校验范围。
         if context.frozen_context is not None and spec.effect == 'read' and spec.tool_id not in {'evidence.read', 'models.status', 'system.status'}: continue
-        async def execute(_tool_id=spec.tool_id, **arguments):
+        async def execute(arguments, _tool_id=spec.tool_id):
             result = await registry.execute(_tool_id, arguments, context)
             return result['data']
-        tools.append(StructuredTool.from_function(coroutine=execute, name=spec.framework_name, description=spec.description, args_schema=spec.input_model))
+        tools.append(PiTool(spec.framework_name, spec.description, spec.input_model.model_json_schema(), spec.input_model, execute))
     return tools
 
 

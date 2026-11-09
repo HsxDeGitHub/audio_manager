@@ -109,7 +109,7 @@ def test_analysis_memory_is_invalidated_when_its_evidence_changes(client, config
 def test_analysis_is_reused_only_for_the_recording_scope(client, config):
     import asyncio
     import json
-    from langchain_core.messages import AIMessage
+    from pi_fakes import assistant_message
     from interview_backend.agent.graph import AgentEngine
     from interview_backend.agent.tools import EvidenceService
     service = seed(client)
@@ -120,12 +120,12 @@ def test_analysis_is_reused_only_for_the_recording_scope(client, config):
         'sources': [{'resource_type': 'segment', 'resource_id': 's1', 'revision': 1}]}]})
     class InspectModel:
         def __init__(self, expected): self.expected = expected
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
-            memories = json.loads(messages[-1].content)['current_valid_memories']
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
+            memories = json.loads(messages[-1].text)['current_valid_memories']
             assert len(memories) == self.expected
             assert all(item['category'] == 'analysis' for item in memories)
-            return AIMessage(content=json.dumps({'answer': '按当前证据分析', 'claims': []}))
+            return assistant_message(content=json.dumps({'answer': '按当前证据分析', 'claims': []}))
     engine = AgentEngine(config, client.app.state.tools, evidence)
     engine.memory_service = service
     asyncio.run(engine.execute('analysis-same-recording', '分析表现', context, model=InspectModel(1)))

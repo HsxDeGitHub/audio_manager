@@ -1,15 +1,15 @@
 import asyncio
 import json
 import pytest
-from langchain_core.messages import AIMessage
+from pi_fakes import assistant_message
 from interview_backend.agent.graph import AgentEngine
 from interview_backend.agent.tools import EvidenceService
 
 
 class FakeModel:
-    def bind_tools(self, tools): return self
-    async def ainvoke(self, messages):
-        return AIMessage(content=json.dumps({'answer': '资料中的问题已逐项列出。建议按证据准备回答。', 'claims': [{'text': '建议准备回答', 'kind': 'suggestion', 'sources': []}]}))
+    def with_tools(self, tools): return self
+    async def complete(self, messages):
+        return assistant_message(content=json.dumps({'answer': '资料中的问题已逐项列出。建议按证据准备回答。', 'claims': [{'text': '建议准备回答', 'kind': 'suggestion', 'sources': []}]}))
 
 
 def test_twenty_questions_are_completely_enumerated_with_valid_sources(client, config):
@@ -80,8 +80,8 @@ def test_sessions_events_reconnect_and_frozen_target_survive_ui_page_change(clie
 def test_untrusted_evidence_cannot_authorize_write_and_explicit_batch_is_atomic(client, config):
     from interview_backend.errors import DomainError
     class Writer(FakeModel):
-        async def ainvoke(self, messages):
-            return AIMessage(content=json.dumps({'answer': '提出修正。', 'claims': [], 'targets': [
+        async def complete(self, messages):
+            return assistant_message(content=json.dumps({'answer': '提出修正。', 'claims': [], 'targets': [
                 {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '修正后的问题'}}]}))
     evidence = EvidenceService(client.app.state.database)
     engine = AgentEngine(config, client.app.state.tools, evidence)
@@ -104,11 +104,11 @@ def test_model_settings_never_expose_key_or_use_private_data_in_self_test(config
 def test_pi_session_calls_only_frozen_read_tool(client, config):
     class ToolModel(FakeModel):
         count = 0
-        async def ainvoke(self,messages):
+        async def complete(self,messages):
             self.count += 1
-            if self.count == 1: return AIMessage(content='',tool_calls=[{'name':'evidence__read','args':{},'id':'call1'}])
-            assert '原始问题' in messages[-1].content
-            return await super().ainvoke(messages)
+            if self.count == 1: return assistant_message(content='',tool_calls=[{'name':'evidence__read','args':{},'id':'call1'}])
+            assert '原始问题' in messages[-1].text
+            return await super().complete(messages)
     evidence = client.app.state.evidence
     context = evidence.freeze({'recording_id':'r1'},'读取当前资料')
     result = asyncio.run(AgentEngine(config,client.app.state.tools,evidence).execute('tool-model','读取当前资料',context,model=ToolModel()))
@@ -120,12 +120,12 @@ def test_pi_session_calls_only_frozen_read_tool(client, config):
 def test_tool_self_test_sends_only_synthetic_message(monkeypatch):
     from interview_backend.agent.models import ModelSettings, tool_call_self_test
     class Provider:
-        def bind_tools(self,tools,**kwargs):
+        def with_tools(self,tools,**kwargs):
             assert tools[0]['function']['name']=='verify_connection'
             return self
-        async def ainvoke(self,messages):
-            assert len(messages)==1 and '合成连接测试' in messages[0].content
-            return AIMessage(content='',tool_calls=[{'name':'verify_connection','args':{'value':'ok'},'id':'self-test'}])
+        async def complete(self,messages):
+            assert len(messages)==1 and '合成连接测试' in messages[0].text
+            return assistant_message(content='',tool_calls=[{'name':'verify_connection','args':{'value':'ok'},'id':'self-test'}])
     monkeypatch.setattr(ModelSettings,'client',lambda self:Provider())
     assert asyncio.run(tool_call_self_test(ModelSettings(baseURL='http://127.0.0.1:1/v1',model='test')))['tool_calling']
 
@@ -171,11 +171,11 @@ def test_device_instruction_is_required_before_device_tools_are_offered(client):
 
 
 def test_question_enumeration_uses_model_when_no_question_punctuation(client, config):
-    from langchain_core.messages import AIMessage
+    from pi_fakes import assistant_message
     class QuestionModel:
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
-            return AIMessage(content=json.dumps({'answer': '按来源整理问题。', 'claims': [], 'questions': [
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
+            return assistant_message(content=json.dumps({'answer': '按来源整理问题。', 'claims': [], 'questions': [
                 {'text': '原始问题', 'source': {'resource_type': 'segment', 'resource_id': 's1', 'revision': 1}},
                 {'text': '编造问题', 'source': {'resource_type': 'segment', 'resource_id': 'absent', 'revision': 1}}]}))
     evidence = client.app.state.evidence
@@ -190,11 +190,11 @@ def test_question_enumeration_uses_model_when_no_question_punctuation(client, co
 
 
 def test_question_enumeration_falls_back_to_source_backed_original_claims(client, config):
-    from langchain_core.messages import AIMessage
+    from pi_fakes import assistant_message
     class ClaimModel:
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
-            return AIMessage(content=json.dumps({'answer': '整理问题。', 'claims': [
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
+            return assistant_message(content=json.dumps({'answer': '整理问题。', 'claims': [
                 {'text': '请介绍一下你的一些过往工作经历', 'kind': 'original_statement',
                  'sources': [{'resource_type': 'segment', 'resource_id': 's1', 'revision': 1}]},
                 {'text': '这里是一段分析', 'kind': 'analysis',
@@ -209,7 +209,7 @@ def test_question_enumeration_falls_back_to_source_backed_original_claims(client
 
 
 def test_memory_is_a_valid_scoped_source_across_sessions(client, config):
-    from langchain_core.messages import AIMessage
+    from pi_fakes import assistant_message
     from interview_backend.services.memory import MemoryService
     database = client.app.state.database
     with database.transaction(True) as c:
@@ -219,9 +219,9 @@ def test_memory_is_a_valid_scoped_source_across_sessions(client, config):
     item = memories.add({'category': 'preference', 'content': '回答先给结论', 'topic': '表达偏好', 'scope': 'global',
                          'sources': [{'resource_type': 'message', 'resource_id': 'memory-m1', 'revision': 1}]}, 'memory-agent-source')
     class MemoryModel:
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
-            return AIMessage(content=json.dumps({'answer': '你的偏好是先给结论。', 'claims': [
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
+            return assistant_message(content=json.dumps({'answer': '你的偏好是先给结论。', 'claims': [
                 {'text': '回答先给结论', 'kind': 'user_statement',
                  'sources': [{'resource_type': 'memory', 'resource_id': item['id'], 'revision': 1}]}]}))
     evidence = client.app.state.evidence
@@ -237,8 +237,8 @@ def test_memory_is_a_valid_scoped_source_across_sessions(client, config):
 def test_model_tool_cannot_write_outside_frozen_selection(client, config):
     from interview_backend.errors import DomainError
     class EscapingModel(FakeModel):
-        async def ainvoke(self, messages):
-            return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'escape', 'args': {'targets': [
+        async def complete(self, messages):
+            return assistant_message(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'escape', 'args': {'targets': [
                 {'resource_type': 'segment', 'resource_id': 's3', 'expected_revision': 1, 'fields': {'text': '越界修改'}}]}}])
     evidence = client.app.state.evidence
     context = evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, '请修正这段回答')
@@ -251,14 +251,14 @@ def test_model_tool_cannot_write_outside_frozen_selection(client, config):
 
 class ToolWriter(FakeModel):
     def __init__(self, fail=False): self.step = 0; self.fail = fail
-    async def ainvoke(self, messages):
+    async def complete(self, messages):
         self.step += 1
         if self.step <= 2:
             identifier = ['s1', 's2'][self.step - 1]
-            return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': f'write-{self.step}', 'args': {'targets': [
+            return assistant_message(content='', tool_calls=[{'name': 'changesets__apply', 'id': f'write-{self.step}', 'args': {'targets': [
                 {'resource_type': 'segment', 'resource_id': identifier, 'expected_revision': 1, 'fields': {'text': '工具修正' + identifier}}]}}])
         if self.fail: raise RuntimeError('synthetic provider failure')
-        return await super().ainvoke(messages)
+        return await super().complete(messages)
 
 
 def wait_for_run(client, identifier):
@@ -332,8 +332,8 @@ def test_mixed_question_sources_each_resolve_for_locating_and_playback(client, c
     with client.app.state.database.transaction(True) as c:
         c.execute("UPDATE segments SET original='为什么使用 Go？' WHERE id='s1'")
     class MixedModel(FakeModel):
-        async def ainvoke(self, messages):
-            return AIMessage(content=json.dumps({'answer': '完整问题', 'claims': [], 'questions': [
+        async def complete(self, messages):
+            return assistant_message(content=json.dumps({'answer': '完整问题', 'claims': [], 'questions': [
                 {'text': '请介绍一下过去的项目', 'source': {'resource_type': 'segment', 'resource_id': 's2', 'revision': 1}}]}))
     context = client.app.state.evidence.freeze({'recording_id': 'r1'}, '列出全部问题')
     result = asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('mixed-questions', context['instruction'], context, model=MixedModel()))
@@ -347,10 +347,10 @@ def test_mixed_question_sources_each_resolve_for_locating_and_playback(client, c
 
 def test_stale_draft_is_reported_and_never_sent_to_model(client, config):
     class InspectModel(FakeModel):
-        async def ainvoke(self, messages):
-            prompt = json.loads(messages[-1].content)
+        async def complete(self, messages):
+            prompt = json.loads(messages[-1].text)
             assert all(s['resource_type'] != 'draft' for s in prompt['untrusted_evidence'])
-            return await super().ainvoke(messages)
+            return await super().complete(messages)
     context = client.app.state.evidence.freeze({'recording_id': 'r1'}, '分析原文')
     result = asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('stale-draft', context['instruction'], context, model=InspectModel()))
     assert not any(r['resource_type'] == 'draft' for r in context['resources'])
@@ -376,13 +376,13 @@ def test_answer_reports_semantic_not_ready_without_download(client, config):
 def test_model_tool_domain_errors_keep_stable_code_in_run_result(client, monkeypatch, target, code):
     from interview_backend.agent.models import ModelSettings
     class InvalidToolModel(FakeModel):
-        async def ainvoke(self, messages):
+        async def complete(self, messages):
             if code == 'version_conflict':
                 # 版本由服务端绑定后，冲突用真实并发修改触发，不能靠模型填错数字。
                 from interview_backend.services.changesets import ChangeSetService
                 ChangeSetService(client.app.state.database).submit({'operation_id':'external-review','targets':[
                     {'resource_type':'segment','resource_id':'s1','expected_revision':1,'fields':{'reviewed':True}}]})
-            return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'invalid-tool', 'args': {'targets': [target]}}])
+            return assistant_message(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'invalid-tool', 'args': {'targets': [target]}}])
     class Settings:
         def client(self): return InvalidToolModel()
     monkeypatch.setattr(ModelSettings, 'load', classmethod(lambda cls, path: Settings()))
@@ -408,12 +408,12 @@ def test_model_tool_domain_errors_keep_stable_code_in_run_result(client, monkeyp
     '请不必修改，只告诉我哪里有问题',
 ])
 def test_readonly_and_negated_instructions_do_not_authorize_write(client, instruction):
-    from interview_backend.agent.tools import framework_tools
+    from interview_backend.agent.tools import pi_tools
     from interview_backend.tools.registry import ToolContext
     context = client.app.state.evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, instruction)
     assert context['allow_write'] is False
     assert context.get('allow_document_import') is False
-    tools = framework_tools(client.app.state.tools, ToolContext(request_id='readonly', frozen_context=context))
+    tools = pi_tools(client.app.state.tools, ToolContext(request_id='readonly', frozen_context=context))
     assert not any(tool.name in {'changesets__apply', 'documents__import', 'documents__update'} for tool in tools)
 
 
@@ -431,10 +431,10 @@ def test_do_not_modify_cannot_be_overridden_by_model_output(client, config, tool
     from interview_backend.errors import DomainError
     target = {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '未授权'}}
     class DisobedientModel(FakeModel):
-        async def ainvoke(self, messages):
+        async def complete(self, messages):
             if tool_call:
-                return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'denied', 'args': {'targets': [target]}}])
-            return AIMessage(content=json.dumps({'answer': '试图写入', 'claims': [], 'targets': [target]}))
+                return assistant_message(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'denied', 'args': {'targets': [target]}}])
+            return assistant_message(content=json.dumps({'answer': '试图写入', 'claims': [], 'targets': [target]}))
     instruction = '请不要修改，只分析这段回答'
     context = client.app.state.evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, instruction)
     with pytest.raises(DomainError) as error:
@@ -450,15 +450,15 @@ def test_model_can_cite_its_committed_new_revision_but_not_concurrent_edits(clie
     from interview_backend.errors import DomainError
     class NewRevisionModel(FakeModel):
         step = 0
-        async def ainvoke(self, messages):
+        async def complete(self, messages):
             self.step += 1
             if self.step == 1:
-                return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'own-write', 'args': {'targets': [
+                return assistant_message(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'own-write', 'args': {'targets': [
                     {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '本次提交的新正文'}}]}}])
             if external_edit:
                 client.app.state.changesets.submit({'operation_id': 'concurrent-other-run', 'targets': [
                     {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '并发新正文'}}]})
-            return AIMessage(content=json.dumps({'answer': '已提交修正。', 'claims': [
+            return assistant_message(content=json.dumps({'answer': '已提交修正。', 'claims': [
                 {'text': '本次提交的新正文', 'kind': 'original_statement', 'sources': [
                     {'resource_type': 'segment', 'resource_id': 's1', 'revision': 3 if external_edit else 2}]}]}))
     evidence = client.app.state.evidence
@@ -480,12 +480,12 @@ def test_repeated_model_mutation_is_idempotent_across_tool_and_final_targets(cli
     target = {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '一次提交'}}
     class RepeatingWriter(FakeModel):
         step = 0
-        async def ainvoke(self, messages):
+        async def complete(self, messages):
             self.step += 1
             if self.step == 1 or (repeat_tool and self.step == 2):
-                return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'repeat-'+str(self.step), 'args': {'targets': [target]}}])
+                return assistant_message(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'repeat-'+str(self.step), 'args': {'targets': [target]}}])
             final = {**target, 'fields': {'text': '矛盾的新建议'}} if conflicting_final else target
-            return AIMessage(content=json.dumps({'answer': '修改已提交。', 'claims': [], 'targets': [final]}))
+            return assistant_message(content=json.dumps({'answer': '修改已提交。', 'claims': [], 'targets': [final]}))
     evidence = client.app.state.evidence
     context = evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, '请修正这段正文')
     engine = AgentEngine(config, client.app.state.tools, evidence)
@@ -517,12 +517,12 @@ def test_repeated_model_mutation_is_idempotent_across_tool_and_final_targets(cli
     ('不要调用 mcp.demo.search', set()),
 ])
 def test_specific_action_permissions(client, instruction, expected):
-    from interview_backend.agent.tools import framework_tools
+    from interview_backend.agent.tools import pi_tools
     from interview_backend.tools.registry import ToolContext
     frozen = client.app.state.evidence.freeze({'recording_id': 'r1'}, instruction)
     assert set(frozen['allowed_actions']) == expected
     context = ToolContext(request_id='actions', allowed_effects=frozenset({'read', 'device', 'external'}), frozen_context=frozen)
-    offered = {t.name.replace('__', '.') for t in framework_tools(client.app.state.tools, context)}
+    offered = {t.name.replace('__', '.') for t in pi_tools(client.app.state.tools, context)}
     assert offered & {'device.locate', 'jobs.transcribe', 'device.export', 'organize.start'} <= expected
 
 
@@ -545,12 +545,12 @@ def test_multiple_tool_proposals_never_partially_commit(client, config, second):
     from interview_backend.errors import DomainError
     class BatchModel(FakeModel):
         step = 0
-        async def ainvoke(self, messages):
+        async def complete(self, messages):
             self.step += 1
             if self.step <= 2:
                 target = {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 1, 'fields': {'text': '第一项'}} if self.step == 1 else second
-                return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': str(self.step), 'args': {'targets': [target]}}])
-            return await super().ainvoke(messages)
+                return assistant_message(content='', tool_calls=[{'name': 'changesets__apply', 'id': str(self.step), 'args': {'targets': [target]}}])
+            return await super().complete(messages)
     frozen = client.app.state.evidence.freeze({'recording_id': 'r1'}, '请批量修正当前资料')
     with pytest.raises(DomainError):
         asyncio.run(AgentEngine(config, client.app.state.tools, client.app.state.evidence).execute('atomic-tools', frozen['instruction'], frozen, model=BatchModel()))
@@ -564,15 +564,15 @@ def test_import_and_content_changes_share_atomic_commit(client, config, fail):
     from interview_backend.errors import DomainError
     class ImportAndEdit(FakeModel):
         step = 0
-        async def ainvoke(self, messages):
+        async def complete(self, messages):
             self.step += 1
             if self.step == 1:
-                return AIMessage(content='', tool_calls=[{'name': 'documents__import', 'id': 'import', 'args': {'title': '新材料', 'format': 'txt', 'content': '合成内容'}}])
+                return assistant_message(content='', tool_calls=[{'name': 'documents__import', 'id': 'import', 'args': {'title': '新材料', 'format': 'txt', 'content': '合成内容'}}])
             if self.step == 2:
                 assert client.get('/api/v1/documents').json()['items'] == []
-                return AIMessage(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'edit', 'args': {'targets': [
+                return assistant_message(content='', tool_calls=[{'name': 'changesets__apply', 'id': 'edit', 'args': {'targets': [
                     {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': 99 if fail else 1, 'fields': {'text': '改动'}}]}}])
-            return await super().ainvoke(messages)
+            return await super().complete(messages)
     frozen = client.app.state.evidence.freeze({'recording_id': 'r1'}, '请导入材料并修正当前资料')
     engine = AgentEngine(config, client.app.state.tools, client.app.state.evidence)
     if fail:
@@ -594,14 +594,14 @@ def test_resume_completes_remaining_model_step_without_replaying_completed_devic
     class Model(FakeModel):
         step = 0
         ready = False
-        async def ainvoke(self, messages):
+        async def complete(self, messages):
             self.step += 1
             if self.step == 1:
-                return AIMessage(content='', tool_calls=[{'name':'device__locate','id':'first','args':{'recording_id':'r1','segment_id':'s1'}}])
+                return assistant_message(content='', tool_calls=[{'name':'device__locate','id':'first','args':{'recording_id':'r1','segment_id':'s1'}}])
             if not self.ready:
                 if interruption == 'failure': raise RuntimeError('second step failed')
                 await asyncio.sleep(30)
-            return await super().ainvoke(messages)
+            return await super().complete(messages)
     model = Model()
     class Settings:
         def client(self): return model
@@ -694,11 +694,11 @@ def test_document_pre_change_lines_remain_valid_through_preview_commit_and_histo
     identifier=document['id']
     class LineModel(FakeModel):
         step=0
-        async def ainvoke(self,messages):
+        async def complete(self,messages):
             self.step+=1
             if self.step==1:
-                return AIMessage(content='',tool_calls=[{'name':'documents__update','id':'lines','args':{'document_id':identifier,'expected_revision':1,'fields':{'content':'新版一行'}}}])
-            return AIMessage(content=json.dumps({'answer':'已引用旧版第二行。','claims':[{'kind':'original_statement','text':'第二行','sources':[{'resource_type':'document','resource_id':identifier,'revision':1,'line':2}]}]}))
+                return assistant_message(content='',tool_calls=[{'name':'documents__update','id':'lines','args':{'document_id':identifier,'expected_revision':1,'fields':{'content':'新版一行'}}}])
+            return assistant_message(content=json.dumps({'answer':'已引用旧版第二行。','claims':[{'kind':'original_statement','text':'第二行','sources':[{'resource_type':'document','resource_id':identifier,'revision':1,'line':2}]}]}))
     context=client.app.state.evidence.freeze({'document_ids':[identifier]},'请修改材料为一行')
     result=asyncio.run(AgentEngine(config,client.app.state.tools,client.app.state.evidence).execute('versioned-lines',context['instruction'],context,model=LineModel()))
     ref=result['claims'][0]['sources'][0]

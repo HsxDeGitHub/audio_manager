@@ -28,21 +28,10 @@ class WorkLog:
         return evidence.valid_many(dependencies,changes)
 
     def effect(self,digest):
-        cached=self.get('effect:'+digest)
-        if cached is not None:return cached
-        # 兼容旧运行日志；传输回合号不作为业务副作用的身份。
-        with self.database.transaction() as c:
-            rows=c.execute("SELECT payload FROM agent_work WHERE run_id=? AND step_key LIKE 'chunk:%:tool:%' AND substr(step_key,-24)=?",(self.run_id,digest)).fetchall()
-        for row in rows:
-            output=json.loads(row[0])
-            if output.get('result',{}).get('state')!='planned':return {'output':output,'dependencies':[],'legacy':True}
-        return None
+        return self.get('effect:'+digest)
 
     def started(self,digest):
-        if self.get('external_started:'+digest):return True
-        suffix=digest+':started'
-        with self.database.transaction() as c:
-            return c.execute('SELECT 1 FROM agent_work WHERE run_id=? AND substr(step_key,-?)=?',(self.run_id,len(suffix),suffix)).fetchone() is not None
+        return self.get('external_started:'+digest) is not None
 
     def reserve(self,slot,tool_id,digest):
         prior=self.get(slot)
@@ -50,28 +39,23 @@ class WorkLog:
             raise DomainError('recovery_plan_changed','恢复后的建议改变了已执行步骤；已完成操作不会重做，请重新指定后续操作。',409)
         self.save(slot,{'tool_id':tool_id,'digest':digest})
 
-    def preserve_legacy_effects(self,key,response):
-        for index,call in enumerate(response.get('tool_calls') or []):
-            if not call['name'].startswith(('device__','jobs__','organize__','mcp__')):continue
-            digest=hashlib.sha256(encode({'tool':call['name'],'arguments':call['args']}).encode()).hexdigest()[:24]
-            if self.effect(digest) is not None or self.started(digest):self.reserve(key.replace(':model:',':slot:')+':'+str(index),call['name'],digest)
-
     async def model(self,key,bound,messages,configuration=None,dependencies=(),emit=None,validator=None):
-        from langchain_core.messages import AIMessage, SystemMessage
+        from interview_backend.agent.protocol import Message
         from interview_backend.agent import model_recovery as recovery
         import time
         def signature_for_input(values):
-            payload=encode({'messages':[m.model_dump(mode='json') for m in values],'configuration':configuration}).encode()
+            messages = [{key: value for key, value in message.native().items()
+                         if key not in {'timestamp', 'durationMs'}} for message in values]
+            payload=encode({'protocol':'pi-native-v1','messages':messages,'configuration':configuration}).encode()
             if (configuration or {}).get('input_budget_bytes') and len(payload)>configuration['input_budget_bytes']:
                 raise DomainError('model_input_too_large','本批模型上下文超过处理上限，未发送请求；请缩小指令或选区后重新提问。',422)
             return hashlib.sha256(payload).hexdigest(),len(payload)
         signature,input_bytes=await asyncio.to_thread(signature_for_input,messages)
         cached=await asyncio.to_thread(self.get,key)
-        if cached is not None:
-            response=cached.get('response',cached)
-            await asyncio.to_thread(self.preserve_legacy_effects,key,response)
+        if cached is not None and cached.get('format') == 'pi-native-v1':
+            response=cached['response']
             if cached.get('input_hash')==signature and await asyncio.to_thread(self.valid,cached.get('dependencies',[])):
-                value=AIMessage.model_validate(response)
+                value=Message.model_validate(response)
                 try:
                     recovery.check_completion(value)
                     if validator: await asyncio.to_thread(validator,value)
@@ -114,10 +98,10 @@ class WorkLog:
                     await emit('task_stage',{'message':f'模型{label}（{attempt}/{recovery.ATTEMPTS-1}），已完成批次保留…'})
                 if reason in {'invalid_citation','invalid_json','invalid_structure','invalid_tool_arguments','invalid_response','output_truncated'}:
                     # 不拼接失败响应，避免非法工具消息、超长输出或未经校验内容进入下一步。
-                    request=list(messages)+[SystemMessage(content='上次返回未通过校验。只返回完整 JSON 对象，answer 简短，claims 为数组；引用必须逐字使用本批输入中的类型、ID和版本，不猜测，不把建议写成事实。修改只提供必要字段，不重复登记已收到工具回执的操作。不要输出代码围栏或额外说明。')]
+                    request=list(messages)+[Message(role='system', content='上次返回未通过校验。只返回完整 JSON 对象，answer 简短，claims 为数组；引用必须逐字使用本批输入中的类型、ID和版本，不猜测，不把建议写成事实。修改只提供必要字段，不重复登记已收到工具回执的操作。不要输出代码围栏或额外说明。')]
                 await asyncio.sleep(min(recovery.BACKOFF_SECONDS*2**(attempt-1),max(0,deadline-time.monotonic())))
                 continue
-            await asyncio.to_thread(self.save,key,{'input_hash':signature,'input_bytes':request_bytes,'dependencies':list(dependencies),'response':response.model_dump(mode='json')})
+            await asyncio.to_thread(self.save,key,{'format':'pi-native-v1','input_hash':signature,'input_bytes':request_bytes,'dependencies':list(dependencies),'response':response.native()})
             await asyncio.to_thread(self.discard,'failure:'+key)
             return response
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import threading
 import time
 
-from langchain_core.messages import HumanMessage
+from pi_fakes import user_message
 import pytest
 
 from interview_backend.agent.models import ModelSettings
@@ -101,7 +101,9 @@ def test_production_api_uses_pi_tools_and_atomic_undo(client, config, model_serv
     def respond(body):
         nonlocal invalid_answer_sent
         user = next((m for m in body['messages'] if m['role'] == 'user'), None)
-        payload = json.loads(user['content'])
+        content = user['content']
+        text = content if isinstance(content, str) else ''.join(block.get('text', '') for block in content)
+        payload = json.loads(text)
         if 'schema' in payload:
             return {'content': json.dumps({'mode': 'edit', 'reading': 'full', 'edit_target': 'transcript',
                 'import_documents': False, 'actions': [], 'constraints': [], 'clarification': ''})}
@@ -168,7 +170,7 @@ def test_pi_provider_errors_are_classified_without_private_response(model_server
     model_server.status = 401
     model = ModelSettings(baseURL=model_server.url, apiKey='synthetic-pi-key', model='synthetic-pi').client()
     with pytest.raises(PiProviderError) as error:
-        asyncio.run(model.ainvoke([HumanMessage(content='合成测试')]))
+        asyncio.run(model.complete([user_message(content='合成测试')]))
     assert error.value.status_code == 401
     assert 'synthetic-private-key' not in str(error.value)
 
@@ -183,7 +185,7 @@ def test_cancel_stops_native_request_and_disposes_process(model_server):
     async def scenario():
         async with PiBridge() as bridge:
             workspace = Path(bridge.workspace.name)
-            task = asyncio.create_task(model.ainvoke([HumanMessage(content='合成长请求')]))
+            task = asyncio.create_task(model.complete([user_message(content='合成长请求')]))
             assert await asyncio.to_thread(model_server.started.wait, 5)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -210,14 +212,14 @@ def test_unexpected_pi_exit_fails_pending_request():
 def test_native_provider_falls_back_for_non_streaming_endpoint(model_server):
     model_server.streaming_supported = False
     model = ModelSettings(baseURL=model_server.url + '/chat/completions', model='synthetic-pi').client()
-    result = asyncio.run(model.ainvoke([HumanMessage(content='合成非流式请求')]))
-    assert json.loads(result.content)['answer'] == '合成回答'
+    result = asyncio.run(model.complete([user_message(content='合成非流式请求')]))
+    assert json.loads(result.text)['answer'] == '合成回答'
     assert [request['stream'] for request in model_server.requests] == [True, False]
 
 
 def test_cancelled_host_model_step_propagates_without_hanging():
     from interview_backend.agent.pi_runtime import run_session
-    from langchain_core.messages import SystemMessage
+    from pi_fakes import system_message
 
     async def model_step(*_):
         raise asyncio.CancelledError()
@@ -227,8 +229,8 @@ def test_cancelled_host_model_step_propagates_without_hanging():
 
     async def scenario():
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(run_session([], [SystemMessage(content='合成系统'),
-                HumanMessage(content='合成任务')], model_step, tool_step), 3)
+            await asyncio.wait_for(run_session([], [system_message(content='合成系统'),
+                user_message(content='合成任务')], model_step, tool_step), 3)
     asyncio.run(scenario())
 
 

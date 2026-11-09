@@ -4,7 +4,7 @@ import json
 import time
 
 import pytest
-from langchain_core.messages import AIMessage
+from pi_fakes import assistant_message
 
 from interview_backend.agent.graph import AgentEngine
 from interview_backend.agent.intent import resolve, apply
@@ -25,10 +25,10 @@ class IntentModel:
         self.calls = 0
         self.payload = None
 
-    async def ainvoke(self, messages):
+    async def complete(self, messages):
         self.calls += 1
-        self.payload = json.loads(messages[-1].content)
-        return AIMessage(content=json.dumps(self.value, ensure_ascii=False))
+        self.payload = json.loads(messages[-1].text)
+        return assistant_message(content=json.dumps(self.value, ensure_ascii=False))
 
 
 @pytest.mark.parametrize('instruction', ['请帮我修改正文，不要删除任何细节', '请把如何处理 OOM 的回答修改得更通顺', '按第一点执行'])
@@ -77,12 +77,12 @@ def test_semantic_device_action_is_not_rejected_by_old_verb_matching(client, con
 
 def test_preparation_persists_intent_and_api_edit_is_atomic(client, config):
     class EditModel:
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
-            payload = json.loads(messages[-1].content)
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
+            payload = json.loads(messages[-1].text)
             assert payload['task_intent']['constraints'] == ['保留全部细节']
             assert payload['allow_write']
-            return AIMessage(content=json.dumps({'answer':'准备修订','claims':[], 'targets':[
+            return assistant_message(content=json.dumps({'answer':'准备修订','claims':[], 'targets':[
                 {'resource_type':'segment','resource_id':'s1','expected_revision':1,'fields':{'text':'保留细节的合成修订'}}]}))
 
     class Engine(AgentEngine):

@@ -238,8 +238,8 @@ async function agent(id, payload) {
     if (failure) throw failure;
     const messages = session.messages;
     const last = messages.findLast((message) => message.role === "assistant");
-    if (!last?.hostMessage) throw new Error("No validated answer");
-    send({ id, result: { response: last.hostMessage, systemPrompt: payload.systemPrompt,
+    if (!last || last.stopReason === "aborted") throw new Error("No validated answer");
+    send({ id, result: { response: last, systemPrompt: payload.systemPrompt,
       messages: messages.filter((message) => message.role !== "system") } });
   } catch {
     send({ id, error: { reason: "agent_failed" } });

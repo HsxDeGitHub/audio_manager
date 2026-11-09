@@ -3,11 +3,11 @@ import asyncio
 import json
 import time
 
-from langchain_core.messages import AIMessage
+from pi_fakes import assistant_message
 import pytest
 
 from interview_backend.agent.graph import AgentEngine
-from interview_backend.agent.tools import framework_tools
+from interview_backend.agent.tools import pi_tools
 from interview_backend.errors import DomainError
 from interview_backend.tools.registry import ToolContext
 
@@ -20,7 +20,7 @@ def test_edit_capability_is_available_without_keyword_allowlist(client, instruct
     frozen = client.app.state.evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, instruction)
     assert frozen['allow_write']
     context = ToolContext(request_id='default-edit', allowed_effects=frozenset({'read', 'write'}), frozen_context=frozen)
-    assert 'changesets__apply' in {tool.name for tool in framework_tools(client.app.state.tools, context)}
+    assert 'changesets__apply' in {tool.name for tool in pi_tools(client.app.state.tools, context)}
     assert not frozen['allow_device'] and not frozen['allow_external']
 
 
@@ -37,18 +37,18 @@ def test_selection_followup_applies_one_edit_preserves_original_and_undoes(clien
     seen = []
 
     class Model:
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
-            payload = json.loads(messages[-1].content)
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
+            payload = json.loads(messages[-1].text)
             seen.append(payload)
             if payload['instruction'] == '请给出修改建议':
                 assert not payload['allow_write']
-                return AIMessage(content=json.dumps({'answer': '请选择：第一点，修正 s1 的人名；第二点，重命名说话人。', 'claims': []}))
+                return assistant_message(content=json.dumps({'answer': '请选择：第一点，修正 s1 的人名；第二点，重命名说话人。', 'claims': []}))
             assert payload['instruction'] == '第一点' and payload['allow_write']
             assert '第一点，修正 s1 的人名' in payload['conversation_history'][-1]['content']
             assert payload['conversation_history'][-2]['content'] == '请给出修改建议'
             source = next(s for s in payload['untrusted_evidence'] if s['resource_id'] == 's1')
-            return AIMessage(content=json.dumps({'answer': '已按第一点准备正文纠错。', 'claims': [], 'targets': [
+            return assistant_message(content=json.dumps({'answer': '已按第一点准备正文纠错。', 'claims': [], 'targets': [
                 {'resource_type': 'segment', 'resource_id': 's1', 'expected_revision': source['revision'],
                  'fields': {'text': '修正后的合成人名'}}]}))
 
@@ -59,10 +59,10 @@ def test_selection_followup_applies_one_edit_preserves_original_and_undoes(clien
     service = client.app.state.agent
     service.engine = Engine(config, client.app.state.tools, client.app.state.evidence)
     class IntentModel:
-        async def ainvoke(self, messages):
-            prompt = json.loads(messages[-1].content)
+        async def complete(self, messages):
+            prompt = json.loads(messages[-1].text)
             edit = prompt['instruction'] == '第一点'
-            return AIMessage(content=json.dumps({'mode':'edit' if edit else 'read', 'reading':'full',
+            return assistant_message(content=json.dumps({'mode':'edit' if edit else 'read', 'reading':'full',
                 'edit_target':'transcript' if edit else 'none','import_documents':False,
                 'actions':[],'constraints':[],'clarification':''}))
     service.engine.intent_model = IntentModel()
@@ -104,9 +104,9 @@ def test_selection_followup_applies_one_edit_preserves_original_and_undoes(clien
 ])
 def test_default_capability_keeps_scope_and_revision_checks(client, config, target):
     class Model:
-        def bind_tools(self, tools): return self
-        async def ainvoke(self, messages):
-            return AIMessage(content=json.dumps({'answer': '待提交修订', 'claims': [], 'targets': [target]}))
+        def with_tools(self, tools): return self
+        async def complete(self, messages):
+            return assistant_message(content=json.dumps({'answer': '待提交修订', 'claims': [], 'targets': [target]}))
     evidence = client.app.state.evidence
     context = evidence.freeze({'recording_id': 'r1', 'segment_ids': ['s1']}, '第一点')
     assert context['allow_write']

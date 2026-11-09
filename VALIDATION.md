@@ -424,3 +424,13 @@
 - `Scripts/package_pi.py` 和现有后端打包入口包含锁定 npm 依赖、Node 二进制与许可文件。隔离样本使用 Python 3.12.13、Node 24.12.0，执行 `--without-embeddings` 打包并签名 75 个运行时文件。移动整个样本目录后，在 `/private/tmp` 工作目录、`-I -B` 和仅系统 PATH 的环境中，成功调用包内 Node 完成 Pi 工具循环及临时后端状态检查。75 份后端 Python/Markdown/JSON 与源码逐字节一致，4 份 Pi 入口/锁文件/许可文件一致，Node 严格签名检查通过。
 - 当前源码与锁文件语法、README 本地链接和 Shell 命令块、规格与需求追踪、`git diff --check` 均通过。重构前 `app.py` 的未提交差异逐字节保持，且其 AST 与基线等价，该改动单独保留。
 - 验证使用本机合成兼容模型服务。真实模型理解质量、私人录音、语义检索依赖发布包和完整 GUI 应用交互仍待验收。隔离样本是后端运行时验收产物，完整应用签名与公证属于后续发布验收。
+
+## 2026-11-09 Pi 原生接入与完整应用打包
+
+- 根据用户后续要求，移除 LangChain、LangGraph 及旧模型缓存兼容。消息直接使用 Pi 的 role、content、toolCall、toolResult、stopReason 和 usage，工具使用原生参数 Schema，流事件直接传递 text_delta 与 done。移除 hostMessage 中转表示。Python 运行环境与锁文件均无 LangChain、LangGraph、LangSmith 依赖。
+- 模型步骤只接受 pi-native-v1 格式记录，旧框架缓存被忽略并在新结果成功后覆盖。来源依赖、分批覆盖、事务、撤销和业务回执仍由后端维护。测试改为 Pi 原生合成消息和事件，增加旧缓存拒绝测试，移除旧工具日志缓存兼容用例。
+- 原生迁移后，后端完整 390 项通过，耗时 129.32 秒，RuntimeWarning 按错误处理。Swift 完整 119 项、12 套件通过，启用真实临时后端契约，测试执行耗时 6.670 秒。
+- 使用 Scripts/package.sh 正常入口重新构建完整 dist/听阅.app。应用版本 1.3.0、构建 5，产物约 655 MiB。包含 Python 3.12.13、Node 24.12.0、Pi 1.5.0 及默认 local-embeddings 依赖。
+- 在应用内置解释器中使用 -I -B、系统 PATH 和临时合成 HTTP 模型服务，成功通过包内 Node/Pi 完成原生工具循环。确认 LangChain、LangGraph 和 LangSmith 不存在，fastembed、numpy、jieba、onnxruntime 导入成功，临时资料库后端启动和状态检查通过。
+- 76 份后端 Python/Markdown/JSON 与源码逐字节一致，4 份 Pi 入口、锁文件和许可文件一致。InterviewAudio 与 AudioWorker 的 UUID 与 Release 构建一致。完整应用 codesign --verify --deep --strict 通过。
+- SDK 会话仍按业务批次在内存中运行，使用有界资料处理，自动压缩关闭。真实模型理解质量和完整 GUI 实际交互仍待验收。验收仅使用合成内容与临时资料库，app.py 原有未提交差异逐字节保留。

@@ -85,7 +85,7 @@ open dist/听阅.app
 
 界面使用 SwiftUI，语音处理使用 whisper.cpp、sherpa-onnx 和 FFmpeg，本地业务后端使用 FastAPI 和 SQLite。助手使用 `@earendil-works/pi-coding-agent` 执行工具循环，`pi-ai` 连接兼容模型。Python 业务工具负责资料范围、来源校验、事务与撤销。
 
-助手按有界资料批次创建 Pi 内存会话，历史与操作回执保存在业务后端。当前使用显式分批和输入预算，关闭 SDK 自动压缩。已有模型步骤缓存通过 `langchain-core` 消息和 Schema 表示继续兼容。
+助手按有界资料批次创建 Pi 内存会话，历史与操作回执保存在业务后端。当前使用显式分批和输入预算，关闭 SDK 自动压缩。消息、工具和流式事件使用 Pi 原生结构，模型步骤缓存仅接受当前 Pi 格式。
 
 | 路径 | 内容 |
 | --- | --- |

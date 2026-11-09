@@ -10,7 +10,7 @@ from interview_backend.services.common import encode
 async def synthesize(engine, run_id, instruction, context, parts, model=None, emit=None):
     if len(parts) < 2 or not context.get('task_intent') or context.get('allow_write'):
         return None
-    from langchain_core.messages import HumanMessage, SystemMessage
+    from interview_backend.agent.protocol import Message
     work = WorkLog(engine.evidence.database, run_id)
     dependencies = [{k:r[k] for k in ('resource_type','resource_id','revision')} for r in context['resources']]
     notes = []
@@ -45,8 +45,8 @@ async def synthesize(engine, run_id, instruction, context, parts, model=None, em
                 if set(result)!={'answer','claims'}: raise OutputError('invalid_structure')
                 engine.evidence.validate_result(result,context,engine.evidence.committed(run_id))
             try:
-                response = await work.model(key, client, [SystemMessage(content=load_text('agent/synthesis.md')),
-                    HumanMessage(content=encode({'instruction':instruction,'untrusted_parts':values}))],
+                response = await work.model(key, client, [Message(role='system', content=load_text('agent/synthesis.md')),
+                    Message(role='user', content=encode({'instruction':instruction,'untrusted_parts':values}))],
                     {'stage':'synthesis','level':level}, dependencies, emit=emit, validator=validate)
                 result = parse_result(response)
                 engine.evidence.validate_result(result, context, engine.evidence.committed(run_id))
