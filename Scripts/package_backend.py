@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
+from package_pi import build_pi_runtime
 
 PROJECT = Path(__file__).resolve().parent.parent
 BACKEND = PROJECT / 'backend'
@@ -91,7 +92,8 @@ def build(app_dir, embeddings):
             link.unlink()
         link.symlink_to('../../python-base/bin/python3' if name == 'python' else 'python')
 
-    modules = ['interview_backend', 'interview_backend.app', 'fastapi', 'mcp', 'langchain', 'langgraph']
+    pi_manifest = build_pi_runtime(runtime / 'pi-agent')
+    modules = ['interview_backend', 'interview_backend.app', 'fastapi', 'mcp', 'langchain_core']
     if embeddings:
         modules += ['fastembed', 'numpy', 'jieba']
     run([venv / 'bin' / 'python', '-c', 'import ' + ', '.join(modules) + '; print("runtime imports ok")'])
@@ -102,6 +104,7 @@ def build(app_dir, embeddings):
         'python': PYTHON_SERIES, 'extras': extras, 'requirements_sha256': requirement_hash,
         'wheel_sha256': wheel_hash, 'created_at': datetime.now(timezone.utc).isoformat(),
         'relocatable': True,
+        'pi_runtime': pi_manifest,
     }, ensure_ascii=False, indent=2) + '\n')
     shutil.rmtree(wheel_dir)
     requirements.unlink()
@@ -114,7 +117,7 @@ def codesign(runtime):
         if path.is_symlink() or not path.is_file():
             continue
         executable = path.parent.name == 'bin' and os.access(path, os.X_OK)
-        if path.suffix in {'.so', '.dylib'} or executable or path.name.startswith('python3'):
+        if path.suffix in {'.so', '.dylib', '.node'} or executable or path.name.startswith('python3'):
             subprocess.run(['codesign', '--force', '--sign', '-', str(path)], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             count += 1

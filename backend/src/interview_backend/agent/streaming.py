@@ -76,6 +76,8 @@ async def invoke(bound, messages, emit=None, block_id='answer'):
     else:
         try:
             async for chunk in bound.astream(messages):
+                if emit and (getattr(chunk, 'response_metadata', None) or {}).get('pi_non_streaming'):
+                    await emit('generation_mode', {'message':'模型接口不支持流式，正在等待完整回答。'})
                 aggregate = chunk if aggregate is None else aggregate + chunk
                 if emit: await preview()
         except Exception as error:

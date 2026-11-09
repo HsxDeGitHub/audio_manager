@@ -1,6 +1,5 @@
 from pathlib import Path
 import json
-import os
 from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from interview_backend.errors import DomainError
@@ -26,17 +25,8 @@ class ModelSettings(BaseModel):
             raise DomainError('model_not_configured', '请在大模型配置中填写有效接口、模型和凭据。', 409) from None
 
     def client(self):
-        # 不允许环境中的追踪配置把私人上下文上传到遥测服务。
-        os.environ['LANGCHAIN_TRACING_V2'] = 'false'
-        os.environ['LANGSMITH_TRACING'] = 'false'
-        from langchain_openai import ChatOpenAI
-        from httpx import Timeout
-        base = self.base_url.strip().rstrip('/')
-        if base.endswith('/chat/completions'):
-            base = base[:-len('/chat/completions')]
-        return ChatOpenAI(model=self.model.strip(), base_url=base, api_key=self.api_key.get_secret_value() or 'local-no-key',
-                          max_tokens=self.max_output_tokens,
-                          timeout=Timeout(connect=10, read=180, write=30, pool=10), max_retries=0)
+        from interview_backend.agent.pi_model import PiModel
+        return PiModel(self)
 
 
 async def tool_call_self_test(settings):

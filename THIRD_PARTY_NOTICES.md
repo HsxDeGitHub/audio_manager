@@ -13,3 +13,8 @@ This application uses separate local executables. It does not send recordings to
 - **FFmpeg 7.1**, executable from the macOS ARM64 `imageio-ffmpeg` 0.6.0 wheel. FFmpeg version/configuration can be obtained with `ffmpeg -version`; this build enables GPL components. Upstream source: https://ffmpeg.org/download.html, executable build project: https://github.com/imageio/imageio-binaries, wrapper distribution: https://pypi.org/project/imageio-ffmpeg/0.6.0/. The wrapper package license is bundled in Resources/Licenses.
 
 Models remain outside the app bundle. Model downloads are checked against pinned SHA-256 digests before use.
+
+## Pi assistant runtime
+
+- **Pi Coding Agent and Pi AI 1.5.0**, MIT license. Source https://github.com/earendil-works/pi. The upstream license is included in `Backend/pi-agent/LICENSE.pi`. Transitive npm dependencies and their available license files are distributed inside `Backend/pi-agent/node_modules`.
+- **Node.js**, MIT and bundled third-party licenses. The packaged version is recorded in `Backend/manifest.json`. A copy of the official distribution license is included in `Backend/node/LICENSE`. Source https://github.com/nodejs/node.

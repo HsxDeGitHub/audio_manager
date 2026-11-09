@@ -101,7 +101,7 @@ def test_model_settings_never_expose_key_or_use_private_data_in_self_test(config
     assert 'synthetic-secret' not in str(settings) and 'api_key' not in settings.model_dump()
 
 
-def test_langchain_adapter_calls_only_frozen_read_tool(client, config):
+def test_pi_session_calls_only_frozen_read_tool(client, config):
     class ToolModel(FakeModel):
         count = 0
         async def ainvoke(self,messages):
@@ -113,7 +113,8 @@ def test_langchain_adapter_calls_only_frozen_read_tool(client, config):
     context = evidence.freeze({'recording_id':'r1'},'读取当前资料')
     result = asyncio.run(AgentEngine(config,client.app.state.tools,evidence).execute('tool-model','读取当前资料',context,model=ToolModel()))
     assert result['answer']
-    assert (config.backend_dir/'checkpoints.sqlite').exists()
+    from interview_backend.agent.work import WorkLog
+    assert WorkLog(client.app.state.database, 'tool-model').get('chunk:0:model:1') is not None
 
 
 def test_tool_self_test_sends_only_synthetic_message(monkeypatch):

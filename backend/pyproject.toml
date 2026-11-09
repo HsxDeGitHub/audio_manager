@@ -15,11 +15,11 @@ dependencies = [
 interview-backend-mcp = "interview_backend.tools.mcp_server:main"
 
 [project.optional-dependencies]
-agent = ["langchain>=1,<2", "langgraph>=1,<2", "langgraph-checkpoint-sqlite>=3,<4", "langchain-openai>=1,<2", "mcp>=1,<2"]
+agent = ["langchain-core>=1,<2", "httpx>=0.27,<1", "mcp>=1,<2"]
 local-embeddings = ["fastembed>=0.7,<1", "numpy>=2,<3", "jieba>=0.42,<1"]
 
 [dependency-groups]
-dev = ["pytest>=8,<10", "httpx>=0.27,<1"]
+dev = ["pytest>=8,<10", "httpx>=0.27,<1", "openai>=3,<4"]
 
 [build-system]
 requires = ["hatchling>=1.26,<2"]

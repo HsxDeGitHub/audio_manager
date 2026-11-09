@@ -49,7 +49,7 @@ def parse_result(response):
 
 def classify(error):
     import httpx
-    from openai import APIConnectionError, APIResponseValidationError
+    from interview_backend.agent.pi_runtime import PiProviderError
     status = getattr(error, 'status_code', None)
     status = status if type(status) is int else None
     if isinstance(error, OutputError):
@@ -66,9 +66,13 @@ def classify(error):
         return 'model_unavailable', True, 'upstream_unavailable'
     if status is not None and 400 <= status < 500:
         return 'model_request_rejected', False, 'request_rejected'
-    if isinstance(error, (APIConnectionError, httpx.TransportError)):
+    if isinstance(error, PiProviderError):
+        if error.reason == 'timeout': return 'model_timeout', True, 'timeout'
+        if error.reason == 'connection': return 'model_connection_failed', True, 'connection'
+        return 'model_invalid_output', True, 'invalid_response'
+    if isinstance(error, httpx.TransportError) or type(error).__name__ == 'APIConnectionError':
         return 'model_connection_failed', True, 'connection'
-    if isinstance(error, (APIResponseValidationError, ValueError)):
+    if isinstance(error, ValueError) or type(error).__name__ == 'APIResponseValidationError':
         return 'model_invalid_output', True, 'invalid_response'
     return 'model_failed', False, 'unknown'
 

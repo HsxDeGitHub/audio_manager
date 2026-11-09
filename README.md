@@ -17,7 +17,7 @@
 
 ### 从源码构建
 
-准备 Apple Command Line Tools（Swift 5.9+）、Python 3.12+、CMake 和 `uv`，然后执行：
+准备 Apple Command Line Tools（Swift 5.9+）、Python 3.12、Node.js 22.19+（含 npm）、CMake 和 `uv`，然后执行：
 
 ```sh
 git clone https://github.com/HsxDeGitHub/audio_manager.git
@@ -27,7 +27,7 @@ zsh Scripts/package.sh
 open dist/听阅.app
 ```
 
-构建脚本会准备语音处理工具，并将 Python 3.12 后端运行时打包到应用中。构建后的应用运行时无需系统 Python 或 `uv`，本地业务服务随应用自动启停。
+构建脚本会准备语音处理工具，并将 Python 3.12、Node.js 和锁定的 Pi SDK 打包到应用中。本地业务服务随应用自动启停，助手任务由应用内的 Pi 运行时处理。
 
 首次构建和下载模型需要网络。Whisper large-v3 模型约 **3.1 GB**，其他模型、运行依赖和构建缓存还需额外空间。应用使用本地 ad-hoc 签名，当前未提供开发者证书、公证和在线自动更新。
 
@@ -83,18 +83,22 @@ open dist/听阅.app
 
 ## 开发
 
-界面使用 SwiftUI，语音处理使用 whisper.cpp、sherpa-onnx 和 FFmpeg，本地业务后端使用 FastAPI、SQLite 和 LangGraph。
+界面使用 SwiftUI，语音处理使用 whisper.cpp、sherpa-onnx 和 FFmpeg，本地业务后端使用 FastAPI 和 SQLite。助手使用 `@earendil-works/pi-coding-agent` 执行工具循环，`pi-ai` 连接兼容模型。Python 业务工具负责资料范围、来源校验、事务与撤销。
+
+助手按有界资料批次创建 Pi 内存会话，历史与操作回执保存在业务后端。当前使用显式分批和输入预算，关闭 SDK 自动压缩。已有模型步骤缓存通过 `langchain-core` 消息和 Schema 表示继续兼容。
 
 | 路径 | 内容 |
 | --- | --- |
 | `Sources/` | SwiftUI 应用、音频后台进程及阅读、校对、导出逻辑 |
 | `backend/` | 本地业务服务、Agent、检索、MCP 和后端测试 |
+| `backend/pi-agent/` | 锁定的 Pi SDK、模型协议与本地进程桥 |
 | `Tests/` | Swift 自动测试 |
 | `Scripts/` | 工具准备、模型下载、打包与检查脚本 |
 
 在项目根目录运行测试：
 
 ```sh
+python3 Scripts/package_pi.py
 uv sync --project backend --frozen --all-extras --group dev
 uv run --project backend --frozen --all-extras --group dev pytest backend/tests -q
 CLANG_MODULE_CACHE_PATH="$PWD/.build/clang-module-cache" \
@@ -102,7 +106,7 @@ SWIFT_MODULECACHE_PATH="$PWD/.build/swift-module-cache" \
 swift test --disable-sandbox --cache-path .build/cache
 ```
 
-后端开发依赖安装到 `backend/.venv`。只需关键词检索时，可用 `PACKAGE_EMBEDDINGS=0 zsh Scripts/package.sh` 打包，省去本地语义检索依赖。固定提示词的维护方法见 [提示词管理](backend/src/interview_backend/prompts/README.md)。
+后端开发依赖安装到 `backend/.venv`，Pi 开发依赖安装到 `backend/pi-agent/node_modules`。只需关键词检索时，可用 `PACKAGE_EMBEDDINGS=0 zsh Scripts/package.sh` 打包，省去本地语义检索依赖。固定提示词的维护方法见 [提示词管理](backend/src/interview_backend/prompts/README.md)。
 
 ## 许可说明
 

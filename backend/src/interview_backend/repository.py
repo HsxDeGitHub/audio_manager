@@ -88,5 +88,5 @@ class LibraryRepository:
                 'counts': counts, 'capabilities': {'library_read': True, 'legacy_migration': True,
                 'tool_registry': True, 'mcp': importlib.util.find_spec('mcp') is not None,
                 'keyword_search': True, 'business_write': True, 'device_commands': True, 'observability': True,
-                'agent': importlib.util.find_spec('langchain') is not None,
+                'agent': __import__('interview_backend.agent.pi_runtime', fromlist=['available']).available(),
                 'memory': True, 'semantic_search': __import__('interview_backend.retrieval.semantic', fromlist=['SemanticIndex']).SemanticIndex(self.database.path.parent / 'Models').status()['ready']}}

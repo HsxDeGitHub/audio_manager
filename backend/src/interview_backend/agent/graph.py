@@ -1,21 +1,12 @@
 import asyncio
 import hashlib
 from dataclasses import replace
-import json
-from pathlib import Path
 import re
-from typing import TypedDict
 from interview_backend.errors import DomainError
 from interview_backend.agent.models import ModelSettings
 from interview_backend.agent.text_edits import needs_edit_result, validate_edit_claims
 from interview_backend.prompt_catalog import load_text
 from interview_backend.services.common import encode
-
-
-class AgentState(TypedDict):
-    instruction: str
-    context: dict
-    result: dict
 
 
 SYSTEM = load_text('agent/system.md')
@@ -50,8 +41,6 @@ class AgentEngine:
         return value
 
     async def execute(self, run_id, instruction, context, model=None, emit=None, change_plan=None):
-        from langgraph.graph import StateGraph, START, END
-        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
         from interview_backend.agent.work import WorkLog
         from interview_backend.agent.finalization import resume
         finalization=WorkLog(self.evidence.database,run_id).finalization()
@@ -63,30 +52,20 @@ class AgentEngine:
             return await self.reports.render(run_id, instruction, self, emit=emit, context=context, model=model)
         if model is None:
             model = ModelSettings.load(self.settings.data_dir).client()
-        async def answer(state):
-            value = await self._answer(run_id, state['instruction'], state['context'], model, emit, change_plan)
-            return {'result': value}
-        graph = StateGraph(AgentState)
-        graph.add_node('answer', answer); graph.add_edge(START, 'answer'); graph.add_edge('answer', END)
-        checkpoint_path = self.settings.backend_dir / 'checkpoints.sqlite'
-        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
-            await saver.setup()
-            compiled = graph.compile(checkpointer=saver)
-            result = await compiled.ainvoke({'instruction': instruction, 'context': context, 'result': {}}, {'configurable': {'thread_id': run_id}})
-            value = result['result']
-            if hasattr(self, 'retrieval'):
-                status = self.retrieval.semantic.status()
-                value['retrieval'] = status
-                if not status['ready']:
-                    value['answer'] += '\n\n检索状态：' + status['message'] + ' 全量任务仍按范围完整读取。'
-            return value
+        value = await self._answer(run_id, instruction, context, model, emit, change_plan)
+        if hasattr(self, 'retrieval'):
+            status = self.retrieval.semantic.status()
+            value['retrieval'] = status
+            if not status['ready']:
+                value['answer'] += '\n\n检索状态：' + status['message'] + ' 全量任务仍按范围完整读取。'
+        return value
 
     async def _answer(self, run_id, instruction, context, model, emit, change_plan=None):
         from interview_backend.agent.work import WorkLog
         from interview_backend.agent.model_recovery import parse_result
         work = WorkLog(self.evidence.database, run_id, context.get('root_run_id',run_id))
         run_id = context.get('root_run_id', run_id)
-        from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+        from langchain_core.messages import HumanMessage, SystemMessage
         from interview_backend.agent.tools import framework_tools
         from interview_backend.tools.registry import ToolContext
         effects = {'read'}
@@ -188,64 +167,66 @@ class AgentEngine:
                 parsed=parse_result(response)
                 validate_edit_claims(self.evidence,parsed,context,self.evidence.committed(run_id)+([plan.preview] if plan.preview else []),
                                      list(plan.targets.values())+(parsed.get('targets') or []))
+            model_key = f'chunk:{i}:model:0'
+            async def model_step(turn, values):
+                nonlocal model_key
+                model_key = f'chunk:{i}:model:{turn}'
+                return await work.model(model_key, bound, values, configuration, dependencies,
+                                        emit=emit, validator=validate_response)
+
+            async def tool_step(turn, call_index, call):
+                spec = next((t for t in tools if t.name == call['name']), None)
+                if spec is None:
+                    raise DomainError('tool_not_allowed', '该工具在当前用户消息范围内不可用。', 403)
+                if emit: await emit('tool_start', {'tool': call['name']})
+                digest = hashlib.sha256(encode({'tool': call['name'], 'arguments': call['args']}).encode()).hexdigest()[:24]
+                call_scope=plan.allowed & (batch_keys | frozenset(('document',identifier) for identifier in plan.documents)) if compact else plan.allowed
+                call_context = replace(read_context, operation_id=f'{run_id}:tool:{digest}', resource_scope=call_scope, frozen_context=batch_context)
+                # 模型只看到同源 Schema；执行仍经过统一执行器，保留参数及业务错误。
+                tool_id = next(t.tool_id for t in self.registry._tools.values() if t.framework_name == call['name'])
+                step_key = f'chunk:{i}:tool:{turn}:{digest}'
+                effect = self.registry._tools[tool_id].effect
+                business=effect in {'device','external'}
+                cached=work.effect(digest) if business else None
+                slot=f'chunk:{i}:slot:{turn}:{call_index}'
+                if business and cached is not None:
+                    work.reserve(slot,tool_id,digest)
+                    output=cached['output']
+                    if effect=='device' and output.get('result',{}).get('command_id'):
+                        from interview_backend.services.device import DeviceService
+                        from interview_backend.agent.tools import command_result
+                        output={'result':command_result(DeviceService(self.evidence.database).get(output['result']['command_id']))}
+                    elif cached.get('legacy') or not work.valid(cached.get('dependencies',[])):
+                        output={'result':{'state':'completed','operation_id':call_context.operation_id,'message':'操作已完成；旧输出的证据依赖已失效，未重新注入，也未重复执行。'}}
+                else:
+                    deferred=effect=='device' and context.get('allow_write') and tool_id in {'device.export','device.copy','jobs.transcribe'}
+                    if business and not deferred: work.reserve(slot,tool_id,digest)
+                    if effect=='external' and work.started(digest):raise DomainError('external_result_unknown','外部工具结果未知，不能自动重复执行。',409)
+                    if effect=='external':work.save('external_started:'+digest,{'state':'started'})
+                    output=(await self.registry.execute(tool_id,call['args'],call_context))['data']
+                    if business and output.get('result',{}).get('state')!='planned':
+                        work.save('effect:'+digest,{'output':output,'dependencies':dependencies})
+                    work.save(step_key,output)
+                if call['name'] == 'documents__import':
+                    doc = output['result']
+                    reference = {'resource_type': 'document', 'resource_id': doc['id'], 'revision': doc['revision']}
+                    context['resources'].append(reference)
+                    context.setdefault('write_resources', []).append(reference)
+                if emit:
+                    for change in self.evidence.committed(run_id):
+                        if change['id'] == call_context.operation_id: await emit('changeset', change)
+                model_output=output
+                if compact and effect=='write' and isinstance(output.get('result'),dict) and 'items' in output['result']:
+                    receipt=output['result']
+                    model_output={'result':{k:receipt[k] for k in ('id','state','count') if k in receipt}}
+                    model_output['result']['message']='本批建议已登记，全部批次完成后统一提交；请勿重复登记。'
+                if emit: await emit('tool_end', {'tool': call['name']})
+                return model_output
+
             try:
+                from interview_backend.agent.pi_runtime import run_session
                 messages = [SystemMessage(content=SYSTEM), HumanMessage(content=encode(prompt))]
-                model_key = f'chunk:{i}:model:0'
-                response = await work.model(model_key,bound,messages,configuration,dependencies,emit=emit,validator=validate_response)
-                for turn in range(8):
-                    if not response.tool_calls: break
-                    messages.append(response)
-                    for call_index,call in enumerate(response.tool_calls):
-                        spec = next((t for t in tools if t.name == call['name']), None)
-                        if spec is None:
-                            raise DomainError('tool_not_allowed', '该工具在当前用户消息范围内不可用。', 403)
-                        if emit: await emit('tool_start', {'tool': call['name']})
-                        digest = hashlib.sha256(encode({'tool': call['name'], 'arguments': call['args']}).encode()).hexdigest()[:24]
-                        call_scope=plan.allowed & (batch_keys | frozenset(('document',identifier) for identifier in plan.documents)) if compact else plan.allowed
-                        call_context = replace(read_context, operation_id=f'{run_id}:tool:{digest}', resource_scope=call_scope, frozen_context=batch_context)
-                        # 模型只看到同源 Schema；执行仍经过统一执行器，保留参数及业务错误。
-                        tool_id = next(t.tool_id for t in self.registry._tools.values() if t.framework_name == call['name'])
-                        step_key = f'chunk:{i}:tool:{turn}:{digest}'
-                        effect = self.registry._tools[tool_id].effect
-                        business=effect in {'device','external'}
-                        cached=work.effect(digest) if business else None
-                        slot=f'chunk:{i}:slot:{turn}:{call_index}'
-                        if business and cached is not None:
-                            work.reserve(slot,tool_id,digest)
-                            output=cached['output']
-                            if effect=='device' and output.get('result',{}).get('command_id'):
-                                from interview_backend.services.device import DeviceService
-                                from interview_backend.agent.tools import command_result
-                                output={'result':command_result(DeviceService(self.evidence.database).get(output['result']['command_id']))}
-                            elif cached.get('legacy') or not work.valid(cached.get('dependencies',[])):
-                                output={'result':{'state':'completed','operation_id':call_context.operation_id,'message':'操作已完成；旧输出的证据依赖已失效，未重新注入，也未重复执行。'}}
-                        else:
-                            deferred=effect=='device' and context.get('allow_write') and tool_id in {'device.export','device.copy','jobs.transcribe'}
-                            if business and not deferred: work.reserve(slot,tool_id,digest)
-                            if effect=='external' and work.started(digest):raise DomainError('external_result_unknown','外部工具结果未知，不能自动重复执行。',409)
-                            if effect=='external':work.save('external_started:'+digest,{'state':'started'})
-                            output=(await self.registry.execute(tool_id,call['args'],call_context))['data']
-                            if business and output.get('result',{}).get('state')!='planned':
-                                work.save('effect:'+digest,{'output':output,'dependencies':dependencies})
-                            work.save(step_key,output)
-                        if call['name'] == 'documents__import':
-                            doc = output['result']
-                            reference = {'resource_type': 'document', 'resource_id': doc['id'], 'revision': doc['revision']}
-                            context['resources'].append(reference)
-                            context.setdefault('write_resources', []).append(reference)
-                        if emit:
-                            for change in self.evidence.committed(run_id):
-                                if change['id'] == call_context.operation_id: await emit('changeset', change)
-                        model_output=output
-                        if compact and effect=='write' and isinstance(output.get('result'),dict) and 'items' in output['result']:
-                            receipt=output['result']
-                            model_output={'result':{k:receipt[k] for k in ('id','state','count') if k in receipt}}
-                            model_output['result']['message']='本批建议已登记，全部批次完成后统一提交；请勿重复登记。'
-                        messages.append(ToolMessage(content=encode(model_output), tool_call_id=call['id']))
-                        if emit: await emit('tool_end', {'tool': call['name']})
-                    model_key = f'chunk:{i}:model:{turn+1}'
-                    response = await work.model(model_key,bound,messages,configuration,dependencies,emit=emit,validator=validate_response)
-                if response.tool_calls: raise ValueError()
+                response, messages = await run_session(tools, messages, model_step, tool_step)
                 result = parse_result(response)
                 if needs_edit_result(result, context, plan):
                     # 不能把自然语言里的“已登记”当作修改操作。最多补取一次结构化目标。
