@@ -74,6 +74,16 @@ private final class AIStubProtocol: URLProtocol, @unchecked Sendable {
         let permissions = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
         #expect(permissions?.intValue == 0o600)
     }
+    @Test func contextWindowDefaultsAndCustomValueRoundTrip() throws {
+        var value = settings()
+        #expect(value.contextWindow == 1_000_000)
+        value.contextWindow = 131072
+        let url = folder.appendingPathComponent("context-window-settings.json")
+        try value.save(to: url)
+        #expect(try AISettings.load(from: url).contextWindow == 131072)
+        value.contextWindow = 1024
+        #expect(throws: (any Error).self) { try value.validate() }
+    }
     @Test func snapshotUsesCorrectionsAndFingerprintTracksNamesAndContent() {
         let original = sources()
         #expect(original[0].text == "请介绍项目。")

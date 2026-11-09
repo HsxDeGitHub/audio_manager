@@ -11,6 +11,7 @@ class ModelSettings(BaseModel):
     base_url: str = Field(alias='baseURL')
     api_key: SecretStr = Field(default=SecretStr(''), alias='apiKey', exclude=True)
     model: str
+    context_window: int = Field(default=1_000_000, alias='contextWindow', ge=32768, le=10_000_000)
     max_output_tokens: int = Field(default=8192, alias='maxOutputTokens', ge=512, le=32768)
 
     @classmethod

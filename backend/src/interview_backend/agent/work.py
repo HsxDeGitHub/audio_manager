@@ -39,7 +39,7 @@ class WorkLog:
             raise DomainError('recovery_plan_changed','恢复后的建议改变了已执行步骤；已完成操作不会重做，请重新指定后续操作。',409)
         self.save(slot,{'tool_id':tool_id,'digest':digest})
 
-    async def model(self,key,bound,messages,configuration=None,dependencies=(),emit=None,validator=None):
+    async def model(self,key,bound,messages,configuration=None,dependencies=(),emit=None,validator=None,repair_instruction=None):
         from interview_backend.agent.protocol import Message
         from interview_backend.agent import model_recovery as recovery
         import time
@@ -98,7 +98,7 @@ class WorkLog:
                     await emit('task_stage',{'message':f'模型{label}（{attempt}/{recovery.ATTEMPTS-1}），已完成批次保留…'})
                 if reason in {'invalid_citation','invalid_json','invalid_structure','invalid_tool_arguments','invalid_response','output_truncated'}:
                     # 不拼接失败响应，避免非法工具消息、超长输出或未经校验内容进入下一步。
-                    request=list(messages)+[Message(role='system', content='上次返回未通过校验。只返回完整 JSON 对象，answer 简短，claims 为数组；引用必须逐字使用本批输入中的类型、ID和版本，不猜测，不把建议写成事实。修改只提供必要字段，不重复登记已收到工具回执的操作。不要输出代码围栏或额外说明。')]
+                    request=list(messages)+[Message(role='system', content=repair_instruction or '上次返回未通过校验。只返回完整 JSON 对象，answer 简短，claims 为数组；引用必须逐字使用本批输入中的类型、ID和版本，不猜测，不把建议写成事实。修改只提供必要字段，不重复登记已收到工具回执的操作。不要输出代码围栏或额外说明。')]
                 await asyncio.sleep(min(recovery.BACKOFF_SECONDS*2**(attempt-1),max(0,deadline-time.monotonic())))
                 continue
             await asyncio.to_thread(self.save,key,{'format':'pi-native-v1','input_hash':signature,'input_bytes':request_bytes,'dependencies':list(dependencies),'response':response.native()})

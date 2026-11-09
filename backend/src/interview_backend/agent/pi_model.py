@@ -23,12 +23,17 @@ class PiModel:
                                     'parameters': tool.parameters})
         return PiModel(self.settings, definitions, tool_choice)
 
+    @property
+    def context_window(self):
+        return self.settings.context_window
+
     def payload(self, messages):
         base = self.settings.base_url.strip().rstrip('/')
         if base.endswith('/chat/completions'):
             base = base[:-len('/chat/completions')]
         return {'configuration': {'baseURL': base, 'model': self.model_name,
                                  'apiKey': self.settings.api_key.get_secret_value(),
+                                 'contextWindow': self.context_window,
                                  'maxOutputTokens': self.settings.max_output_tokens},
                 'context': {'messages': [message.native() for message in messages], 'tools': list(self.tools)},
                 'toolChoice': self.tool_choice}

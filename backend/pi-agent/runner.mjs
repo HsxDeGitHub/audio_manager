@@ -54,7 +54,7 @@ function modelDefinition(configuration) {
     reasoning: false,
     input: ["text"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 262144,
+    contextWindow: configuration.contextWindow ?? 1000000,
     maxTokens: configuration.maxOutputTokens ?? 8192,
     compat: { supportsDeveloperRole: false, supportsStore: false, maxTokensField: "max_tokens" },
   };
@@ -147,7 +147,7 @@ async function complete(id, payload) {
 async function agent(id, payload) {
   const settingsManager = SettingsManager.inMemory({
     retry: { enabled: false },
-    compaction: { enabled: false },
+    compaction: { enabled: true, reserveTokens: 16384, keepRecentTokens: 20000 },
     cacheWarming: "off",
   });
   const resourceLoader = {
@@ -170,10 +170,11 @@ async function agent(id, payload) {
     refreshOnCreate: false,
     allowModelNetwork: false,
   });
+  const sessionModel = modelDefinition({ contextWindow: payload.contextWindow });
   modelRuntime.registerProvider("tingyue", {
     api: "openai-completions",
     baseUrl: "http://127.0.0.1:1/v1",
-    models: [modelDefinition({})],
+    models: [sessionModel],
   });
   await modelRuntime.setRuntimeApiKey("tingyue", "host-bridge");
   let session;
@@ -199,7 +200,7 @@ async function agent(id, payload) {
     ({ session } = await createAgentSession({
       cwd: workspace,
       agentDir: workspace,
-      model: modelDefinition({}),
+      model: sessionModel,
       modelRuntime,
       thinkingLevel: "off",
       noTools: "builtin",
@@ -215,10 +216,12 @@ async function agent(id, payload) {
       const stream = createAssistantMessageEventStream();
       void (async () => {
         try {
-          const response = await invoke("model", {
-            systemPrompt: payload.systemPrompt,
-            messages: context.messages.filter((message) => message.role !== "system"),
-          }, options?.signal);
+          const summarizing = options?.cacheRetention === "none";
+          const request = summarizing
+            ? { messages: context.messages }
+            : { systemPrompt: payload.systemPrompt,
+                messages: context.messages.filter((message) => message.role !== "system") };
+          const response = await invoke(summarizing ? "summary" : "model", request, options?.signal);
           stream.push({ type: "done", reason: response.stopReason, message: response });
         } catch {
           stream.end({ role: "assistant", content: [], api: "openai-completions", provider: "tingyue",
@@ -239,8 +242,9 @@ async function agent(id, payload) {
     const messages = session.messages;
     const last = messages.findLast((message) => message.role === "assistant");
     if (!last || last.stopReason === "aborted") throw new Error("No validated answer");
+    const projectedMessages = await session.agent.convertToLlm(messages);
     send({ id, result: { response: last, systemPrompt: payload.systemPrompt,
-      messages: messages.filter((message) => message.role !== "system") } });
+      messages: projectedMessages.filter((message) => message.role !== "system") } });
   } catch {
     send({ id, error: { reason: "agent_failed" } });
   } finally {

@@ -6,8 +6,9 @@ public struct AISettings: Codable, Equatable, Sendable {
     public var model = ""
     public var chunkCharacters = 4500
     public var maxOutputTokens = 8192
+    public var contextWindow = 1_000_000
     public init() {}
-    private enum CodingKeys: String, CodingKey { case baseURL, apiKey, model, chunkCharacters, maxOutputTokens }
+    private enum CodingKeys: String, CodingKey { case baseURL, apiKey, model, chunkCharacters, maxOutputTokens, contextWindow }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         baseURL = try c.decodeIfPresent(String.self, forKey: .baseURL) ?? ""
@@ -15,6 +16,7 @@ public struct AISettings: Codable, Equatable, Sendable {
         model = try c.decodeIfPresent(String.self, forKey: .model) ?? ""
         chunkCharacters = try c.decodeIfPresent(Int.self, forKey: .chunkCharacters) ?? 4500
         maxOutputTokens = try c.decodeIfPresent(Int.self, forKey: .maxOutputTokens) ?? 8192
+        contextWindow = try c.decodeIfPresent(Int.self, forKey: .contextWindow) ?? 1_000_000
     }
     public func endpoint() throws -> URL {
         let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -30,6 +32,9 @@ public struct AISettings: Codable, Equatable, Sendable {
         guard !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw AudioError.message("请填写模型名称。") }
         guard (512...32768).contains(maxOutputTokens) else {
             throw AudioError.message("输出上限需为 512–32768 tokens。")
+        }
+        guard (32768...10_000_000).contains(contextWindow) else {
+            throw AudioError.message("上下文窗口需为 32768–10000000 tokens，请按模型实际能力填写。")
         }
     }
     public static func load(from url: URL) throws -> AISettings {

@@ -31,8 +31,10 @@ struct AISettingsView: View {
                     }
                 }
                 GridRow { Text("输出 token 上限"); TextField("8192", value: $settings.maxOutputTokens, format: .number).frame(width: 110) }
+                GridRow { Text("上下文窗口 tokens"); TextField("1000000", value: $settings.contextWindow, format: .number).frame(width: 130) }
             }.textFieldStyle(.roundedBorder).disabled(testing)
             Text("助手自动按范围处理文字。接口地址也可填写完整的 /chat/completions 地址。").font(.caption).foregroundStyle(.secondary)
+            Text("接近窗口上限时自动压缩上下文，窗口大小请按模型实际能力填写。").font(.caption).foregroundStyle(.secondary)
             Divider()
             Text("配置（含 API Key）直接保存在本机 llm-settings.json，可手动编辑，文件仅当前用户可读写。").font(.caption).foregroundStyle(.secondary)
             Text(model.aiConfigurationURL.path).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)

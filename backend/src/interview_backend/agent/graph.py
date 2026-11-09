@@ -82,7 +82,12 @@ class AgentEngine:
         async def model_step(turn, messages):
             return await work.model(f'conversation:model:{turn}', model, messages,
                                     {'model': getattr(model, 'model_name', type(model).__qualname__),
-                                     'input_budget_bytes': MAX_INPUT_BYTES}, emit=emit, validator=validate)
+                                     'input_budget_bytes': MAX_INPUT_BYTES,
+                                     'context_window': getattr(model, 'context_window', 1_000_000)}, emit=emit, validator=validate)
+
+        async def summary_step(messages):
+            from interview_backend.agent.compaction import summarize
+            return await summarize(work, model, messages, emit=emit)
 
         async def tool_step(*_):
             raise DomainError('tool_not_allowed', '本轮对话无需调用资料或操作工具。', 403)
@@ -91,7 +96,8 @@ class AgentEngine:
                    for message in short_history(context.get('conversation_history', []))]
         response, _ = await run_session([], [Message(role='system', content=load_text('agent/conversation.md')),
             Message(role='user', content=encode({'instruction': instruction, 'conversation_history': history}))],
-            model_step, tool_step)
+            model_step, tool_step, summary_step=summary_step,
+            context_window=getattr(model, 'context_window', 1_000_000))
         parsed = parse_result(response)
         result = {key: parsed[key] for key in ('answer', 'claims', 'clarification') if key in parsed}
         work.save('answer', result)
@@ -122,7 +128,8 @@ class AgentEngine:
                                                             for r in context.get('write_resources', context['resources'])))
         tools = pi_tools(self.registry, read_context)
         bound = model.with_tools(tools) if tools else model
-        configuration={'model':getattr(model,'model_name',type(model).__qualname__),'tools':[(t.name,t.parameters) for t in tools]}
+        configuration={'model':getattr(model,'model_name',type(model).__qualname__),'tools':[(t.name,t.parameters) for t in tools],
+                       'context_window':getattr(model,'context_window',1_000_000)}
         if compact: configuration['input_budget_bytes'] = MAX_INPUT_BYTES
         sources = context.get('sources', [])
         strategy = context.get('task_intent', {}).get('reading')
@@ -214,6 +221,10 @@ class AgentEngine:
                 return await work.model(model_key, bound, values, configuration, dependencies,
                                         emit=emit, validator=validate_response)
 
+            async def summary_step(values):
+                from interview_backend.agent.compaction import summarize
+                return await summarize(work, model, values, dependencies, emit)
+
             async def tool_step(turn, call_index, call):
                 spec = next((t for t in tools if t.name == call['name']), None)
                 if spec is None:
@@ -266,7 +277,8 @@ class AgentEngine:
             try:
                 from interview_backend.agent.pi_runtime import run_session
                 messages = [Message(role='system', content=SYSTEM), Message(role='user', content=encode(prompt))]
-                response, messages = await run_session(tools, messages, model_step, tool_step)
+                response, messages = await run_session(tools, messages, model_step, tool_step,
+                    summary_step=summary_step, context_window=getattr(model, 'context_window', 1_000_000))
                 result = parse_result(response)
                 if needs_edit_result(result, context, plan):
                     # 不能把自然语言里的“已登记”当作修改操作。最多补取一次结构化目标。

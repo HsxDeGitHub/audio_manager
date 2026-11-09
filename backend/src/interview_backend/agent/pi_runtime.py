@@ -187,7 +187,7 @@ def host_messages(system_prompt, messages):
     return [Message(role='system', content=system_prompt)] + [Message.model_validate(value) for value in messages]
 
 
-async def run_session(tools, messages, model_step, tool_step):
+async def run_session(tools, messages, model_step, tool_step, *, summary_step=None, context_window=1_000_000):
     """Pi 执行工具循环，业务步骤仍使用稳定编号和原有回执。"""
     from interview_backend.agent.protocol import Message
     turn = -1
@@ -197,6 +197,15 @@ async def run_session(tools, messages, model_step, tool_step):
 
     async def callback(method, payload):
         nonlocal turn, call_index
+        if method == 'summary':
+            if summary_step is None:
+                raise DomainError('compaction_unavailable', '当前运行缺少上下文摘要通道。', 503)
+            response = await summary_step([Message.model_validate(value) for value in payload['messages']])
+            from interview_backend.agent.model_recovery import check_completion, OutputError
+            check_completion(response)
+            if response.tool_calls or not response.text.strip():
+                raise OutputError('invalid_structure')
+            return response.native()
         if method == 'model':
             turn += 1
             call_index = 0
@@ -229,6 +238,7 @@ async def run_session(tools, messages, model_step, tool_step):
     async with PiBridge() as bridge:
         value = await bridge.request('agent', {
             'systemPrompt': messages[0].text, 'prompt': messages[-1].text,
+            'contextWindow': context_window,
             'tools': [{'name': t.name, 'description': t.description, 'parameters': t.parameters}
                       for t in tools],
         }, callback=callback)
