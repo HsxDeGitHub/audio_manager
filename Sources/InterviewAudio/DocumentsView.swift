@@ -184,6 +184,11 @@ struct DocumentsView: View {
         }.padding(embedded ? 18 : 20).frame(minWidth: embedded ? 520 : 740, minHeight: 500)
         // 助手修改或全局撤销刷新工作区后，同步材料列表和正文；切换回来也读取最新版本。
         .task(id: app.libraryLoading) { if !app.libraryLoading { await model.load() } }
+        .onChange(of: model.selectedID, initial: true) { _, _ in
+            app.currentDocumentID = model.selected?.id
+            app.currentDocumentTitle = model.selected?.title
+        }
+        .onChange(of: model.selected?.title) { _, title in app.currentDocumentTitle = title }
         .sheet(isPresented: $showHistory) { ChangeHistoryView(model: app.changeHistory, onChange: { Task { await model.load(); await app.reload() } }) }
         .sheet(item: $editing) { item in
             DocumentEditor(item: item, latest: { try await model.latest(item.id) }) { base, title, content in

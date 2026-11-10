@@ -11,7 +11,7 @@ from interview_backend.services.common import require, version, bump, once, enco
 
 class ChangeTarget(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    resource_type: Literal['recording', 'segment', 'draft', 'speaker', 'document', 'memory']
+    resource_type: Literal['recording', 'segment', 'draft', 'speaker', 'document', 'memory', 'navigation']
     resource_id: str = Field(min_length=1)
     expected_revision: int = Field(ge=1)
     fields: dict = Field(min_length=1)
@@ -37,7 +37,7 @@ class ChangeRequest(BaseModel):
     targets: list[ChangeTarget] = Field(min_length=1, max_length=10000)
 
 
-TABLES = {'recording': 'recordings', 'segment': 'segments', 'draft': 'ai_drafts', 'document': 'documents', 'memory': 'memories', 'message': 'messages'}
+TABLES = {'recording': 'recordings', 'segment': 'segments', 'draft': 'ai_drafts', 'document': 'documents', 'memory': 'memories', 'message': 'messages', 'navigation': 'navigation_marks'}
 
 
 def read_object(c, kind, identifier):
@@ -70,7 +70,8 @@ def patch(kind, old, fields):
     value = dict(old)
     allowed = {'recording': {'title', 'kind', 'interview_date', 'company', 'role', 'speaker_count', 'active_run'},
                'segment': {'text', 'speaker', 'speaker_edited', 'needs_review', 'reviewed'}, 'draft': {'blocks'},
-               'speaker': {'name'}, 'document': {'title', 'content', 'removed'}, 'memory': {'content', 'state'}}[kind]
+               'speaker': {'name'}, 'document': {'title', 'content', 'removed'}, 'memory': {'content', 'state'},
+               'navigation': {'title', 'segment_id', 'removed'}}[kind]
     if not fields or set(fields) - allowed:
         raise DomainError('invalid_fields', '修改字段超出允许范围。', 422)
     for key, content in fields.items():
@@ -105,6 +106,11 @@ def patch(kind, old, fields):
             value['payload'] = encode(payload)
         else:
             value['edited' if kind == 'segment' and key == 'text' else key] = content
+    if kind == 'navigation':
+        if not isinstance(value['title'], str) or not 1 <= len(value['title'].strip()) <= 200:
+            raise DomainError('invalid_fields', '导航标题需为 1–200 个字符。', 422)
+        if not isinstance(value['segment_id'], str):
+            raise DomainError('invalid_fields', '请选择有效句子作为位置。', 422)
     if kind == 'segment' and 'speaker' in fields:
         value['speaker_edited'] = 1
     if kind == 'document' and 'content' in fields:
@@ -168,6 +174,10 @@ class ChangeSetService:
                                  'expected_revision': target.expected_revision, 'actual_revision': revision}
                 raise error
             updated = patch(target.resource_type, old, target.fields)
+            if target.resource_type == 'navigation':
+                segment = require(c, 'segments', updated['segment_id'])
+                if segment['run_id'] != old['run_id']:
+                    raise DomainError('scope_denied', '导航位置不能跨转写版本。', 409)
             if target.resource_type == 'segment' and 'speaker' in target.fields and updated['speaker'] is not None:
                 if not c.execute('SELECT 1 FROM speakers WHERE run_id=? AND speaker=?', (old['run_id'], updated['speaker'])).fetchone():
                     raise DomainError('invalid_speaker', '目标说话人不属于该转写版本，请选择该版本已有的说话人。', 422)

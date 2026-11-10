@@ -26,6 +26,7 @@ struct LibraryView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if model.showWelcome { WelcomeChecklist(model: model) }
             if model.backendUnavailable {
                 HStack { Text(model.backendState); Spacer(); Button("重试本地服务") { Task { await model.connectBackend() } }.disabled(model.backendConnecting) }
                     .font(.caption).padding(12).background(Color.orange.opacity(0.12))
@@ -54,7 +55,10 @@ struct LibraryView: View {
         }
         .tint(accent)
         .background(Color(nsColor: .windowBackgroundColor))
-        .sheet(isPresented: $model.showChangeHistory) { ChangeHistoryView(model: model.changeHistory, onChange: { Task { await model.reload() } }) }
+        .sheet(isPresented: $model.showChangeHistory) { ChangeHistoryView(model: model.changeHistory, onChange: { Task {
+            await model.reload()
+            if let recording = model.selected { await model.navigation.load(recordingID: recording.id, runID: recording.activeRun) }
+        } }) }
         .sheet(isPresented: Binding(get: { model.historicalSource != nil }, set: { if !$0 { model.historicalSource = nil } })) {
             if let source = model.historicalSource {
                 VStack(alignment: .leading, spacing: 14) {
@@ -107,6 +111,7 @@ struct LibraryView: View {
         .onChange(of: model.documentSourceID) { _, id in
             if let id { documents.selectedID = id; documents.filterText = "" }
         }
+        .onChange(of: documents.items.count, initial: true) { _, count in model.documentCount = count }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             Task { @MainActor in
                 var urls: [URL] = []
@@ -129,6 +134,10 @@ struct LibraryView: View {
                 .help("资料与搜索").accessibilityLabel("显示或收起资料导航")
                 .popover(isPresented: $showNavigation) { navigationPane.frame(width: 280, height: 540) }
             Label("听阅", systemImage: "waveform.circle.fill").font(.system(size: 15, weight: .semibold)).foregroundStyle(accent)
+            if model.librarySection == .documents && model.readingOrigin != nil {
+                Button { Task { await model.returnToReadingPosition() } } label: { Image(systemName: "arrow.uturn.backward") }
+                    .help("返回阅读位置").accessibilityLabel("返回阅读位置")
+            }
             Spacer()
             if model.librarySection == .documents {
                 HStack(spacing: 8) {
@@ -155,9 +164,13 @@ struct LibraryView: View {
             }
             Menu {
                 Button("本地识别模型…") { model.showSettings = true }
-                Button("大模型配置…") { model.showAISettings = true }
+                Button("助手模型配置…") { model.showAISettings = true }
+                Button("工具与 MCP…") { model.showToolSettings = true }
+                Divider()
+                Button("使用引导") { model.showWelcome = true }
+                Button("关于听阅") { model.showAbout = true }
             } label: { Image(systemName: "gearshape") }
-                .menuStyle(.borderlessButton).fixedSize().help("模型设置").accessibilityLabel("模型设置")
+                .menuStyle(.borderlessButton).fixedSize().help("设置与帮助").accessibilityLabel("设置与帮助")
         }.padding(.horizontal, 16).padding(.vertical, 8)
     }
     private var audioSearch: some View {
@@ -245,22 +258,22 @@ struct LibraryView: View {
             }
             Divider()
             VStack(alignment: .leading, spacing: 10) {
-                Button("转写全部待处理录音") { Task { await model.enqueuePending() } }.disabled(model.recordings.allSatisfy { $0.state != .idle })
-                if let selected = model.selected {
-                    Button("编辑「\(selected.title)」资料信息…") { metadataRecording = selected }.font(.caption)
-                }
-                Button("修改记录与撤销…") { model.showChangeHistory = true }.font(.caption)
-                Button("长期记忆…") { model.showMemories = true }.font(.caption)
                 HStack {
-                    Label(model.ready ? "模型已就绪 · 可离线识别" : "模型准备中 / 尚未就绪", systemImage: model.ready ? "checkmark.shield" : "cpu").font(.caption).foregroundStyle(.secondary)
+                    Label(model.ready ? "本地模型已就绪" : "待准备本地模型", systemImage: model.ready ? "checkmark.circle" : "cpu")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
                     Spacer()
+                    Menu {
+                        Button("转写全部待处理录音") { Task { await model.enqueuePending() } }.disabled(model.recordings.allSatisfy { $0.state != .idle })
+                        if let selected = model.selected { Button("资料信息…") { metadataRecording = selected } }
+                        Button("修改记录与撤销…") { model.showChangeHistory = true }
+                        Divider()
+                        Button("本地模型设置…") { model.showSettings = true }
+                    } label: { Image(systemName: "ellipsis.circle") }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("资料库操作")
                 }
                 if model.taskCount > 0 { Text("\(model.taskCount) 项后台任务 · \(model.phaseMessage)").font(.caption).foregroundStyle(.secondary) }
-                Label("音频留在原位置", systemImage: "externaldrive").font(.caption).foregroundStyle(.secondary)
                 if !model.notice.isEmpty { Text(model.notice).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
-            }.padding(16)
-        }
-        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.45))
+            }.padding(14)
+        }.background(ReaderTheme.sidebar)
     }
     private var searchResults: some View {
         VStack(alignment: .leading, spacing: 0) {

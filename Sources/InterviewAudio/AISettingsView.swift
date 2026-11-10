@@ -7,6 +7,7 @@ struct AISettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @UIState private var settings = AISettings()
     @UIState private var showKey = false
+    @UIState private var advanced = false
     @UIState private var testing = false
     @UIState private var message = ""
     @UIState private var testTask: Task<Void, Never>?
@@ -30,15 +31,20 @@ struct AISettingsView: View {
                         Toggle("显示", isOn: $showKey).toggleStyle(.checkbox)
                     }
                 }
-                GridRow { Text("输出 token 上限"); TextField("8192", value: $settings.maxOutputTokens, format: .number).frame(width: 110) }
-                GridRow { Text("上下文窗口 tokens"); TextField("1000000", value: $settings.contextWindow, format: .number).frame(width: 130) }
             }.textFieldStyle(.roundedBorder).disabled(testing)
-            Text("助手自动按范围处理文字。接口地址也可填写完整的 /chat/completions 地址。").font(.caption).foregroundStyle(.secondary)
-            Text("接近窗口上限时自动压缩上下文，窗口大小请按模型实际能力填写。").font(.caption).foregroundStyle(.secondary)
-            Divider()
-            Text("配置（含 API Key）直接保存在本机 llm-settings.json，可手动编辑，文件仅当前用户可读写。").font(.caption).foregroundStyle(.secondary)
-            Text(model.aiConfigurationURL.path).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
-            Button("打开配置目录") { NSWorkspace.shared.open(model.dataDirectory) }.font(.caption)
+            Text("支持 OpenAI 兼容接口。可以先检测连接，再保存配置。").font(.caption).foregroundStyle(.secondary)
+            DisclosureGroup("高级参数与本地存储", isExpanded: $advanced) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                        GridRow { Text("输出 token 上限"); TextField("8192", value: $settings.maxOutputTokens, format: .number).frame(width: 130) }
+                        GridRow { Text("上下文窗口 tokens"); TextField("1000000", value: $settings.contextWindow, format: .number).frame(width: 130) }
+                    }.textFieldStyle(.roundedBorder).disabled(testing)
+                    Text("窗口大小按模型实际能力填写。接近上限时自动压缩上下文。").font(.caption).foregroundStyle(.secondary)
+                    Text("配置含 API Key，保存在本机配置文件中，仅当前用户可读写。").font(.caption).foregroundStyle(.secondary)
+                    Text(model.aiConfigurationURL.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    Button("打开配置目录") { NSWorkspace.shared.open(model.dataDirectory) }.font(.caption)
+                }.padding(.top, 12)
+            }
             if !message.isEmpty { Text(message).font(.callout).textSelection(.enabled) }
             ForEach(checks) { check in
                 HStack {

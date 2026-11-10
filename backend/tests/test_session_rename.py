@@ -62,6 +62,7 @@ def test_previous_schema_upgrade_keeps_existing_topics(client, config):
     session = client.post('/api/v1/sessions', json={'title': '既有话题', 'scope': {'synthetic': True}}).json()['id']
     db = client.app.state.database
     with db.transaction(True) as c:
+        c.execute('DROP TABLE navigation_marks')
         c.execute('ALTER TABLE sessions DROP COLUMN title_edited')
         c.execute('ALTER TABLE sessions DROP COLUMN deleted')
         c.execute("UPDATE alembic_version SET version_num='0004_agent_work'")

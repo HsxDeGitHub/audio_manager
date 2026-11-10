@@ -48,6 +48,11 @@ final class AppModel: ObservableObject {
     @Published var undoLabel: String?
     @Published var redoLabel: String?
     @Published var readingDensity: ReadingDensity = .balanced
+    @Published var workspaceMode: ReaderWorkspaceMode = .reading
+    @Published var welcomeDismissed = false
+    @Published var showWelcome = false
+    @Published var readingOrigin: ReadingLocation?
+    let navigation = NavigationModel()
     @Published var librarySort: LibrarySort = .newest
     @Published var libraryFilter: LibraryFilter = .all
     @Published var libraryTitleFilter = ""
@@ -61,6 +66,10 @@ final class AppModel: ObservableObject {
     @Published var showMemories = false
     @Published var showDocuments = false
     @Published var documentSourceID: String?
+    @Published var currentDocumentID: String?
+    @Published var currentDocumentTitle: String?
+    @Published var documentCount = 0
+    var materialCount: Int { recordings.count + documentCount }
     @Published var documentSourceLine: Int = 1
     @Published var showToolSettings = false
     @Published var aiSettings = AISettings()
@@ -142,6 +151,8 @@ final class AppModel: ObservableObject {
         readingParagraphBreaks = preferences?.readingParagraphBreaks ?? true
         smartPunctuation = preferences?.smartPunctuation ?? true
         readingDensity = preferences?.readingDensity ?? .balanced
+        workspaceMode = ReaderWorkspaceMode(rawValue: preferences?.workspaceMode ?? "") ?? .reading
+        welcomeDismissed = preferences?.welcomeDismissed ?? false
         librarySort = preferences?.librarySort ?? .newest; libraryFilter = preferences?.libraryFilter ?? .all
         do { aiSettings = try AISettings.load(from: dataDirectory.appendingPathComponent("llm-settings.json")) }
         catch { alert = "大模型配置文件无法读取，请在大模型设置中检查。" }
@@ -159,12 +170,13 @@ final class AppModel: ObservableObject {
         if let restored { await select(restored.id) }
         await validation
         await loadTranscript()
-        if !installer.ready { showSettings = true }
+        showWelcome = !welcomeDismissed && recordings.isEmpty
     }
     func backendDisconnected(_ message: String) {
         guard !shuttingDown else { return }
         backendUnavailable = true; backendState = message
         store = nil; backendClient = nil; changeHistory.client = nil
+        navigation.client = nil; navigation.items = []
         deviceBridge?.stop(); deviceBridge = nil; assistant.disconnected()
     }
     func connectBackend() async {
@@ -183,6 +195,7 @@ final class AppModel: ObservableObject {
             store = BackendLibraryStore(connection: connection, onTransportFailure: onFailure)
             backendClient = try BackendClient(baseURL: connection.baseURL, token: connection.token, timeout: 30, onTransportFailure: onFailure)
             changeHistory.client = backendClient
+            navigation.client = backendClient
             await assistant.bind(self)
             try await assistant.attach(connection, onTransportFailure: onFailure)
             deviceBridge?.stop()
@@ -201,6 +214,7 @@ final class AppModel: ObservableObject {
         do {
             guard let client = assistant.client else { return }
             let resolved = try await client.source(source)
+            rememberReadingPosition()
             if resolved.historical == true || resolved.draftID != nil {
                 await openReadOnlySource(resolved, play: play)
             } else if source.resourceType == "document" {
@@ -570,13 +584,14 @@ final class AppModel: ObservableObject {
         TranscriptExport.render(title: selected?.title ?? "", segments: segments, names: names, srt: srt,
                                 punctuate: readingPunctuation, paragraphBreaks: readingParagraphBreaks, density: readingDensity, overrides: readingOverrides, plainDialogue: plainDialogue)
     }
-    private func savePreferences() {
+    func savePreferences() {
         guard store != nil else { return }
         do {
             let preferences = AppPreferences(modelsDirectory: modelsDirectory.path, readerFontSize: readerFontSize,
                                              preRoll: preRoll, lastRecordingID: lastRecordingID,
                                              readingPunctuation: readingPunctuation, readingParagraphBreaks: readingParagraphBreaks, readingDensity: readingDensity,
-                                             librarySort: librarySort, libraryFilter: libraryFilter, smartPunctuation: smartPunctuation)
+                                             librarySort: librarySort, libraryFilter: libraryFilter, smartPunctuation: smartPunctuation,
+                                             workspaceMode: workspaceMode.rawValue, welcomeDismissed: welcomeDismissed)
             try JSONEncoder().encode(preferences).write(to: dataDirectory.appendingPathComponent("settings.json"), options: .atomic)
         } catch { alert = error.localizedDescription }
     }

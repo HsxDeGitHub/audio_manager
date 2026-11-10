@@ -89,6 +89,8 @@ def test_544_mixed_revisions_are_bounded_commit_once_and_undo(client,config,wron
     assert result['coverage']['chunks']>=17 and len(model.calls)==result['coverage']['chunks']
     assert len({identifier for batch in model.calls for identifier in batch})==544
     assert result['changeset']['count']==544
+    assert '合成发言归属建议' not in result['answer'] and '本批已登记' not in result['answer']
+    assert len(result['partial_results']) == result['coverage']['chunks']
     assert WorkLog(client.app.state.database,'bounded-edit').get('chunk:0:model:0')['input_bytes']<MAX_INPUT_BYTES
     revisions={i['before_revision'] for i in result['changeset']['items']}
     assert revisions=={1,2}

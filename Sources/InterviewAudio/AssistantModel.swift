@@ -49,7 +49,21 @@ struct AssistantResult: Decodable {
 struct AssistantRunContext: Decodable {
     let historyOmitted: Bool?
     let scopeTitle: String?
-    private enum CodingKeys: String, CodingKey { case historyOmitted = "history_omitted", scopeTitle = "scope_title" }
+    var taskIntent: AssistantTaskIntent? = nil
+    private enum CodingKeys: String, CodingKey { case historyOmitted = "history_omitted", scopeTitle = "scope_title", taskIntent = "task_intent" }
+}
+struct AssistantTaskIntent: Decodable {
+    let reading: String
+    var title: String {
+        switch reading {
+        case "none": return "直接对话"
+        case "selection": return "引用片段"
+        case "search": return "相关片段检索"
+        case "full": return "全文处理"
+        case "weekly": return "按日期汇总"
+        default: return "资料处理"
+        }
+    }
 }
 struct AssistantRun: Decodable, Identifiable {
     let id: String; var state: String; let result: AssistantResult?
@@ -176,10 +190,13 @@ final class AssistantModel: ObservableObject {
         draftTask?.cancel()
         draftTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
-            await self?.flushDrafts()
+            guard !Task.isCancelled, let self else { return }
+            self.draftTask = nil
+            await self.flushDrafts()
         }
     }
     func flushDrafts() async {
+        draftTask?.cancel(); draftTask = nil
         guard let draftStore else { return }
         let values = conversations.filter { !$0.value.input.isEmpty || !$0.value.quotes.isEmpty || $0.value.allMaterials }
         let snapshot = AssistantDraftSnapshot(selectedSession: selectedSession, items: values.mapValues { AssistantDraft(input: $0.input, allMaterials: $0.allMaterials, quotes: $0.quotes) })
@@ -321,8 +338,9 @@ final class AssistantModel: ObservableObject {
         do {
             let quoteObjects = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value.quotes))
             let segments = Array(Set(value.quotes.flatMap(\.sources).filter { $0.resourceType == "segment" }.map(\.resourceID))).sorted()
-            let documents = Array(Set(value.quotes.flatMap(\.sources).filter { $0.resourceType == "document" }.map(\.resourceID))).sorted()
-            let documentOnly = !documents.isEmpty && segments.isEmpty
+            let selectedDocument = !value.allMaterials && value.quotes.isEmpty && model.librarySection == .documents ? model.currentDocumentID : nil
+            let documents = Array(Set(value.quotes.flatMap(\.sources).filter { $0.resourceType == "document" }.map(\.resourceID) + (selectedDocument.map { [$0] } ?? []))).sorted()
+            let documentOnly = segments.isEmpty && (!documents.isEmpty || (!value.allMaterials && value.quotes.isEmpty && model.librarySection == .documents))
             let pinned = value.quotes.first { $0.recordingID != nil }
             let context: [String: Any] = ["scope": value.allMaterials ? "all" : "current", "recording_id": value.allMaterials || documentOnly ? NSNull() : (pinned?.recordingID ?? model.selectedID) as Any? ?? NSNull(),
                 "run_id": value.allMaterials || documentOnly ? NSNull() : (pinned?.runID ?? model.selected?.activeRun) as Any? ?? NSNull(), "segment_ids": value.allMaterials ? [] : segments,

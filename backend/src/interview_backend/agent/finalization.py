@@ -48,6 +48,8 @@ async def resume(engine,run_id,payload,emit=None):
         raise DomainError('stale_source','运行来源已有外部变化，请重新指定任务。',409)
     await asyncio.to_thread(validate_edit_claims,evidence,result,context,changes+([payload['preview']] if payload.get('preview') else []),request['targets'] if request else [])
     if request and not prior:
+        if emit:
+            await emit('task_stage', {'message': '正在校验并保存修改…'})
         await asyncio.to_thread(evidence.validate_result,result,context,changes+([payload['preview']] if payload['preview'] else []))
         call=ToolContext(request_id=run_id,operation_id=request['operation_id'],allowed_effects=frozenset({'write'}),
                          resource_scope=frozenset(tuple(k) for k in payload['allowed']) if payload['allowed'] is not None else None,
@@ -88,7 +90,18 @@ async def resume(engine,run_id,payload,emit=None):
                   ('正文', sum(i['resource_type']=='segment' and i['before']['edited']!=i['after']['edited'] for i in items)),
                   ('核对状态', sum(i['resource_type']=='segment' and any(i['before'][k]!=i['after'][k] for k in ('needs_review','reviewed')) for i in items))]
         summary = '、'.join(f'{label} {count} 处' for label,count in counts if count)
-        status = f'已更新{summary}，可在修改记录中整次撤销。' if summary else '本次没有需要保存的差异。'
-        result['answer'] = status + ('\n\n' + result['answer'] if result.get('answer') else '')
+        if summary:
+            status = f'已更新{summary}，可在修改记录中整次撤销。'
+        elif items:
+            status = f'已保存 {len(items)} 项修改，可在修改记录中整次撤销。'
+        else:
+            status = '本次没有需要保存的差异。'
+        result['answer'] = status
+    elif context.get('allow_write') and not steps and (changes or context.get('transcript_organization') or (context.get('task_intent') or {}).get('mode') == 'edit'):
+        count = sum(change['count'] for change in changes if change['state'] == 'committed')
+        if count:
+            result['answer'] = f'已保存 {count} 项修改，可在修改记录中整次撤销。'
+        else:
+            result['answer'] = '本次未保存修改，内容没有变化。'
     work.save('finalization_result',describe(result))
     return result

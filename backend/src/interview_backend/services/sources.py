@@ -7,6 +7,9 @@ from interview_backend.services.source_validity import source_valid
 
 
 def location(c, kind, row):
+    if kind == 'navigation':
+        segment = c.execute('SELECT * FROM segments WHERE id=?', (row['segment_id'],)).fetchone()
+        return location(c, 'segment', dict(segment)) if segment else {}
     if kind not in {'segment', 'draft', 'speaker'}: return {}
     run_id = row['run_id']
     run = c.execute('SELECT recording_id FROM runs WHERE id=?',(run_id,)).fetchone()

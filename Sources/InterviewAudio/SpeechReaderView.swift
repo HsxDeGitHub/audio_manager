@@ -8,9 +8,14 @@ struct TranscriptView: View {
     let recording: Recording
     @UIState private var followPlayback = true
     @UIState private var showSpeakers = false
+    @UIState private var showNavigation = false
     var body: some View {
         VStack(spacing: 0) {
             titleBar
+            if model.readingOrigin != nil {
+                HStack { Button { Task { await model.returnToReadingPosition() } } label: { Label("返回阅读位置", systemImage: "arrow.uturn.backward") }; Spacer() }
+                    .font(.caption).padding(.horizontal, 24).padding(.bottom, 8)
+            }
             Divider()
             if !model.segments.isEmpty {
                 readerToolbar
@@ -25,7 +30,7 @@ struct TranscriptView: View {
                                 SpeechBlock(model: model, player: player, utterance: utterance, followPlayback: followPlayback)
                                     .id(utterance.id)
                             }
-                        }.frame(maxWidth: 900).padding(.horizontal, 30).padding(.vertical, 12).frame(maxWidth: .infinity)
+                        }.frame(maxWidth: model.workspaceMode.contentWidth).padding(.horizontal, 28).padding(.vertical, 12).frame(maxWidth: .infinity)
                     }
                     .task(id: recording.id) {
                         // Let native paragraph heights settle before restoring a position in a lazy stack.
@@ -56,7 +61,7 @@ struct TranscriptView: View {
             }
             Divider()
             PlayerBar(model: model, player: player)
-        }.background(Color(nsColor: .textBackgroundColor).opacity(0.45))
+        }.background(ReaderTheme.canvas)
     }
     private var titleBar: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -108,15 +113,17 @@ struct TranscriptView: View {
         }.padding(.horizontal, 24).padding(.vertical, 12)
     }
     private var readerToolbar: some View {
-        ViewThatFits(in: .horizontal) {
-            readerToolbarContent(compact: false)
-            readerToolbarContent(compact: true)
-        }.font(.caption).padding(.horizontal, 24).padding(.vertical, 8)
-    }
-    private func readerToolbarContent(compact: Bool) -> some View {
-        HStack(spacing: compact ? 8 : 14) {
-            Button { showSpeakers.toggle() } label: { if compact { Image(systemName: "person.2") } else { Label("说话人", systemImage: "person.2") } }.help("说话人").accessibilityLabel("说话人")
-                .popover(isPresented: $showSpeakers) { SpeakerSettingsView(model: model).padding(20).frame(width: 470) }
+        VStack(spacing: 10) {
+            HStack(spacing: 12) {
+                Picker("工作区", selection: Binding(get: { model.workspaceMode }, set: { model.setWorkspaceMode($0) })) {
+                    ForEach(ReaderWorkspaceMode.allCases, id: \.self) { Label($0.title, systemImage: $0.symbol).tag($0) }
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 140)
+                Button { showNavigation.toggle() } label: { Label("导航", systemImage: "list.bullet") }
+                    .popover(isPresented: $showNavigation) { NavigationPanel(app: model, model: model.navigation) }
+                    .accessibilityLabel("内容导航")
+                Button { showSpeakers.toggle() } label: { Image(systemName: "person.2") }
+                    .help("说话人整理").accessibilityLabel("说话人整理")
+                    .popover(isPresented: $showSpeakers) { SpeakerSettingsView(model: model).padding(20).frame(width: 470) }
             Menu {
                 Toggle("智能标点（本地）", isOn: Binding(get: { model.smartPunctuation }, set: { value in Task { await model.setSmartPunctuation(value) } }))
                 if !model.installer.valid.contains(ModelSpec.punctuation.id) { Button("准备智能标点模型…") { model.showSettings = true } }
@@ -129,21 +136,33 @@ struct TranscriptView: View {
                 ForEach([14.0,16,18,20,22], id: \.self) { size in
                     Button("\(Int(size)) 号" + (model.readerFontSize == size ? " ✓" : "")) { model.setReaderFontSize(size) }
                 }
-            } label: { if compact { Image(systemName: "textformat.size") } else { Label("排版", systemImage: "textformat.size") } }.accessibilityLabel("排版").menuStyle(.borderlessButton).fixedSize().help("标点、分段与字号")
-            Picker("核对筛选", selection: $model.reviewFilter) {
-                ForEach(ReviewFilter.allCases, id: \.self) { Text($0 == .pending ? "待核对 \(model.pendingReviewCount)" : $0.title).tag($0) }
-            }.labelsHidden().frame(width: 112)
-            Button { model.selectionMode.toggle(); if !model.selectionMode { model.bulkSelection = [] } } label: { Image(systemName: model.selectionMode ? "checkmark.circle.fill" : "checklist") }.help("批量选择发言")
-            Menu {
-                Button(model.undoLabel.map { "撤销：" + $0 } ?? "没有可撤销的修改") { Task { await model.undoEdit() } }.disabled(model.undoLabel == nil)
-                Button(model.redoLabel.map { "重做：" + $0 } ?? "没有可重做的修改") { Task { await model.undoEdit(redo: true) } }.disabled(model.redoLabel == nil)
-            } label: { Image(systemName: "arrow.uturn.backward") }.menuStyle(.borderlessButton).fixedSize().help("校对修改历史")
-            if model.punctuationBusy { ProgressView().controlSize(.mini).help("正在本机优化阅读标点") }
-            else if !model.punctuationMessage.isEmpty { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange).help(model.punctuationMessage) }
-            Spacer()
-            Button { model.locateCurrentSentence() } label: { Image(systemName: "scope") }.help("定位当前播放句子 ⇧⌘L").disabled(model.currentSegmentID == nil)
-            Toggle(compact ? "跟随" : "跟随播放", isOn: $followPlayback).toggleStyle(.checkbox).help("跟随播放")
-        }
+            } label: { Label("排版", systemImage: "textformat.size") }.accessibilityLabel("排版").menuStyle(.borderlessButton).fixedSize().help("标点、分段与字号")
+                Spacer(minLength: 0)
+                Button { model.locateCurrentSentence() } label: { Image(systemName: "scope") }
+                    .help("定位播放句子 ⇧⌘L").accessibilityLabel("定位播放句子").disabled(model.currentSegmentID == nil)
+                Toggle("跟随", isOn: $followPlayback).toggleStyle(.checkbox).help("跟随播放")
+            }
+            if model.workspaceMode == .proofreading {
+                HStack(spacing: 10) {
+                    Picker("核对筛选", selection: $model.reviewFilter) {
+                        ForEach(ReviewFilter.allCases, id: \.self) { Text($0 == .pending ? "待核对 \(model.pendingReviewCount)" : $0.title).tag($0) }
+                    }.labelsHidden().frame(width: 124)
+                    Button { model.navigateReview(-1) } label: { Image(systemName: "chevron.up") }.help("上一处待核对").accessibilityLabel("上一处待核对")
+                    Button { model.navigateReview(1) } label: { Image(systemName: "chevron.down") }.help("下一处待核对").accessibilityLabel("下一处待核对")
+                    Text("\(model.pendingReviewCount) 句待核对").foregroundStyle(.secondary)
+                    Spacer()
+                    Button { model.selectionMode.toggle(); if !model.selectionMode { model.bulkSelection = [] } } label: { Label("批量", systemImage: model.selectionMode ? "checkmark.circle.fill" : "checklist") }
+                    Menu {
+                        Button(model.undoLabel.map { "撤销 " + $0 } ?? "没有可撤销的修改") { Task { await model.undoEdit() } }.disabled(model.undoLabel == nil)
+                        Button(model.redoLabel.map { "重做 " + $0 } ?? "没有可重做的修改") { Task { await model.undoEdit(redo: true) } }.disabled(model.redoLabel == nil)
+                        Button("全部修改记录…") { model.showChangeHistory = true }
+                    } label: { Image(systemName: "arrow.uturn.backward") }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("修改历史")
+                }.disabled(model.pendingReviewCount == 0 && model.segments.isEmpty)
+            }
+        }.font(.system(size: 12)).controlSize(.small).padding(.horizontal, 24).padding(.vertical, 10)
+            .task(id: "\(recording.id):\(recording.activeRun ?? ""):\(model.backendClient.map { ObjectIdentifier($0).hashValue } ?? 0)") {
+                await model.navigation.load(recordingID: recording.id, runID: recording.activeRun)
+            }
     }
     private func runLabel(_ run: TranscriptRun) -> String {
         Date(timeIntervalSince1970: run.createdAt).formatted(date: .abbreviated, time: .shortened) + (run.hasEdits ? " · 已纠错" : "")
@@ -157,6 +176,8 @@ struct SpeechBlock: View {
     let followPlayback: Bool
     @UIState private var editingSentence: TranscriptSegment?
     @UIState private var editingUtterance = false
+    @UIState private var selectionEditing: SpeechUtterance?
+    @UIState private var marking: NavigationKind?
     private var speaking: Bool { player.playing && utterance.segments.contains { $0.id == model.currentSegmentID } }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -165,16 +186,16 @@ struct SpeechBlock: View {
                     Toggle("选择这次发言", isOn: Binding(get: { Set(utterance.segments.map(\.id)).isSubset(of: model.bulkSelection) }, set: { _ in model.toggleSelection(utterance) }))
                         .labelsHidden().toggleStyle(.checkbox)
                 }
-                Text(avatar).font(.system(size: 11, weight: .semibold)).foregroundStyle(accent)
-                    .frame(width: 25, height: 25).background(accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                Text(avatar).font(.system(size: 11, weight: .semibold)).foregroundStyle(ReaderTheme.speaker(utterance.speaker))
+                    .frame(width: 25, height: 25).background(ReaderTheme.speaker(utterance.speaker).opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                 speakerMenu
                 Button { if let first = utterance.segments.first { model.playSegment(first) } } label: {
                     Text("\(TimeFormat.clock(utterance.start)) – \(TimeFormat.clock(utterance.end))").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                 }.buttonStyle(.plain).help("回听这次发言")
                 if speaking { Image(systemName: "waveform").font(.caption).foregroundStyle(accent).accessibilityLabel("正在播放这次发言") }
                 Spacer()
-                if utterance.hasEdits { Text("已校对").font(.system(size: 10)).foregroundStyle(.secondary) }
-                if utterance.reviewCount > 0 { Text("\(utterance.reviewCount) 句待核对").font(.system(size: 10)).foregroundStyle(.orange) }
+                if utterance.hasContentEdits { Text("已修改").font(.system(size: 11)).foregroundStyle(.secondary) }
+                if let status = ReviewPresentation.title(for: utterance) { Text(status).font(.system(size: 11)).foregroundStyle(utterance.reviewCount > 0 ? Color.orange : Color.secondary) }
                 Menu {
                     Button("标记整段已核对") { Task { await model.markReviewed(utterance.segments.map(\.id)) } }
                     Button("重新标为待核对") { Task { await model.markReviewed(utterance.segments.map(\.id), reviewed: false) } }
@@ -182,6 +203,9 @@ struct SpeechBlock: View {
                     Button("逐句校对这次发言…") { editingUtterance = true }
                     Button("复制这次发言") { model.copyText(model.readingText(utterance)) }
                     Button("从这次发言开始播放") { if let first = utterance.segments.first { model.playSegment(first) } }
+                    Menu("添加导航标记") {
+                        ForEach(NavigationKind.allCases) { kind in Button(kind.title) { marking = kind } }
+                    }
                 } label: { Image(systemName: "ellipsis") }.menuStyle(.borderlessButton).fixedSize().help("发言操作")
             }
             ParagraphTextView(segments: utterance.segments, fontSize: model.readerFontSize,
@@ -191,12 +215,31 @@ struct SpeechBlock: View {
                               punctuate: model.readingPunctuation, overrides: model.readingOverrides, density: model.readingDensity, paragraphBreaks: model.readingParagraphBreaks,
                               onPlay: { id in if let sentence = utterance.segments.first(where: { $0.id == id }) { model.playSegment(sentence) } },
                               onEdit: { id in editingSentence = utterance.segments.first(where: { $0.id == id }) },
-                              onQuote: { text, range, ranges in model.assistant.quoteTranscript(text: text, range: range, ranges: ranges, segments: utterance.segments, model: model) })
+                              onQuote: { text, range, ranges in model.assistant.quoteTranscript(text: text, range: range, ranges: ranges, segments: utterance.segments, model: model) },
+                              showReviewMarks: model.workspaceMode == .proofreading,
+                              onSelectionEdit: { ids in
+                                  let selected = utterance.segments.filter { ids.contains($0.id) }
+                                  if selected.count == 1 { editingSentence = selected.first }
+                                  else if !selected.isEmpty { selectionEditing = SpeechUtterance(segments: selected) }
+                              },
+                              onSelectionPlay: { ids in
+                                  let selected = utterance.segments.filter { ids.contains($0.id) }
+                                  if let first = selected.first, let last = selected.last {
+                                      model.player.playExcerpt(start: max(0, first.start - model.preRoll), end: last.end)
+                                  }
+                              },
+                              onSelectionSpeaker: { ids, speaker in
+                                  let selected = utterance.segments.filter { ids.contains($0.id) }
+                                  if !selected.isEmpty { Task { await model.editUtteranceSpeaker(SpeechUtterance(segments: selected), speaker: speaker) } }
+                              },
+                              speakers: Array(Set(model.segments.compactMap(\.speaker))).sorted().map { ($0, model.speakerName($0)) })
                 .fixedSize(horizontal: false, vertical: true)
             Divider().padding(.top, 6).opacity(0.55)
         }.padding(.vertical, 12)
             .sheet(item: $editingSentence) { sentence in SentenceEditor(model: model, sentence: sentence) }
             .sheet(isPresented: $editingUtterance) { UtteranceEditor(model: model, utterance: utterance) }
+            .sheet(item: $selectionEditing) { UtteranceEditor(model: model, utterance: $0) }
+            .sheet(item: $marking) { NavigationEditor(app: model, model: model.navigation, kind: $0, initialSegmentID: utterance.segments.first?.id) }
     }
     private var avatar: String { utterance.speaker.map { $0 < 26 ? String(UnicodeScalar(65 + $0)!) : String($0 + 1) } ?? "·" }
     private var speakerMenu: some View {

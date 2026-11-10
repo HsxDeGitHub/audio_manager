@@ -29,6 +29,7 @@ from interview_backend.agent.api import AgentAPI, router as agent_router
 from interview_backend.services.device import DeviceService
 from interview_backend.services.memory import MemoryService
 from interview_backend.services.documents import DocumentService
+from interview_backend.services.navigation import NavigationService, NavigationCreate
 from interview_backend.services.reports import ReportService
 from interview_backend.retrieval.index import RetrievalIndex
 from interview_backend.agent.memory import AutomaticMemory
@@ -81,6 +82,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.evidence = EvidenceService(database)
         app.state.memories = MemoryService(database, app.state.evidence)
         app.state.documents = DocumentService(database)
+        app.state.navigation = NavigationService(database)
         app.state.retrieval = RetrievalIndex(database, settings.backend_dir)
         install_app_tools(
             app.state.tools,
@@ -308,6 +310,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         run_id: str, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200)
     ):
         return app.state.repository.drafts(run_id, offset, limit)
+
+    @app.get("/api/v1/recordings/{recording_id}/navigation")
+    def navigation_marks(recording_id: str, run_id: str | None = None):
+        return app.state.navigation.list(recording_id, run_id)
+
+    @app.post("/api/v1/recordings/{recording_id}/navigation")
+    def create_navigation(recording_id: str, body: NavigationCreate):
+        return app.state.navigation.create(recording_id, body)
+
+    @app.patch("/api/v1/navigation/{identifier}")
+    def update_navigation(identifier: str, body: ContentUpdate):
+        return app.state.navigation.update(identifier, body.fields, body.expected_revision, body.operation_id)
 
     @app.post("/api/v1/library/execute")
     def library_execute(command: LibraryCommand):

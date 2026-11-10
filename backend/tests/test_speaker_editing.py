@@ -76,6 +76,8 @@ def test_local_attribution_commits_once_and_reverts_without_global_rename(client
     result = execute(client,config,frozen,model)
     assert result['changeset']['count']==1
     assert '发言归属 1 处' in result['answer']
+    assert model.targets and '自我介绍归给回答者' not in result['answer']
+    assert result['partial_results'][0]['answer'] == '自我介绍归给回答者，保留原文字。'
     assert model.payload['speaker_catalog']==frozen['speaker_catalog']
     assert model.payload['write_field_limits']==frozen['write_field_limits']
     item = result['changeset']['items'][0]
@@ -108,6 +110,15 @@ def test_text_attribution_name_and_review_are_one_reversible_transaction(client,
     assert rows(client)==before
     with client.app.state.database.transaction() as c:
         assert c.execute("SELECT name FROM speakers WHERE run_id='run1' AND speaker=1").fetchone()[0]=='回答者'
+
+
+def test_confirming_existing_speaker_reports_the_saved_manual_assignment(client, config):
+    result = execute(client, config, context(client, segments=['s1']), EditModel([target(fields={'speaker': 0})]), identifier='confirm-speaker')
+    assert result['changeset']['count'] == 1
+    item = result['changeset']['items'][0]
+    assert item['before']['speaker'] == item['after']['speaker'] == 0
+    assert item['before']['speaker_edited'] == 0 and item['after']['speaker_edited'] == 1
+    assert result['answer'] == '已保存 1 项修改，可在修改记录中整次撤销。'
 
 
 @pytest.mark.parametrize('bad',[

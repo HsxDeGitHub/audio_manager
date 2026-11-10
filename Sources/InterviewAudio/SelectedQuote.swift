@@ -20,6 +20,11 @@ struct SelectedQuote: Codable, Identifiable, Equatable {
     var runID: String? = nil
     enum CodingKeys: String, CodingKey { case id, text, title, location, sources, recordingID = "recording_id", runID = "run_id" }
 
+    static func selectedSegments(in range: NSRange, ranges: [String: NSRange], segments: [TranscriptSegment]) -> [TranscriptSegment] {
+        guard range.location != NSNotFound, range.length > 0 else { return [] }
+        return segments.filter { segment in ranges[segment.id].map { NSIntersectionRange($0, range).length > 0 } ?? false }
+    }
+
     static func document(_ item: BackendDocument, range: NSRange) -> SelectedQuote? {
         let content = item.content as NSString
         guard range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= content.length else { return nil }
@@ -33,7 +38,7 @@ struct SelectedQuote: Codable, Identifiable, Equatable {
                            title: String, recordingID: String, runID: String, revision: (String) -> Int) -> SelectedQuote? {
         let content = text as NSString
         guard range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= content.length else { return nil }
-        let selected = segments.filter { segment in ranges[segment.id].map { NSIntersectionRange($0, range).length > 0 } ?? false }
+        let selected = selectedSegments(in: range, ranges: ranges, segments: segments)
         guard let first = selected.first, let last = selected.last else { return nil }
         return .init(text: content.substring(with: range), title: title, location: "\(TimeFormat.clock(first.start))–\(TimeFormat.clock(last.end))",
                      sources: selected.map { .init(resourceType: "segment", resourceID: $0.id, revision: revision($0.id)) }, recordingID: recordingID, runID: runID)

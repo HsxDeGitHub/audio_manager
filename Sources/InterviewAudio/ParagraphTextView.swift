@@ -19,6 +19,11 @@ struct ParagraphTextView: NSViewRepresentable {
     var onPlay: (String) -> Void
     var onEdit: (String) -> Void
     var onQuote: ((String, NSRange, [String: NSRange]) -> Void)? = nil
+    var showReviewMarks = false
+    var onSelectionEdit: (([String]) -> Void)? = nil
+    var onSelectionPlay: (([String]) -> Void)? = nil
+    var onSelectionSpeaker: (([String], Int?) -> Void)? = nil
+    var speakers: [(Int, String)] = []
 
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSTextView {
@@ -41,10 +46,19 @@ struct ParagraphTextView: NSViewRepresentable {
         let active = activeID.flatMap { joined.ranges[$0] == nil ? nil : $0 }
         let focused = focusedID.flatMap { joined.ranges[$0] == nil ? nil : $0 }
         let key = RenderKey(segments: segments, fontSize: fontSize, active: active, focused: focused, search: searchTerm,
-                            punctuate: punctuate, paragraphBreaks: paragraphBreaks, density: density, overrides: overrides)
+                            punctuate: punctuate, paragraphBreaks: paragraphBreaks, density: density, overrides: overrides, showReviewMarks: showReviewMarks)
         let activeChanged = coordinator.renderKey?.active != active
         coordinator.onPlay = onPlay; coordinator.onEdit = onEdit
         (view as? QuoteSelectionTextView)?.onQuote = onQuote.map { callback in { range in callback(joined.text, range, joined.ranges) } }
+        if let selectionView = view as? QuoteSelectionTextView {
+            let identifiers: (NSRange) -> [String] = { range in
+                SelectedQuote.selectedSegments(in: range, ranges: joined.ranges, segments: segments).map(\.id)
+            }
+            selectionView.onSelectionEdit = onSelectionEdit.map { callback in { callback(identifiers($0)) } }
+            selectionView.onSelectionPlay = onSelectionPlay.map { callback in { callback(identifiers($0)) } }
+            selectionView.onSelectionSpeaker = onSelectionSpeaker.map { callback in { range, speaker in callback(identifiers(range), speaker) } }
+            selectionView.speakers = speakers
+        }
         coordinator.segments = Dictionary(uniqueKeysWithValues: segments.map { ($0.id, $0) })
         if coordinator.renderKey != key {
             if view.string != joined.text { (view as? QuoteSelectionTextView)?.dismissQuote() }
@@ -63,7 +77,7 @@ struct ParagraphTextView: NSViewRepresentable {
                     let tail = (joined.text as NSString).rangeOfComposedCharacterSequence(at: NSMaxRange(range) - 1)
                     value.addAttribute(.kern, value: fontSize * 0.22, range: tail)
                 }
-                if segment.pendingReview { value.addAttributes([.underlineStyle: NSUnderlineStyle.patternDot.rawValue | NSUnderlineStyle.single.rawValue, .underlineColor: NSColor.systemOrange], range: range) }
+                if showReviewMarks && segment.pendingReview { value.addAttributes([.underlineStyle: NSUnderlineStyle.patternDot.rawValue | NSUnderlineStyle.single.rawValue, .underlineColor: NSColor.systemOrange], range: range) }
                 if segment.id == active {
                     value.addAttributes([.backgroundColor: ReaderTheme.tint.withAlphaComponent(0.16), .foregroundColor: ReaderTheme.tint], range: range)
                 }
@@ -107,6 +121,7 @@ struct ParagraphTextView: NSViewRepresentable {
     struct RenderKey: Equatable {
         var segments: [TranscriptSegment]; var fontSize: Double; var active: String?; var focused: String?; var search: String
         var punctuate: Bool; var paragraphBreaks: Bool; var density: ReadingDensity; var overrides: [String: String]
+        var showReviewMarks: Bool
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
         weak var view: NSTextView?
@@ -156,7 +171,7 @@ private final class ParagraphNativeTextView: QuoteSelectionTextView {
         clearHover(); hovered = id
         if let id, let range = coordinator?.ranges[id] {
             layoutManager?.addTemporaryAttribute(.backgroundColor, value: ReaderTheme.tint.withAlphaComponent(0.08), forCharacterRange: range)
-            if let sentence = coordinator?.segments[id] { toolTip = "回听 \(TimeFormat.clock(sentence.start)) – \(TimeFormat.clock(sentence.end)) · \(sentence.pendingReview ? "待核对" : sentence.manuallyEdited ? "已校对" : "识别原稿") · 右键校对" }
+            if let sentence = coordinator?.segments[id] { toolTip = "回听 \(TimeFormat.clock(sentence.start)) – \(TimeFormat.clock(sentence.end)) · \(sentence.pendingReview ? "待核对" : sentence.reviewed == true ? "已核对" : sentence.manuallyEdited ? "已修改" : "识别原稿") · 右键校对" }
         }
     }
     override func mouseExited(with event: NSEvent) { clearHover() }

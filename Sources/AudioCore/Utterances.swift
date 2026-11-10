@@ -3,12 +3,14 @@ import Foundation
 /// Reading groups only: original segment IDs, text edits, and timing anchors remain intact.
 public struct SpeechUtterance: Identifiable, Sendable {
     public var segments: [TranscriptSegment]
+    public init(segments: [TranscriptSegment]) { self.segments = segments }
     public var id: String { segments[0].id }
     public var speaker: Int? { segments[0].speaker }
     public var start: Double { segments[0].start }
     public var end: Double { segments.map(\.end).max() ?? start }
     public var reviewCount: Int { segments.filter(\.pendingReview).count }
     public var hasEdits: Bool { segments.contains(where: \.manuallyEdited) }
+    public var hasContentEdits: Bool { segments.contains { $0.edited != nil || $0.speakerEdited } }
     public var text: String { JoinedTranscript(segments: segments).text }
 }
 
@@ -76,6 +78,8 @@ public enum TranscriptSearch {
 }
 
 public struct AppPreferences: Codable, Sendable {
+    public var workspaceMode: String?
+    public var welcomeDismissed: Bool?
     public var modelsDirectory: String
     public var readerFontSize: Double?
     public var preRoll: Double?
@@ -88,7 +92,9 @@ public struct AppPreferences: Codable, Sendable {
     public var libraryFilter: LibraryFilter?
     public init(modelsDirectory: String, readerFontSize: Double? = nil, preRoll: Double? = nil, lastRecordingID: String? = nil,
                 readingPunctuation: Bool? = nil, readingParagraphBreaks: Bool? = nil, readingDensity: ReadingDensity? = nil,
-                librarySort: LibrarySort? = nil, libraryFilter: LibraryFilter? = nil, smartPunctuation: Bool? = nil) {
+                librarySort: LibrarySort? = nil, libraryFilter: LibraryFilter? = nil, smartPunctuation: Bool? = nil,
+                workspaceMode: String? = nil, welcomeDismissed: Bool? = nil) {
+        self.workspaceMode = workspaceMode; self.welcomeDismissed = welcomeDismissed
         self.modelsDirectory = modelsDirectory; self.readerFontSize = readerFontSize
         self.preRoll = preRoll; self.lastRecordingID = lastRecordingID
         self.readingPunctuation = readingPunctuation; self.readingParagraphBreaks = readingParagraphBreaks

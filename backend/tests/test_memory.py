@@ -161,6 +161,7 @@ def test_upgrade_repairs_preexisting_memory_version_drift(client):
         c.execute("INSERT INTO memories VALUES('drift','analysis','保留内容','global','[]','版本','needs_review',NULL,5)")
         c.execute("INSERT INTO object_versions VALUES('memory','drift',1)")
         c.execute('DROP TABLE agent_work')
+        c.execute('DROP TABLE navigation_marks')
         c.execute('ALTER TABLE sessions DROP COLUMN title_edited')
         c.execute('ALTER TABLE sessions DROP COLUMN deleted')
         c.execute("UPDATE alembic_version SET version_num='0002_application'")

@@ -12,6 +12,7 @@ struct AssistantView: View {
     @UIState private var deletingSession: AssistantSession?
     @UIState private var confirmingDeletion = false
     @UIState private var deletionError: String?
+    @UIState private var waitingSince = Date()
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -24,7 +25,9 @@ struct AssistantView: View {
             Divider()
             composer
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(ReaderTheme.canvas)
+        .onChange(of: assistant.sending) { _, sending in if sending { waitingSince = Date() } }
+        .onChange(of: assistant.activeRun) { _, run in if run != nil { waitingSince = Date() } }
         .task { await assistant.reconnect(model: model) }
         .sheet(item: $renamingSession) { session in
             AssistantRenameSessionView(assistant: assistant, session: session)
@@ -133,7 +136,7 @@ struct AssistantView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text(assistant.sending ? "正在发送请求" : "任务进行中").font(.callout.weight(.semibold))
+                Text(assistant.sending ? "正在发送" : "正在处理").font(.callout.weight(.semibold))
                 Spacer(minLength: 4)
                 if assistant.activeRun != nil {
                     Button("停止") { Task { await assistant.cancel() } }.controlSize(.small)
@@ -143,8 +146,12 @@ struct AssistantView: View {
                 Text(instruction).font(.callout).foregroundStyle(.secondary).lineLimit(2)
                     .help(instruction)
             }
-            Text(assistant.sending ? "请求已准备，正在等待本地服务接收…" : assistant.progress.isEmpty ? "正在读取资料…" : assistant.progress)
+            Text(assistant.sending ? "请求已准备，正在等待本地服务接收…" : assistant.progress.isEmpty ? "正在准备回复…" : assistant.progress)
                 .font(.caption).fixedSize(horizontal: false, vertical: true)
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                Text(AssistantScopePresentation.elapsed(context.date.timeIntervalSince(waitingSince)))
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
             let saved = assistant.activeSavedChanges.filter { $0.state == "committed" }.reduce(0) { $0 + $1.count }
             if saved > 0 { Label("已保存 \(saved) 项修改", systemImage: "checkmark.circle").font(.caption).foregroundStyle(accent) }
         }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
@@ -164,11 +171,18 @@ struct AssistantView: View {
             }
             HStack(spacing: 7) {
                 Menu {
-                    Button("当前资料") { assistant.allMaterials = false }
+                    Button("当前资料") { assistant.allMaterials = false; assistant.clearQuotes() }
+                    if !assistant.quotes.isEmpty { Button("引用片段 · \(assistant.quotes.count) 条") { assistant.allMaterials = false } }
                     Button("全部资料") { assistant.allMaterials = true }
                 } label: {
-                    Label(assistant.allMaterials ? "全部资料" : !assistant.quotes.isEmpty ? "所引用的资料" : model.selected?.title ?? "未选择资料", systemImage: assistant.allMaterials ? "square.stack" : "doc.text").lineLimit(1)
+                    Label(AssistantScopePresentation.title(allMaterials: assistant.allMaterials, quotes: assistant.quotes.count,
+                        material: model.librarySection == .documents ? model.currentDocumentTitle : model.selected?.title,
+                        materialCount: model.materialCount),
+                        systemImage: assistant.allMaterials ? "square.stack" : !assistant.quotes.isEmpty ? "quote.bubble" : "doc.text")
+                        .lineLimit(1).padding(.horizontal, 9).padding(.vertical, 6)
+                        .background(accent.opacity(0.07), in: Capsule())
                 }.menuStyle(.borderlessButton).font(.caption).accessibilityLabel("提问范围")
+                    .help(assistant.allMaterials ? "包含录音与个人材料，实际读取范围按问题决定" : "引用片段优先作为本轮上下文")
                 Spacer(minLength: 0)
                 if !assistant.allMaterials {
                     Button { assistant.quote(model: model) } label: { Image(systemName: "text.badge.plus") }.buttonStyle(.plain).help("引用选中段落").accessibilityLabel("引用选中段落")
@@ -206,7 +220,7 @@ struct AssistantView: View {
                 }.padding(.horizontal, 8).padding(.bottom, 8)
             }.background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.secondary.opacity(0.20)))
-            Text("原话、分析与建议分别标注 · 内容保存在本机").font(.caption2).foregroundStyle(.tertiary)
+            Text("资料保存在本机 · 提问时按需发送文字给所配置的模型").font(.system(size: 11)).foregroundStyle(.secondary)
         }.padding(12)
     }
 }
@@ -308,11 +322,23 @@ private struct AssistantRunView: View {
                 if !answer.isEmpty { Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(answer, forType: .string) } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.plain).help("复制回答").accessibilityLabel("复制回答") }
             }.font(.caption)
             if run.context?.historyOmitted == true { Text("历史较长，本次仅参考最近的部分对话。").font(.caption).foregroundStyle(.secondary) }
-            if let scope = run.context?.scopeTitle { Label(scope, systemImage: "doc.text").font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+            if let intent = run.context?.taskIntent {
+                Label(intent.title, systemImage: intent.reading == "none" ? "bubble.left" : "doc.text.magnifyingglass")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if run.context?.taskIntent?.reading != "none", let scope = run.context?.scopeTitle {
+                Text(scope).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+            if let result = run.result {
+                ForEach(result.allChanges, id: \.id) { change in AssistantResultCard(model: model, assistant: assistant, change: change) }
+            }
             if !answer.isEmpty {
-                if running || !["completed", "awaiting_input"].contains(run.state) { Text(answer).font(.system(size: 14)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true) }
+                if !running && !(run.result?.allChanges.isEmpty ?? true) {
+                    DisclosureGroup("结果说明") { AssistantMarkdown(text: answer) }.font(.caption)
+                }
+                else if running || !["completed", "awaiting_input"].contains(run.state) { Text(answer).font(.system(size: 14)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true) }
                 else { AssistantMarkdown(text: answer) }
-            } else if running { Text("正在读取资料并准备回答…").font(.callout).foregroundStyle(.secondary) }
+            } else if running { Text("正在准备回复…").font(.callout).foregroundStyle(.secondary) }
             if let result = run.result { details(result) }
             if !running, let error = run.result?.error {
                 Label(error.message, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
@@ -331,17 +357,21 @@ private struct AssistantRunView: View {
     }
     private var stateTitle: String { ["completed":"已完成", "awaiting_input":"需要补充", "cancelled":"已停止 · 输出未完成", "failed":"失败 · 输出未完成", "interrupted":"已中断 · 可继续"][run.state] ?? "准备中" }
     @ViewBuilder private func details(_ result: AssistantResult) -> some View {
-        if let coverage = result.coverage {
-            Text("\(coverage.progressTitle) · 未纳入 \(coverage.excluded?.count ?? 0) 项").font(.caption).foregroundStyle(.secondary)
-            if let parts = coverage.parts, !parts.isEmpty {
-                DisclosureGroup("覆盖明细") {
-                    if let covered = coverage.sourceCovered, let total = coverage.sourceTotal { Text("完整来源 \(covered)/\(total)") }
-                    ForEach(parts) { part in HStack { Button(part.label) { Task { await model.openAssistantSource(part.reference, play: false) } }.buttonStyle(.link); Spacer(); Text(part.stateTitle) } }
-                }.font(.caption)
-            }
+        if result.coverage != nil || !(result.partialResults ?? []).isEmpty {
+            DisclosureGroup("处理详情") { processingDetails(result) }.font(.caption).foregroundStyle(.secondary)
         }
-        if let partial = result.partialResults, !partial.isEmpty {
-            DisclosureGroup("已保留的分块分析（\(partial.count)）") { ForEach(Array(partial.enumerated()), id: \.offset) { _, item in Text(item.answer).textSelection(.enabled) } }.font(.caption)
+        if let questions = result.questions, !questions.isEmpty {
+            let chapterSegments = Set(model.navigation.items.filter { $0.kind == .chapter }.map(\.segmentID))
+            let visibleSegments = Set(model.segments.map(\.id))
+            let currentQuestions = questions.filter { question in
+                question.source.resourceType == "segment" && visibleSegments.contains(question.source.resourceID)
+                    && !chapterSegments.contains(question.source.resourceID)
+            }
+            if !currentQuestions.isEmpty {
+                Button("将当前录音的 \(Set(currentQuestions.map { $0.source.resourceID }).count) 个问题设为章节") {
+                    Task { await createChapters(currentQuestions) }
+                }.font(.caption).disabled(model.navigation.busy)
+            }
         }
         if let questions = result.questions, !questions.isEmpty {
             DisclosureGroup("问题清单与来源（\(questions.count)）", isExpanded: $questionsExpanded) {
@@ -369,13 +399,31 @@ private struct AssistantRunView: View {
                 }
             }.font(.caption)
         }
-        ForEach(result.allChanges, id: \.id) { change in
-            VStack(alignment: .leading, spacing: 7) {
-                Label("修改 \(change.count) 项 · \(change.state == "reverted" ? "已撤销" : "已提交")", systemImage: "checkmark.circle")
-                if let items = change.items { DisclosureGroup("前后差异") { ForEach(Array(items.enumerated()), id: \.offset) { _, item in ChangeDifferenceView(item: item) { source in Task { await model.openAssistantSource(source, play: false) } } } } }
-                Button("撤销整次修改") { Task { await assistant.revert(change.id, model: model) } }.disabled(assistant.activeRun != nil || change.state == "reverted")
-            }.font(.caption).padding(10).background(accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+    }
+    @ViewBuilder private func processingDetails(_ result: AssistantResult) -> some View {
+        if let coverage = result.coverage {
+            Text("\(coverage.progressTitle) · 未纳入 \(coverage.excluded?.count ?? 0) 项").font(.caption).foregroundStyle(.secondary)
+            if let parts = coverage.parts, !parts.isEmpty {
+                DisclosureGroup("覆盖明细") {
+                    if let covered = coverage.sourceCovered, let total = coverage.sourceTotal { Text("完整来源 \(covered)/\(total)") }
+                    ForEach(parts) { part in HStack { Button(part.label) { Task { await model.openAssistantSource(part.reference, play: false) } }.buttonStyle(.link); Spacer(); Text(part.stateTitle) } }
+                }.font(.caption)
+            }
         }
+        if let partial = result.partialResults, !partial.isEmpty {
+            DisclosureGroup("已保留的分块分析（\(partial.count)）") { ForEach(Array(partial.enumerated()), id: \.offset) { _, item in Text(item.answer).textSelection(.enabled) } }.font(.caption)
+        }
+    }
+    private func createChapters(_ questions: [AssistantQuestion]) async {
+        guard let recordingID = model.selectedID else { return }
+        var seen = Set<String>()
+        let marks: [[String: Any]] = questions.filter { seen.insert($0.source.resourceID).inserted }.map {
+            ["segment_id": $0.source.resourceID, "expected_revision": $0.source.revision,
+             "kind": NavigationKind.chapter.rawValue, "title": String($0.text.prefix(200))]
+        }
+        if await model.navigation.create(marks, recordingID: recordingID, history: model.changeHistory) {
+            model.notice = "已添加 \(marks.count) 个章节，可在内容导航中查看。"
+        } else { model.alert = model.navigation.error }
     }
     private func sourceButtons(_ source: AssistantReference, start: Double? = nil) -> some View {
         HStack {

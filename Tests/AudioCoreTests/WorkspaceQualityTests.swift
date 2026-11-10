@@ -53,6 +53,8 @@ import AudioCore
         #expect(restored.selectedSession == "b" && restored.input == "会话乙的草稿" && restored.allMaterials)
         restored.activate("a"); #expect(restored.input == "会话甲的草稿🙂")
         restored.input = ""; await restored.flushDrafts()
+        // 显式保存后，旧实例的 300ms 防抖任务不得再覆盖恢复实例的新草稿。
+        try await Task.sleep(for: .milliseconds(450))
         let snapshot = try #require(try await AssistantDraftStore(url: url).load())
         #expect(snapshot.items["a"] == nil && snapshot.items["b"]?.input == "会话乙的草稿")
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)

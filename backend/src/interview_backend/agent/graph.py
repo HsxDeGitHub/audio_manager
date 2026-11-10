@@ -37,7 +37,9 @@ class AgentEngine:
         if intent['reading'] == 'weekly' and hasattr(self, 'reports'):
             value['report_plan'] = self.reports.freeze(value, context['instruction'])
         if emit:
-            await emit('task_stage', {'message': '正在回复…' if intent['reading'] == 'none' else '任务范围已确定，正在读取资料…'})
+            stages = {'none': '正在回复…', 'selection': '正在读取引用片段…',
+                      'search': '正在检索相关片段…', 'full': '正在准备全文处理…', 'weekly': '正在按日期汇总资料…'}
+            await emit('task_stage', {'message': stages[intent['reading']]})
         return value
 
     async def execute(self, run_id, instruction, context, model=None, emit=None, change_plan=None):
@@ -352,6 +354,8 @@ class AgentEngine:
         if not await asyncio.to_thread(self.evidence.valid_many,sources,await asyncio.to_thread(self.evidence.committed,run_id)):
             raise DomainError('stale_source', '运行中资料发生变化，请基于当前版本重新执行。', 409)
         result = {'answer': '\n\n'.join(answers), 'claims': claims, 'coverage':coverage.snapshot()}
+        if context.get('allow_write'):
+            result['partial_results'] = [{'answer': answer} for answer in answers if answer]
         if proposals:
             from interview_backend.agent.proposals import prepare
             result['proposals'] = prepare(self.evidence, run_id, proposals, context)

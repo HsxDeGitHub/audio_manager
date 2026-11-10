@@ -4,6 +4,10 @@ import SwiftUI
 /// 选区在转移输入焦点前取快照，浮层和右键菜单使用同一入口。
 class QuoteSelectionTextView: NSTextView {
     var onQuote: ((NSRange) -> Void)?
+    var onSelectionEdit: ((NSRange) -> Void)?
+    var onSelectionPlay: ((NSRange) -> Void)?
+    var onSelectionSpeaker: ((NSRange, Int?) -> Void)?
+    var speakers: [(Int, String)] = []
     private var quotePopover: NSPopover?
     // NSTextView 在 mouseDown 的内部追踪循环中消费 mouseUp；选区在 super 返回后才稳定。
     override func mouseDown(with event: NSEvent) { dismissQuote(); super.mouseDown(with: event); showQuote() }
@@ -29,9 +33,23 @@ class QuoteSelectionTextView: NSTextView {
         guard !rect.isEmpty else { return }
         let popover = NSPopover(); popover.behavior = .transient; popover.animates = false
         popover.contentViewController = NSHostingController(rootView:
-            Button { [weak self] in self?.dismissQuote(); self?.onQuote?(range) } label: {
-                Label("添加到对话", systemImage: "text.bubble").padding(.horizontal, 8).padding(.vertical, 5)
-            }.buttonStyle(.plain).padding(5))
+            HStack(spacing: 12) {
+                Button { [weak self] in self?.dismissQuote(); self?.onQuote?(range) } label: { Label("问助手", systemImage: "text.bubble") }
+                if onSelectionEdit != nil {
+                    Button { [weak self] in self?.dismissQuote(); self?.onSelectionEdit?(range) } label: { Label("校对", systemImage: "pencil") }
+                }
+                if onSelectionSpeaker != nil {
+                    Menu {
+                        ForEach(speakers, id: \.0) { [weak self] number, name in
+                            Button(name) { [weak self] in self?.dismissQuote(); self?.onSelectionSpeaker?(range, number) }
+                        }
+                        Button("未识别") { [weak self] in self?.dismissQuote(); self?.onSelectionSpeaker?(range, nil) }
+                    } label: { Label("说话人", systemImage: "person") }.menuStyle(.borderlessButton).fixedSize()
+                }
+                if onSelectionPlay != nil {
+                    Button { [weak self] in self?.dismissQuote(); self?.onSelectionPlay?(range) } label: { Label("回听", systemImage: "play") }
+                }
+            }.buttonStyle(.plain).font(.system(size: 12)).padding(10))
         quotePopover = popover
         popover.show(relativeTo: NSRect(x: rect.midX, y: rect.minY, width: 1, height: 1), of: self, preferredEdge: .minY)
     }

@@ -80,7 +80,7 @@ struct AssistantMarkdown: View {
     }
     private struct Block { let text: String; let code: Bool }
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 14) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 if block.code {
                     ScrollView(.horizontal) { Text(block.text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).padding(10) }
@@ -90,7 +90,7 @@ struct AssistantMarkdown: View {
                         let heading = line.prefix(while: { $0 == "#" }).count
                         let content = heading > 0 && line.dropFirst(heading).hasPrefix(" ") ? String(line.dropFirst(heading + 1)) : line
                         Text((try? AttributedString(markdown: content.replacingOccurrences(of: "^- ", with: "• ", options: .regularExpression), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(content))
-                            .font(heading > 0 ? .headline : .system(size: 14)).textSelection(.enabled)
+                            .font(heading > 0 ? .headline : ReaderTheme.body).lineSpacing(4).textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }

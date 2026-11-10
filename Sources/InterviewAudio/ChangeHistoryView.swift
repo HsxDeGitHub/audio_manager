@@ -112,6 +112,17 @@ struct ChangeDifferenceView: View {
 enum ChangeDifference {
     static func describe(_ item: BackendJSONValue, excluding: Set<String> = []) -> String {
         guard case .object(let row) = item, case .object(let before) = row["before"], case .object(let after) = row["after"] else { return "修改详情不可用" }
+        if row["resource_type"]?.stringValue == "navigation" {
+            let kind = NavigationKind(rawValue: after["kind"]?.stringValue ?? "")?.title ?? "导航标记"
+            let name = kind + (excluding.contains("title") ? "" : "「\(after["title"]?.stringValue ?? "")」")
+            if before["removed"] != after["removed"] {
+                let removed = after["removed"] == .bool(true) || after["removed"]?.doubleValue == 1
+                if removed { return "移除" + name }
+                return (row["before_revision"]?.doubleValue == 1 ? "添加" : "恢复") + name
+            }
+            if before["segment_id"] != after["segment_id"] { return name + "的定位句子已调整" }
+            return name
+        }
         let labels = ["edited":"正文", "title":"名称", "name":"说话人名称", "speaker":"发言归属", "needs_review":"待核对", "reviewed":"已核对", "payload":"整理稿", "content":"内容", "state":"状态", "removed":"移除", "kind":"类型", "company":"公司", "role":"岗位", "interview_date":"实际面试日期"]
         let hidden = excluding.union(["revision", "speaker_edited"])
         func value(_ key: String, side: String, values: [String: BackendJSONValue]) -> String {
