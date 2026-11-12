@@ -207,12 +207,24 @@ async def run_session(tools, messages, model_step, tool_step, *, summary_step=No
                 raise OutputError('invalid_structure')
             return response.native()
         if method == 'model':
-            turn += 1
+            next_turn = turn + 1
             call_index = 0
-            if turn > 8:
+            if next_turn > 8:
                 raise DomainError('tool_limit_reached', '当前任务的工具调用轮次超过上限，请缩小范围后继续。', 409)
             values = host_messages(payload['systemPrompt'], payload['messages'])
-            response = await model_step(turn, values)
+            try:
+                response = await model_step(next_turn, values)
+            except DomainError as error:
+                if error.code != 'model_context_exceeded':
+                    raise
+                # 超限交给 SDK 压缩和续跑，同一业务步骤不推进编号、不重复执行工具。
+                import time
+                return Message(role='assistant', content=[], api='openai-completions',
+                    provider='tingyue', model='host', stopReason='error',
+                    errorMessage='maximum context length exceeded', timestamp=int(time.time() * 1000),
+                    usage={'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'totalTokens': 0,
+                           'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0, 'total': 0}}).native()
+            turn = next_turn
             if turn == 8 and response.tool_calls:
                 raise DomainError('tool_limit_reached', '当前任务的工具调用轮次超过上限，请缩小范围后继续。', 409)
             if any(call['name'] not in tool_names for call in response.tool_calls):
@@ -242,4 +254,8 @@ async def run_session(tools, messages, model_step, tool_step, *, summary_step=No
             'tools': [{'name': t.name, 'description': t.description, 'parameters': t.parameters}
                       for t in tools],
         }, callback=callback)
-        return Message.model_validate(value['response']), host_messages(value['systemPrompt'], value['messages'])[:-1]
+        response = Message.model_validate(value['response'])
+        if response.stopReason == 'error':
+            raise DomainError('model_context_exceeded',
+                '模型上下文超限，自动压缩后仍无法继续；已完成批次保留，请核对配置的上下文窗口与接口实际限制。', 503)
+        return response, host_messages(value['systemPrompt'], value['messages'])[:-1]

@@ -47,8 +47,8 @@ class WorkLog:
             messages = [{key: value for key, value in message.native().items()
                          if key not in {'timestamp', 'durationMs'}} for message in values]
             payload=encode({'protocol':'pi-native-v1','messages':messages,'configuration':configuration}).encode()
-            if (configuration or {}).get('input_budget_bytes') and len(payload)>configuration['input_budget_bytes']:
-                raise DomainError('model_input_too_large','本批模型上下文超过处理上限，未发送请求；请缩小指令或选区后重新提问。',422)
+            # 旧配置中的 input_budget_bytes 继续参与签名以复用已完成批次。
+            # 完整上下文由模型窗口和 Pi 压缩管理，序列化字节数仅用于诊断。
             return hashlib.sha256(payload).hexdigest(),len(payload)
         signature,input_bytes=await asyncio.to_thread(signature_for_input,messages)
         cached=await asyncio.to_thread(self.get,key)

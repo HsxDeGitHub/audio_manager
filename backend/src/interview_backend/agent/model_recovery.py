@@ -55,6 +55,8 @@ def classify(error):
         return 'model_invalid_output', True, error.reason
     if isinstance(error, DomainError):
         return error.code, error.code in REPAIRABLE, 'invalid_citation'
+    if isinstance(error, PiProviderError) and error.reason == 'context_overflow':
+        return 'model_context_exceeded', False, 'context_overflow'
     if isinstance(error, (TimeoutError, httpx.TimeoutException)) or type(error).__name__ == 'APITimeoutError':
         return 'model_timeout', True, 'timeout'
     if status in {401, 403}:
@@ -93,6 +95,7 @@ def failure(error):
         return error
     code, _, reason = classify(error)
     messages = {
+        'model_context_exceeded': '模型上下文超限，自动压缩后仍无法继续；已完成批次保留，请核对配置的上下文窗口与接口实际限制。',
         'model_timeout': '模型响应超时，自动重试仍未完成；已保留已完成批次，可继续任务。',
         'model_rate_limited': '模型接口限流，自动重试仍未恢复；请稍后继续任务。',
         'model_unavailable': '模型服务暂时不可用，自动重试仍未恢复；已完成批次保留。',

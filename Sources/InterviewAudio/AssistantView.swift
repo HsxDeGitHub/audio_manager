@@ -342,7 +342,7 @@ private struct AssistantRunView: View {
             if let result = run.result { details(result) }
             if !running, let error = run.result?.error {
                 Label(error.message, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
-                if ["model_not_configured", "model_auth_failed", "model_request_rejected", "model_tool_unavailable"].contains(error.code) { Button("打开大模型配置") { model.showAISettings = true }.controlSize(.small) }
+                if ["model_not_configured", "model_auth_failed", "model_request_rejected", "model_tool_unavailable", "model_context_exceeded"].contains(error.code) { Button("打开大模型配置") { model.showAISettings = true }.controlSize(.small) }
             }
             if !running, ["interrupted", "failed", "cancelled"].contains(run.state) {
                 HStack {

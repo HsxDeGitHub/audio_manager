@@ -166,11 +166,17 @@ def test_repeated_read_does_not_duplicate_the_frozen_library(client,config):
     assert model.reads==result['coverage']['chunks'] and result['coverage']['covered']==40
 
 
-def test_request_budget_blocks_oversized_history_before_model_call(client,config):
+def test_configured_window_accepts_instruction_larger_than_legacy_byte_budget(client,config):
     context=seed(client,2);context['instruction']='合成'*40000
-    model=BatchModel(client)
-    with pytest.raises(DomainError) as error:run(client,config,context,model)
-    assert error.value.code=='model_input_too_large' and model.calls==[]
+    class LargeInstructionModel(BatchModel):
+        async def complete(self,messages):
+            prompt=json.loads(messages[-1].text)
+            assert prompt['instruction']==context['instruction']
+            self.bytes.append(len(messages[-1].text.encode()))
+            return assistant_message(content=json.dumps({'answer':'合成分析完成','claims':[]}))
+    model=LargeInstructionModel(client)
+    assert run(client,config,context,model)['coverage']['covered']==2
+    assert model.bytes[0]>MAX_INPUT_BYTES
 
 
 def test_editing_never_replaces_a_full_source_with_only_a_chunk():

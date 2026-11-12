@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   createAssistantMessageEventStream,
+  isContextOverflow,
 } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 
@@ -64,7 +65,9 @@ function safeProviderError(message, status) {
   const text = message ?? "";
   const code = (status >= 400 ? status : undefined) ?? Number(text.match(/\b(400|401|403|404|408|413|422|429|500|502|503|504)\b/)?.[1]);
   let reason = "invalid_response";
-  if (/timeout|timed out/i.test(text)) reason = "timeout";
+  if ((!code || [400, 413, 422].includes(code)) &&
+      isContextOverflow({ stopReason: "error", errorMessage: `${code || ""} ${text}` })) reason = "context_overflow";
+  else if (/timeout|timed out/i.test(text)) reason = "timeout";
   else if (/connection|fetch failed|socket|ECONN|network|terminated/i.test(text)) reason = "connection";
   return { reason, status: code || null };
 }
@@ -222,7 +225,10 @@ async function agent(id, payload) {
             : { systemPrompt: payload.systemPrompt,
                 messages: context.messages.filter((message) => message.role !== "system") };
           const response = await invoke(summarizing ? "summary" : "model", request, options?.signal);
-          stream.push({ type: "done", reason: response.stopReason, message: response });
+          // The session uses a host model identity. Keep provider usage while allowing
+          // the SDK to match its threshold/overflow checks to that session model.
+          const message = { ...response, provider: sessionModel.provider, model: sessionModel.id };
+          stream.push({ type: "done", reason: message.stopReason, message });
         } catch {
           stream.end({ role: "assistant", content: [], api: "openai-completions", provider: "tingyue",
             model: "host", stopReason: "aborted", timestamp: Date.now(), errorMessage: "Host step failed" });

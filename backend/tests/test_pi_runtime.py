@@ -36,13 +36,13 @@ def model_server():
             state.requests.append(body)
             state.started.set()
             response = state.respond(body)
-            status = 501 if body.get('stream') and not state.streaming_supported else state.status
+            status = 501 if body.get('stream') and not state.streaming_supported else response.get('status', state.status)
             self.send_response(status)
             self.send_header('Content-Type', 'text/event-stream' if status == 200 and body.get('stream') else 'application/json')
             self.end_headers()
             try:
                 if status != 200:
-                    self.wfile.write(json.dumps({'error': {'message': 'synthetic-private-key', 'code': status}}).encode())
+                    self.wfile.write(json.dumps({'error': {'message': response.get('error', 'synthetic-private-key'), 'code': status}}).encode())
                     return
                 if not body.get('stream'):
                     self.wfile.write(json.dumps({'id': 'synthetic-response', 'object': 'chat.completion',
