@@ -49,7 +49,7 @@ struct AssistantInput: NSViewRepresentable {
         func measure(_ editor: NSTextView) {
             guard let container = editor.textContainer, let layout = editor.layoutManager else { return }
             layout.ensureLayout(for: container)
-            let value = min(170, max(54, ceil(layout.usedRect(for: container).height + 16)))
+            let value = min(170, max(44, ceil(layout.usedRect(for: container).height + 16)))
             if abs(value - parent.height) > 1 { DispatchQueue.main.async { [weak self] in self?.parent.height = value } }
         }
     }
@@ -60,42 +60,6 @@ final class ComposerTextView: NSTextView {
     override func keyDown(with event: NSEvent) {
         if AssistantInputPolicy.shouldSend(keyCode: event.keyCode, modifiers: event.modifierFlags, marked: hasMarkedText()) { onSend?() }
         else { super.keyDown(with: event) }
-    }
-}
-
-struct AssistantMarkdown: View {
-    let text: String
-    private var blocks: [Block] {
-        var result: [Block] = []; var lines: [String] = []; var code = false
-        for line in text.components(separatedBy: "\n") {
-            if line.hasPrefix("```") {
-                if !lines.isEmpty { result.append(Block(text: lines.joined(separator: "\n"), code: code)); lines = [] }
-                code.toggle()
-            } else if !code && line.isEmpty {
-                if !lines.isEmpty { result.append(Block(text: lines.joined(separator: "\n"), code: false)); lines = [] }
-            } else { lines.append(line) }
-        }
-        if !lines.isEmpty { result.append(Block(text: lines.joined(separator: "\n"), code: code)) }
-        return result
-    }
-    private struct Block { let text: String; let code: Bool }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                if block.code {
-                    ScrollView(.horizontal) { Text(block.text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).padding(10) }
-                        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
-                } else {
-                    ForEach(Array(block.text.components(separatedBy: "\n").enumerated()), id: \.offset) { _, line in
-                        let heading = line.prefix(while: { $0 == "#" }).count
-                        let content = heading > 0 && line.dropFirst(heading).hasPrefix(" ") ? String(line.dropFirst(heading + 1)) : line
-                        Text((try? AttributedString(markdown: content.replacingOccurrences(of: "^- ", with: "• ", options: .regularExpression), options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(content))
-                            .font(heading > 0 ? .headline : ReaderTheme.body).lineSpacing(4).textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

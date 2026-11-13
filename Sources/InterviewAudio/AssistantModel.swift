@@ -85,6 +85,8 @@ struct AssistantOutput: Decodable {
     var attemptID = ""; var blocks: [Block] = []; var lastEventID = 0
     private enum CodingKeys: String, CodingKey { case attemptID = "attempt_id", blocks, lastEventID = "last_event_id" }
     var text: String { blocks.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n") }
+    var completedBlocks: [Block] { blocks.dropLast().filter { !$0.text.isEmpty } }
+    var currentText: String { blocks.last?.text ?? "" }
     mutating func apply(_ event: BackendClient.Event) {
         guard event.id > lastEventID else { return }; lastEventID = event.id
         guard let payload = try? JSONSerialization.jsonObject(with: event.data) as? [String: Any] else { return }
@@ -162,7 +164,13 @@ final class AssistantModel: ObservableObject {
     var canDeleteSelectedSession: Bool { client != nil && selectedSession != nil && activeRun == nil && !sending && !managingSession }
     var canSend: Bool { client != nil && activeRun == nil && !sending && !managingSession && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && input.unicodeScalars.count <= 20000 }
     var changeToken: String { messages.map(\.id).joined() + runs.map { $0.id + $0.state }.joined() + current.outputs.keys.sorted().map { "\($0):\(current.outputs[$0]?.lastEventID ?? 0)" }.joined() }
-    func output(_ id: String) -> String { current.outputs[id]?.text ?? "" }
+    func outputState(_ id: String) -> AssistantOutput {
+        current.outputs[id] ?? runs.first(where: { $0.id == id })?.output ?? AssistantOutput()
+    }
+    func output(_ id: String) -> String { outputState(id).text }
+    func isHistoricalInterruption(_ run: AssistantRun) -> Bool {
+        ["failed", "interrupted", "cancelled"].contains(run.state) && run.id != runs.last?.id && run.id != activeRun
+    }
     private func update(_ session: String?, _ body: (inout Conversation) -> Void) {
         let key = session ?? ""; var value = conversations[key] ?? Conversation()
         let before = AssistantDraft(input: value.input, allMaterials: value.allMaterials, quotes: value.quotes)

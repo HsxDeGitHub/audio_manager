@@ -77,6 +77,7 @@ struct TextChangeSpan: Equatable {
 
 struct ChangeDifferenceView: View {
     let item: BackendJSONValue
+    var font: Font = .caption
     var onOpen: ((AssistantReference) -> Void)? = nil
     private var textChange: (String, String, String)? {
         guard case .object(let row) = item, case .object(let before) = row["before"], case .object(let after) = row["after"] else { return nil }
@@ -104,7 +105,7 @@ struct ChangeDifferenceView: View {
                 if !otherChanges.isEmpty { Text(otherChanges).textSelection(.enabled) }
             } else { Text(ChangeDifference.describe(item)).textSelection(.enabled) }
             if let onOpen, let reference { Button("定位这处修改") { onOpen(reference) }.buttonStyle(.link) }
-        }.font(.caption).padding(10).frame(maxWidth: .infinity, alignment: .leading)
+        }.font(font).padding(10).frame(maxWidth: .infinity, alignment: .leading)
             .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
     }
 }

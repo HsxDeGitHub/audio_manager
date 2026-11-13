@@ -18,6 +18,8 @@ struct AssistantResultCard: View {
     @ObservedObject var assistant: AssistantModel
     let change: AssistantChange
     @UIState private var selectedIndex = 0
+    @UIState private var reviewing = false
+    @UIState private var reverting = false
     private var segmentItems: [BackendJSONValue] {
         (change.items ?? []).filter { item in
             guard case .object(let row) = item else { return false }
@@ -33,6 +35,15 @@ struct AssistantResultCard: View {
             Label(change.count == 0 ? "没有需要保存的差异" : change.state == "reverted" ? "已撤销 \(change.count) 项修改" : "已保存 \(change.count) 项修改",
                   systemImage: change.state == "reverted" ? "arrow.uturn.backward.circle" : "checkmark.circle.fill")
                 .font(.system(size: 14, weight: .semibold)).foregroundStyle(accent)
+            let summary = AssistantChangeSummary(change)
+            if !summary.records.isEmpty {
+                Text(summary.description).font(.callout).fixedSize(horizontal: false, vertical: true)
+                    .help("分类按实际差异统计，同一对象可包含多种修改。")
+                if summary.pendingCount > 0 {
+                    Label("保存时有 \(summary.pendingCount) 处待核对", systemImage: "questionmark.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             if !segmentItems.isEmpty {
                 if let row = selectedRow, case .object(let before) = row["before"], case .object(let after) = row["after"] {
                     let text = after["edited"]?.stringValue ?? after["original"]?.stringValue ?? ""
@@ -52,18 +63,16 @@ struct AssistantResultCard: View {
                         .buttonStyle(.link).font(.caption)
                 }
             }
-            DisclosureGroup("查看前后差异") {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array((change.items ?? []).enumerated()), id: \.offset) { _, item in
-                        ChangeDifferenceView(item: item) { source in Task { await model.openAssistantSource(source, play: false) } }
-                    }
-                }.padding(.top, 8)
-            }.font(.caption)
-            Button("撤销整次修改") { Task { await assistant.revert(change.id, model: model) } }
-                .controlSize(.small).disabled(assistant.activeRun != nil || change.state != "committed")
+            Button("查看本次修改") { reviewing = true }.buttonStyle(.borderedProminent).controlSize(.small)
+                .disabled(summary.records.isEmpty).help("筛选修改类型并逐条查看前后差异")
+            Button("撤销整次修改") {
+                reverting = true
+                Task { await assistant.revert(change.id, model: model); reverting = false }
+            }.controlSize(.small).disabled(reverting || assistant.activeRun != nil || change.state != "committed")
         }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
             .background(accent.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(accent.opacity(0.16)))
+            .sheet(isPresented: $reviewing) { AssistantChangeReviewView(model: model, assistant: assistant, change: change) }
     }
     private func locate() {
         guard !segmentItems.isEmpty,

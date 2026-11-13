@@ -6,19 +6,21 @@ struct AssistantView: View {
     @ObservedObject var model: AppModel
     @ObservedObject var assistant: AssistantModel
     @AppStorage("assistant.expanded") private var expanded = false
-    @UIState private var inputHeight: CGFloat = 54
+    @AppStorage("assistant.fontSize") private var answerFontSize = 14.0
+    @UIState private var inputHeight: CGFloat = 44
     @UIState private var following = true
     @UIState private var renamingSession: AssistantSession?
     @UIState private var deletingSession: AssistantSession?
     @UIState private var confirmingDeletion = false
     @UIState private var deletionError: String?
     @UIState private var waitingSince = Date()
+    @UIState private var showingPrivacy = false
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider()
             if assistant.activeRun != nil || assistant.sending {
-                taskStatus.padding(12)
+                taskStatus.padding(.horizontal, 12).padding(.vertical, 8)
                 Divider()
             }
             transcript
@@ -26,6 +28,7 @@ struct AssistantView: View {
             composer
         }
         .background(ReaderTheme.canvas)
+        .environment(\.assistantFontSize, CGFloat(min(22, max(12, answerFontSize))))
         .onChange(of: assistant.sending) { _, sending in if sending { waitingSince = Date() } }
         .onChange(of: assistant.activeRun) { _, run in if run != nil { waitingSince = Date() } }
         .task { await assistant.reconnect(model: model) }
@@ -53,6 +56,11 @@ struct AssistantView: View {
                 Label("听阅助手", systemImage: "sparkles").font(.headline)
                 Spacer()
                 Menu {
+                    Menu("回答字号") {
+                        ForEach([12, 14, 16, 18, 20, 22], id: \.self) { size in
+                            Button("\(size) 点" + (Int(answerFontSize) == size ? " ✓" : "")) { answerFontSize = Double(size) }
+                        }
+                    }
                     Menu("侧栏宽度") {
                         ForEach([320, 380, 440, 560], id: \.self) { width in
                             Button("\(width) 点" + (width == 380 ? "（默认）" : "")) { NotificationCenter.default.post(name: .assistantPanelWidthChanged, object: Double(width)) }
@@ -63,7 +71,7 @@ struct AssistantView: View {
                     Button("长期记忆…") { model.showMemories = true }
                     Button("工具与 MCP…") { model.showToolSettings = true }
                     Button("大模型配置…") { model.showAISettings = true }
-                } label: { Image(systemName: "ellipsis.circle") }.menuStyle(.borderlessButton).fixedSize().help("助手设置").accessibilityLabel("助手设置")
+                } label: { Image(systemName: "gearshape") }.menuStyle(.borderlessButton).fixedSize().help("助手设置与阅读字号").accessibilityLabel("助手设置")
                 Button { Task { await assistant.createSession() } } label: { Image(systemName: "square.and.pencil") }.help("新对话").accessibilityLabel("新对话").disabled(assistant.sending || assistant.managingSession)
                 Button { expanded.toggle() } label: { Image(systemName: expanded ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") }.help(expanded ? "恢复侧栏" : "展开回答阅读区").accessibilityLabel("展开或还原助手")
                 Button { assistant.toggle() } label: { Image(systemName: "sidebar.right") }.help("收起助手 ⌘⇧A").accessibilityLabel("收起助手")
@@ -73,6 +81,8 @@ struct AssistantView: View {
                     Text("新对话").tag("")
                     ForEach(assistant.sessions) { Text($0.title).tag($0.id) }
                 }.labelsHidden().accessibilityLabel("助手会话").disabled(assistant.sending || assistant.managingSession)
+                    .frame(maxWidth: .infinity, alignment: .leading).layoutPriority(1)
+                    .help(assistant.sessions.first { $0.id == assistant.selectedSession }?.title ?? "新对话")
                 Menu {
                     Button { renamingSession = assistant.sessions.first { $0.id == assistant.selectedSession } } label: { Label("重命名话题…", systemImage: "pencil") }
                     Divider()
@@ -90,7 +100,8 @@ struct AssistantView: View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 20) {
+                    // 完成时长输出会收起为结果卡，使用实际高度避免懒布局沿用旧滚动范围。
+                    VStack(alignment: .leading, spacing: 20) {
                         if assistant.hasMoreHistory {
                             Button(assistant.loadingHistory ? "正在加载…" : "查看更早的对话") { following = false; Task { await assistant.loadOlderHistory() } }
                                 .disabled(assistant.loadingHistory).font(.caption)
@@ -133,28 +144,25 @@ struct AssistantView: View {
         }
     }
     private var taskStatus: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text(assistant.sending ? "正在发送" : "正在处理").font(.callout.weight(.semibold))
+                Text(assistant.sending ? "正在发送…" : assistant.progress.isEmpty ? "正在准备回复…" : assistant.progress)
+                    .font(.caption).lineLimit(2).help(assistant.progress)
                 Spacer(minLength: 4)
                 if assistant.activeRun != nil {
                     Button("停止") { Task { await assistant.cancel() } }.controlSize(.small)
                 }
             }
-            if let instruction = assistant.activeInstruction {
-                Text(instruction).font(.callout).foregroundStyle(.secondary).lineLimit(2)
-                    .help(instruction)
+            HStack {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(AssistantScopePresentation.elapsed(context.date.timeIntervalSince(waitingSince)))
+                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                let saved = assistant.activeSavedChanges.filter { $0.state == "committed" }.reduce(0) { $0 + $1.count }
+                if saved > 0 { Text("已保存 \(saved) 项修改").font(.caption2).foregroundStyle(accent) }
             }
-            Text(assistant.sending ? "请求已准备，正在等待本地服务接收…" : assistant.progress.isEmpty ? "正在准备回复…" : assistant.progress)
-                .font(.caption).fixedSize(horizontal: false, vertical: true)
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                Text(AssistantScopePresentation.elapsed(context.date.timeIntervalSince(waitingSince)))
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            }
-            let saved = assistant.activeSavedChanges.filter { $0.state == "committed" }.reduce(0) { $0 + $1.count }
-            if saved > 0 { Label("已保存 \(saved) 项修改", systemImage: "checkmark.circle").font(.caption).foregroundStyle(accent) }
-        }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+        }.padding(9).frame(maxWidth: .infinity, alignment: .leading)
             .background(accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
             .accessibilityElement(children: .contain)
     }
@@ -184,6 +192,12 @@ struct AssistantView: View {
                 }.menuStyle(.borderlessButton).font(.caption).accessibilityLabel("提问范围")
                     .help(assistant.allMaterials ? "包含录音与个人材料，实际读取范围按问题决定" : "引用片段优先作为本轮上下文")
                 Spacer(minLength: 0)
+                Button { showingPrivacy = true } label: { Image(systemName: "info.circle") }
+                    .buttonStyle(.plain).help("资料与模型发送说明").accessibilityLabel("资料与模型发送说明")
+                    .popover(isPresented: $showingPrivacy) {
+                        Text("资料保存在本机。提问时，完成任务所需的文字会发送给你配置的模型。")
+                            .font(.callout).padding(16).frame(width: 290)
+                    }
                 if !assistant.allMaterials {
                     Button { assistant.quote(model: model) } label: { Image(systemName: "text.badge.plus") }.buttonStyle(.plain).help("引用选中段落").accessibilityLabel("引用选中段落")
                         .disabled(model.focusSegmentID == nil && model.bulkSelection.isEmpty)
@@ -220,8 +234,7 @@ struct AssistantView: View {
                 }.padding(.horizontal, 8).padding(.bottom, 8)
             }.background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.secondary.opacity(0.20)))
-            Text("资料保存在本机 · 提问时按需发送文字给所配置的模型").font(.system(size: 11)).foregroundStyle(.secondary)
-        }.padding(12)
+        }.padding(10)
     }
 }
 
@@ -306,7 +319,10 @@ private struct AssistantRunView: View {
     @ObservedObject var assistant: AssistantModel
     let run: AssistantRun
     @UIState private var questionsExpanded = true
-    private var running: Bool { assistant.activeRun == run.id }
+    @UIState private var historyExpanded = false
+    @UIState private var readingAnswer = false
+    @Environment(\.assistantFontSize) private var fontSize
+    private var running: Bool { assistant.activeRun == run.id || ["queued", "running"].contains(run.state) }
     private var answer: String {
         if ["completed", "awaiting_input"].contains(run.state), let answer = run.result?.answer { return answer }
         let partial = assistant.output(run.id)
@@ -319,41 +335,66 @@ private struct AssistantRunView: View {
                 Text("听阅").fontWeight(.medium)
                 Text(running ? "生成中 · 待校验" : stateTitle).foregroundStyle(.secondary)
                 Spacer()
+                if !answer.isEmpty {
+                    Button { readingAnswer = true } label: { Image(systemName: "doc.text.magnifyingglass") }
+                        .buttonStyle(.plain).help("阅读与查找本次回答").accessibilityLabel("阅读与查找本次回答")
+                }
                 if !answer.isEmpty { Button { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(answer, forType: .string) } label: { Image(systemName: "doc.on.doc") }.buttonStyle(.plain).help("复制回答").accessibilityLabel("复制回答") }
             }.font(.caption)
-            if run.context?.historyOmitted == true { Text("历史较长，本次仅参考最近的部分对话。").font(.caption).foregroundStyle(.secondary) }
-            if let intent = run.context?.taskIntent {
-                Label(intent.title, systemImage: intent.reading == "none" ? "bubble.left" : "doc.text.magnifyingglass")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if run.context?.taskIntent?.reading != "none", let scope = run.context?.scopeTitle {
-                Text(scope).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-            }
-            if let result = run.result {
-                ForEach(result.allChanges, id: \.id) { change in AssistantResultCard(model: model, assistant: assistant, change: change) }
-            }
-            if !answer.isEmpty {
-                if !running && !(run.result?.allChanges.isEmpty ?? true) {
-                    DisclosureGroup("结果说明") { AssistantMarkdown(text: answer) }.font(.caption)
+            if assistant.isHistoricalInterruption(run) {
+                DisclosureGroup(isExpanded: $historyExpanded) { content } label: {
+                    Text("查看这次任务与恢复入口").font(.caption).foregroundStyle(.secondary)
                 }
-                else if running || !["completed", "awaiting_input"].contains(run.state) { Text(answer).font(.system(size: 14)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true) }
-                else { AssistantMarkdown(text: answer) }
-            } else if running { Text("正在准备回复…").font(.callout).foregroundStyle(.secondary) }
-            if let result = run.result { details(result) }
-            if !running, let error = run.result?.error {
-                Label(error.message, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
-                if ["model_not_configured", "model_auth_failed", "model_request_rejected", "model_tool_unavailable", "model_context_exceeded"].contains(error.code) { Button("打开大模型配置") { model.showAISettings = true }.controlSize(.small) }
-            }
-            if !running, ["interrupted", "failed", "cancelled"].contains(run.state) {
-                HStack {
-                    Button("继续未完成任务") { Task { await assistant.resume(run.id, model: model) } }.disabled(assistant.activeRun != nil)
-                    Button("基于当前资料重新提问") {
-                        assistant.input = assistant.messages.first(where: { $0.id == run.messageID })?.content ?? ""
-                        assistant.focusRequest = UUID()
-                    }
-                }.font(.caption)
-            }
+            } else { content }
         }.frame(maxWidth: .infinity, alignment: .leading)
+            .sheet(isPresented: $readingAnswer) { AssistantAnswerReader(text: answer, title: running ? "当前输出 · 待校验" : "本次回答") }
+    }
+    @ViewBuilder private var content: some View {
+        if run.context?.historyOmitted == true { Text("历史较长，本次仅参考最近的部分对话。").font(.caption).foregroundStyle(.secondary) }
+        if let intent = run.context?.taskIntent {
+            Label(intent.title, systemImage: intent.reading == "none" ? "bubble.left" : "doc.text.magnifyingglass")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        if run.context?.taskIntent?.reading != "none", let scope = run.context?.scopeTitle {
+            Text(scope).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+        }
+        if let result = run.result {
+            ForEach(result.allChanges, id: \.id) { change in AssistantResultCard(model: model, assistant: assistant, change: change) }
+        }
+        if running {
+            let output = assistant.outputState(run.id)
+            if !output.completedBlocks.isEmpty {
+                DisclosureGroup("已保留的处理输出（\(output.completedBlocks.count)）") {
+                    ForEach(output.completedBlocks, id: \.blockID) { block in
+                        Text(block.text).font(.system(size: fontSize)).textSelection(.enabled).padding(.vertical, 5)
+                    }
+                }.font(.caption).foregroundStyle(.secondary)
+            }
+            if output.currentText.isEmpty { Text("正在准备本步回复…").font(.callout).foregroundStyle(.secondary) }
+            else { Text(output.currentText).font(.system(size: fontSize)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true) }
+        } else if !answer.isEmpty {
+            if !(run.result?.allChanges.isEmpty ?? true) {
+                let preview = AssistantMarkdownDocument(answer).blocks.flatMap(\.lines).map { String($0.text.characters) }.joined(separator: "\n")
+                Text(preview).font(.system(size: fontSize)).lineLimit(3).textSelection(.enabled)
+                    .help("使用上方阅读与查找按钮查看完整说明")
+            } else if !["completed", "awaiting_input"].contains(run.state) {
+                Text(answer).font(.system(size: fontSize)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            } else { AssistantMarkdown(text: answer).frame(maxWidth: 680, alignment: .leading) }
+        }
+        if let result = run.result { details(result) }
+        if !running, let error = run.result?.error {
+            Label(error.message, systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
+            if ["model_not_configured", "model_auth_failed", "model_request_rejected", "model_tool_unavailable", "model_context_exceeded"].contains(error.code) { Button("打开大模型配置") { model.showAISettings = true }.controlSize(.small) }
+        }
+        if !running, ["interrupted", "failed", "cancelled"].contains(run.state) {
+            HStack {
+                Button("继续这次任务") { Task { await assistant.resume(run.id, model: model) } }.disabled(assistant.activeRun != nil)
+                Button("重新提问这条指令") {
+                    assistant.input = assistant.messages.first(where: { $0.id == run.messageID })?.content ?? ""
+                    assistant.focusRequest = UUID()
+                }
+            }.font(.caption)
+        }
     }
     private var stateTitle: String { ["completed":"已完成", "awaiting_input":"需要补充", "cancelled":"已停止 · 输出未完成", "failed":"失败 · 输出未完成", "interrupted":"已中断 · 可继续"][run.state] ?? "准备中" }
     @ViewBuilder private func details(_ result: AssistantResult) -> some View {
