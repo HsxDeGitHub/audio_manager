@@ -37,7 +37,8 @@ if marker.exists():
 Path(prefix+'.json').write_text(json.dumps({'transcription':[{'offsets':{'from':1000,'to':2500},'text':'数据库事务'}]}))
 ''')
     speaker = tools / 'sherpa/bin/sherpa-onnx-offline-speaker-diarization'
-    script(speaker, "print('1.000 -- 2.500 speaker_00')\n")
+    speaker_arguments = base / 'speaker-arguments.json'
+    script(speaker, f"import json,sys\nfrom pathlib import Path\nPath({str(speaker_arguments)!r}).write_text(json.dumps(sys.argv[1:]))\nprint('1.000 -- 2.500 speaker_00')\n")
     def request(name, **updates):
         data = dict(jobID=name, recordingID='recording', runID='run', source=str(source), fingerprint=fingerprint,
                     toolsDirectory=str(tools), modelsDirectory=str(base), temporaryDirectory=str(base / 'temporary'), speakersOnly=False)
@@ -52,6 +53,17 @@ Path(prefix+'.json').write_text(json.dumps({'transcription':[{'offsets':{'from':
     assert events[2]['segments'][0]['start'] == 1
     assert not (base / 'temporary/success').exists()
     print('PASS 完整协议、毫秒转换和临时文件清理')
+
+    arguments = json.loads(speaker_arguments.read_text())
+    assert '--clustering.cluster-threshold=0.8' in arguments
+    assert not any(arg.startswith('--clustering.num-clusters=') for arg in arguments)
+    for count in (2, 3):
+        code, events = invoke(request(f'speaker-count-{count}', speakerCount=count))
+        assert code == 0 and events[-1]['kind'] == 'done', (code, events)
+        arguments = json.loads(speaker_arguments.read_text())
+        assert f'--clustering.num-clusters={count}' in arguments
+        assert not any(arg.startswith('--clustering.cluster-threshold=') for arg in arguments)
+    print('PASS 默认两人和指定人数传入识别器，自动判断使用聚类阈值')
 
     script(speaker, "import sys\nprint('injected speaker failure',file=sys.stderr)\nsys.exit(3)\n")
     code, events = invoke(request('speaker-failure'))

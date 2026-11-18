@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Darwin
 import Darwin
@@ -546,6 +547,71 @@ private func bodyData(_ request: URLRequest) -> Data? {
         #expect(app.backendUnavailable && app.store == nil && app.backendClient == nil)
         #expect(app.assistant.runs.first?.state == "interrupted" && app.assistant.client == nil)
         #expect(app.backendState.contains("连接中断"))
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["INTERVIEW_BACKEND_CONTRACT_INTEGRATION"] == "1"))
+    @MainActor func importingAudioPersistsConfirmedOptionsAndLeavesDuplicatesAlone() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("audio-import-\(UUID().uuidString)")
+        let library = root.appendingPathComponent("library")
+        let app = AppModel(dataDirectoryOverride: library)
+        defer { await app.shutdown(); try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let format = try #require(AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true))
+        func syntheticAudio(_ name: String, marker: Int16) throws -> URL {
+            let url = root.appendingPathComponent(name + ".wav")
+            let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1_600))
+            buffer.frameLength = buffer.frameCapacity
+            let channel = try #require(buffer.int16ChannelData)[0]
+            channel.update(repeating: 0, count: Int(buffer.frameLength))
+            channel[0] = marker
+            let file = try AVAudioFile(forWriting: url, settings: format.settings, commonFormat: .pcmFormatInt16, interleaved: true)
+            try file.write(from: buffer)
+            return url
+        }
+
+        let first = try syntheticAudio("合成双人", marker: 1)
+        let second = try syntheticAudio("合成自动", marker: 2)
+        let batch = try [syntheticAudio("合成甲", marker: 3), syntheticAudio("合成乙", marker: 4)]
+        await app.connectBackend()
+        let store = try #require(app.store)
+
+        app.prepareAudioImport([first])
+        let cancelled = try #require(app.audioImport)
+        #expect(cancelled.speakerCount == 2 && cancelled.title == "合成双人")
+        #expect(try await store.perform { try $0.recordings() }.isEmpty)
+        app.audioImport = nil
+        await app.confirmAudioImport(cancelled)
+        #expect(try await store.perform { try $0.recordings() }.isEmpty)
+
+        app.prepareAudioImport([first])
+        var confirmed = try #require(app.audioImport)
+        confirmed.title = " 自定义名称 "
+        await app.confirmAudioImport(confirmed)
+        app.prepareAudioImport([second])
+        var automatic = try #require(app.audioImport)
+        automatic.speakerCount = nil
+        await app.confirmAudioImport(automatic)
+        app.prepareAudioImport(batch)
+        var multiple = try #require(app.audioImport)
+        #expect(multiple.speakerCount == 2)
+        multiple.speakerCount = 3
+        await app.confirmAudioImport(multiple)
+
+        app.prepareAudioImport([first])
+        var duplicate = try #require(app.audioImport)
+        duplicate.title = "重复导入名称"
+        duplicate.speakerCount = 1
+        await app.confirmAudioImport(duplicate)
+
+        let stored = try await store.perform { try $0.recordings() }
+        #expect(stored.count == 4 && stored.allSatisfy { $0.state == .idle })
+        #expect(stored.first { $0.path == first.path }?.title == "自定义名称")
+        #expect(stored.first { $0.path == first.path }?.speakerCount == 2)
+        let autoRecording = try #require(stored.first { $0.path == second.path })
+        #expect(autoRecording.title == "合成自动" && autoRecording.speakerCount == nil)
+        #expect(Set(stored.filter { $0.speakerCount == 3 }.map(\.title)) == ["合成甲", "合成乙"])
+        #expect(app.audioImport == nil && app.alert == nil && app.notice.contains("1 份已在资料库中"))
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["INTERVIEW_BACKEND_CONTRACT_INTEGRATION"] == "1"))

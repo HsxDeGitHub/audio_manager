@@ -71,6 +71,11 @@ struct LibraryView: View {
         }
         .sheet(isPresented: $model.showAbout) { AboutView() }
         .sheet(isPresented: $model.showSettings) { ModelSettingsView(model: model, installer: model.installer) }
+        .sheet(item: $model.audioImport) { draft in
+            AudioImportView(draft: draft, installer: installer) { confirmed in
+                Task { await model.confirmAudioImport(confirmed) }
+            }
+        }
         .sheet(isPresented: $model.showAISettings) { AISettingsView(model: model) }
         .sheet(item: $renaming) { recording in
             VStack(alignment: .leading, spacing: 18) {
@@ -121,7 +126,7 @@ struct LibraryView: View {
                     }
                     if let url { urls.append(url) }
                 }
-                await model.importFiles(urls)
+                model.prepareAudioImport(urls)
             }
             return true
         }

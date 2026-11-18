@@ -412,10 +412,8 @@ struct SpeakerSettingsView: View {
             Text("合并仅改变归属，文字与时间轴保持原样。可撤销。名称按目标说话人保留。").font(.caption2).foregroundStyle(.secondary)
             Divider()
             if let recording = model.selected {
-                Picker("实际人数", selection: Binding(get: { recording.speakerCount ?? 0 }, set: { value in Task { await model.changeSpeakerCount(value == 0 ? nil : value) } })) {
-                    Text("自动判断").tag(0)
-                    ForEach(1...12, id: \.self) { Text("\($0) 人").tag($0) }
-                }.disabled(recording.state.isRunning || recording.state == .queued)
+                SpeakerCountPicker(selection: Binding(get: { recording.speakerCount }, set: { value in Task { await model.changeSpeakerCount(value) } }))
+                    .disabled(recording.state.isRunning || recording.state == .queued)
                 Button("重新区分说话人") { Task { await model.enqueue(recording.id, speakersOnly: true) } }.disabled(recording.state.isRunning || recording.state == .queued)
                 Text("重新区分会保留人工归属与名称，并重新开始修改历史。").font(.caption2).foregroundStyle(.secondary)
             }

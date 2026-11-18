@@ -6,6 +6,23 @@ import AudioCore
 
 enum LibrarySection { case audio, documents }
 
+struct AudioImportDraft: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+    var speakerCount: Int? = 2
+    var title: String
+
+    init(urls: [URL]) {
+        self.urls = urls
+        title = urls.count == 1 ? urls[0].deletingPathExtension().lastPathComponent : ""
+    }
+
+    func title(for url: URL) -> String {
+        let edited = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return urls.count == 1 && !edited.isEmpty ? edited : url.deletingPathExtension().lastPathComponent
+    }
+}
+
 private struct QueuedJob { let request: WorkerRequest; var recordingID: String { request.recordingID }; var speakersOnly: Bool { request.speakersOnly } }
 
 @MainActor
@@ -23,6 +40,7 @@ final class AppModel: ObservableObject {
     @Published var showSettings = false
     @Published var alert: String?
     @Published var notice = ""
+    @Published var audioImport: AudioImportDraft?
     @Published var importing = false
     @Published var activeJobID: String?
     @Published var activeRecordingID: String?
@@ -315,19 +333,27 @@ final class AppModel: ObservableObject {
         }
     }
     func pickFiles() {
+        guard !importing, audioImport == nil else { return }
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
         panel.allowedContentTypes = [UTType.mp3, UTType.mpeg4Audio, UTType.wav, UTType(filenameExtension: "flac") ?? .audio]
         panel.message = "音频仅被引用，原文件不会被复制或修改。"
         guard panel.runModal() == .OK else { return }
-        Task { await importFiles(panel.urls) }
+        prepareAudioImport(panel.urls)
     }
-    func importFiles(_ urls: [URL]) async {
-        guard store != nil else { return }
-        guard !importing else { alert = "正在导入上一批音频，请稍后再拖入。"; return }
-        importing = true; defer { importing = false }
+    func prepareAudioImport(_ urls: [URL]) {
+        guard !urls.isEmpty, !shuttingDown, audioImport == nil else { return }
+        guard !importing else { alert = "正在导入上一批音频，请稍后再试。"; return }
+        guard store != nil else { alert = "本地服务尚未连接，暂时无法导入音频。"; return }
+        audioImport = AudioImportDraft(urls: urls)
+    }
+    func confirmAudioImport(_ draft: AudioImportDraft) async {
+        guard audioImport?.id == draft.id, !importing, !shuttingDown else { return }
+        importing = true; audioImport = nil
+        defer { importing = false }
+        guard let store else { alert = "本地服务尚未连接，暂时无法导入音频。"; return }
         var imported = 0, duplicates = 0
         var failures: [String] = []
-        for url in urls {
+        for url in draft.urls {
             guard ["mp3", "m4a", "wav", "flac"].contains(url.pathExtension.lowercased()) else {
                 failures.append("\(url.lastPathComponent)：暂不支持此格式"); continue
             }
@@ -341,9 +367,10 @@ final class AppModel: ObservableObject {
                 let length = try await AVURLAsset(url: url).load(.duration).seconds
                 guard length.isFinite, length > 0 else { throw AudioError.message("无法读取音频时长") }
                 let bookmark = try url.bookmarkData(options: [.minimalBookmark], includingResourceValuesForKeys: nil, relativeTo: nil)
-                let recording = Recording(title: url.deletingPathExtension().lastPathComponent, path: url.path,
-                                          bookmark: bookmark, fingerprint: fingerprint, duration: length)
-                try await store?.perform { try $0.save(recording) }; await reload(); imported += 1
+                let recording = Recording(title: draft.title(for: url), path: url.path, bookmark: bookmark,
+                                          fingerprint: fingerprint, duration: length, speakerCount: draft.speakerCount)
+                guard self.store === store else { throw BackendClientError.unavailable }
+                try await store.perform { try $0.save(recording) }; await reload(); imported += 1
                 if selectedID == nil { await select(recording.id) }
                 if ready { await enqueue(recording.id) }
             } catch { failures.append("\(url.lastPathComponent)：\(error.localizedDescription)") }
